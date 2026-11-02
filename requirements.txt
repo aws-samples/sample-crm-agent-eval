@@ -31,7 +31,7 @@ jsonschema==4.26.0
 librt==0.16.0
 MarkupSafe==3.0.4
 mcp-types==2.1.1
-mcp==2.1.1
+mcp==2.2.0
 moto==5.2.5
 mypy_extensions==1.1.0
 mypy==2.4.1
