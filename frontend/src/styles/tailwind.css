@@ -1,0 +1,154 @@
+/*
+ * Tailwind entry point. Import this once from the app entry; it pulls in the token layer first so
+ * every generated utility resolves against a `var(--token)` value.
+ *
+ * Preflight is enabled because the `border-*` and form-control utilities depend on it. The base
+ * layer below adds only what preflight leaves to the application: the token type stack and colours
+ * on the document itself, and the preflight defaults the components were built against.
+ */
+
+@import "./tokens.css";
+
+@import "tailwindcss" source(none);
+
+@config "../../tailwind.config.ts";
+
+@source "../**/*.{ts,tsx,jsx}";
+@source "../../index.html";
+/* A placeholder quoted in a source comment, not a class. */
+@source not inline("max-w-[var(…)]");
+
+/*
+ * The type scale is `--text-*` from `tokens.css` alone: clearing the default namespace keeps its
+ * paired `--text-*--line-height` values off `text-*`, so line height stays inherited. The two greys
+ * are the preflight defaults the components were built against.
+ */
+@theme {
+  --text-*: initial;
+  --color-gray-200: #e5e7eb;
+  --color-gray-400: #9ca3af;
+}
+
+@layer base {
+  /* Preflight defaults the components rely on: a neutral default border colour, a muted
+     placeholder, the browser's own field background and option padding, the search-field
+     appearance, and the pointer cursor on enabled buttons. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-gray-400);
+  }
+
+  input:where(:not([type="button"], [type="reset"], [type="submit"])),
+  select,
+  optgroup,
+  textarea {
+    background-color: revert;
+  }
+
+  option {
+    padding: revert;
+  }
+
+  [type="search"] {
+    appearance: textfield;
+    outline-offset: -2px;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* The sole source of the document's type stack and colours; `src/index.css` declares none. */
+  body {
+    background-color: var(--surface-base);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+  }
+
+  /* Tabular figures wherever the numeric face is used, so columns of digits align. */
+  .font-numeric {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/*
+ * Tailwind 3 semantics for the few utilities whose output changed in Tailwind 4, so the rendered UI
+ * is unchanged. `max-w-prose` reads the prose measure token
+ * rather than a fixed `65ch`. `outline-none` keeps a transparent outline, which
+ * forced-colours mode still paints. `space-y-*` and `divide-*` space and rule each child from its
+ * previous sibling, so a `[hidden]` child, or an absolutely positioned last child, adds no gap. Each
+ * `:where()` rule cancels the zero-specificity Tailwind 4 rule it replaces. `tailwind.test.ts`
+ * fails when source uses a `space-y-*`, `divide-y` or `divide-border-*` class with no rule here.
+ */
+@layer utilities {
+  .max-w-prose {
+    max-width: var(--measure-prose);
+  }
+
+  .outline-none,
+  .focus-visible\:outline-none:focus-visible {
+    outline: 2px solid transparent;
+    outline-offset: 2px;
+  }
+
+  :where(
+      .space-y-1 > :not(:last-child),
+      .space-y-2 > :not(:last-child),
+      .space-y-3 > :not(:last-child),
+      .space-y-4 > :not(:last-child),
+      .space-y-5 > :not(:last-child),
+      .space-y-7 > :not(:last-child)
+    ) {
+    margin-block-end: 0;
+  }
+  .space-y-1 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-1);
+    margin-bottom: 0;
+  }
+  .space-y-2 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-2);
+    margin-bottom: 0;
+  }
+  .space-y-3 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-3);
+    margin-bottom: 0;
+  }
+  .space-y-4 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-4);
+    margin-bottom: 0;
+  }
+  .space-y-5 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-5);
+    margin-bottom: 0;
+  }
+  .space-y-7 > :not([hidden]) ~ :not([hidden]) {
+    margin-top: var(--space-7);
+    margin-bottom: 0;
+  }
+
+  :where(.divide-y > :not(:last-child)) {
+    border-top-width: 0;
+    border-bottom-width: 0;
+  }
+  .divide-y > :not([hidden]) ~ :not([hidden]) {
+    border-top-width: 1px;
+    border-bottom-width: 0;
+  }
+  :where(.divide-border-subtle > :not(:last-child)) {
+    border-color: var(--color-gray-200);
+  }
+  .divide-border-subtle > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--border-subtle);
+  }
+}

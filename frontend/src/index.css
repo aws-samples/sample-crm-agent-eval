@@ -1,0 +1,40 @@
+/*
+ * Global baseline. Holds only what belongs to the document rather than to a component: the
+ * keyboard focus ring and the visually-hidden utility assistive technology depends on. Component
+ * appearance lives with the component, as Tailwind utilities resolving against `styles/tokens.css`;
+ * a component source referencing a class defined in this file is a defect.
+ *
+ * Absent here, because `styles/tailwind.css` is the sole source of each: `color-scheme`
+ * and the colour custom properties (owned by `tokens.css`, which also carries the `[data-theme="dark"]`
+ * values), `body`'s type and colours, `box-sizing`, and `button { font }` (Tailwind preflight).
+ * `.sr-only` is likewise absent — it is a Tailwind core utility, and `AppShell`'s
+ * `focus:not-sr-only` variant only composes with that implementation.
+ */
+
+@layer base {
+  /*
+   * Never remove the focus ring — keyboard navigation depends on it being visible on every
+   * focusable element, so it is set once here rather than per component.
+   */
+  :focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring-color);
+    outline-offset: var(--focus-ring-offset);
+  }
+
+  /*
+   * Visually hidden but still available to screen readers (WCAG-recommended clip pattern) — never
+   * `display: none` or `visibility: hidden`, both of which remove content from assistive tech too.
+   * `DiffView` renders its per-row status word ("changed"/"added"/"removed") under this class.
+   */
+  .visually-hidden {
+    position: absolute;
+    width: var(--space-px);
+    height: var(--space-px);
+    padding: var(--space-0);
+    margin: calc(-1 * var(--space-px));
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}

@@ -1,0 +1,355 @@
+{
+  "_provenance": "Recorded live 2026-09-30: one billable call, --profile default --region us-east-1, IAM-user SigV4, through the vendor SDK over an httpx2 transport that tees the raw response body. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "anthropic",
+  "model_profile": "global.anthropic.claude-sonnet-5-5",
+  "recorded_on": "2026-09-30",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/model/global.anthropic.claude-sonnet-5-5/invoke-with-response-stream",
+    "body": {
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with one short sentence confirming the CRM pipeline is healthy."
+        }
+      ],
+      "output_config": {
+        "effort": "low"
+      },
+      "thinking": {
+        "type": "adaptive"
+      },
+      "anthropic_version": "bedrock-2023-05-31"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/vnd.amazon.eventstream",
+    "body_b64": "AAADDQAAAEv6KPFuCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHRnlkQ0lzSW0xbGMzTmhaMlVpT25zaWJXOWtaV3dpT2lKamJHRjFaR1V0YzI5dWJtVjBMVFV0TlNJc0ltbGtJam9pYlhOblgySmtjbXRmZUd4b1puSnljWFpsWnpaeWREUmtaWFJ1Y0dkeWNHSjZiRGRoWTNKMVp6SjZiblZyWVhwdmIyUmhOblZpWldOb1lXZHRjU0lzSW5SNWNHVWlPaUp0WlhOellXZGxJaXdpY205c1pTSTZJbUZ6YzJsemRHRnVkQ0lzSW1OdmJuUmxiblFpT2x0ZExDSmpiMjUwWVdsdVpYSWlPbTUxYkd3c0luTjBiM0JmY21WaGMyOXVJanB1ZFd4c0xDSnpkRzl3WDNObGNYVmxibU5sSWpwdWRXeHNMQ0p6ZEc5d1gyUmxkR0ZwYkhNaU9tNTFiR3dzSW5WellXZGxJanA3SW1sdWNIVjBYM1J2YTJWdWN5STZNek1zSW1OaFkyaGxYMk55WldGMGFXOXVYMmx1Y0hWMFgzUnZhMlZ1Y3lJNk1Dd2lZMkZqYUdWZmNtVmhaRjlwYm5CMWRGOTBiMnRsYm5NaU9qQXNJbU5oWTJobFgyTnlaV0YwYVc5dUlqcDdJbVZ3YUdWdFpYSmhiRjgxYlY5cGJuQjFkRjkwYjJ0bGJuTWlPakFzSW1Wd2FHVnRaWEpoYkY4eGFGOXBibkIxZEY5MGIydGxibk1pT2pCOUxDSnZkWFJ3ZFhSZmRHOXJaVzV6SWpvMExDSnpaWEoyYVdObFgzUnBaWElpT2lKemRHRnVaR0Z5WkNKOWZYMD0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUSJ9YPhifgAAAQ8AAABLzSADBQs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHRnlkQ0lzSW1sdVpHVjRJam93TENKamIyNTBaVzUwWDJKc2IyTnJJanA3SW5SNWNHVWlPaUowWlhoMElpd2lkR1Y0ZENJNklpSjlmUT09IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVlcifSFS6msAAAEmAAAASwHxTnALOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSkpJR05oYmlkMElHTnZibVlpZlgwPSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaMDEyMzQ1NjcifT2zPH8AAAD6AAAAS4aoD40LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSnBjbTBnZEdoaGRDSjlmUT09IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0In0/EqGoAAAA/wAAAEtOSID9CzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlzSUhOcGJtTmxJbjE5IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDIn1hL0GfAAABBwAAAEv9UEjECzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlnU1NCb1lYWmxJRzV2SUdGalkyVnpjeUIwYnlCNWIzVnlJRU5TSW4xOSIsInAiOiJhYmNkZWZnaGkifbe5I5sAAAECAAAASzWwx7QLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSk5JSEFpZlgwPSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUoifZVLm5gAAAEeAAAAS5CgvTcLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSnBjR1ZzYVc1bElHOXlJR2wwY3lCemRHRjBkWE1nWkdGMFlTSjlmUT09IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGIn2fJaNFAAAA5AAAAEtZeCZuCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUl1SW4xOSIsInAiOiJhYmNkZWZnaGlqIn2myoOUAAABGwAAAEtYQDJHCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlnU1dZZ2VXOTFJSE5vWVhKbEluMTkiLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWVyJ9gM5DdAAAAR8AAABLrcCUhws6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lJZ2RHaGxJRzFsZENKOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0In2Am77lAAABIgAAAEv0ceiwCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUp5YVdOeklHOXlJR3h2WnlKOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjMifUlN+ewAAAEeAAAAS5CgvTcLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSnpMQ0JKSnlKOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3In3+foYvAAABAwAAAEsI0O4ECzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUp0SW4xOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OTyJ9HLJhqAAAARAAAABLL5ADVgs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lJZ2FHRndjSGtnZEc4Z2FHVnNjQ0o5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdIIn2NJunCAAABJQAAAEtGUTSgCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlnYVc1MFpYSndjbVYwSUhSb1pXMHVJbjE5IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIifbWIevEAAADPAAAAS+9pOHsLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOXpkRzl3SWl3aWFXNWtaWGdpT2pCOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlMifVY1aNsAAAIQAAAAS6kEcfgLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjlrWld4MFlTSXNJbVJsYkhSaElqcDdJbk4wYjNCZmNtVmhjMjl1SWpvaVpXNWtYM1IxY200aUxDSnpkRzl3WDNObGNYVmxibU5sSWpwdWRXeHNMQ0p6ZEc5d1gyUmxkR0ZwYkhNaU9tNTFiR3dzSW1OdmJuUmhhVzVsY2lJNmJuVnNiSDBzSW5WellXZGxJanA3SW1sdWNIVjBYM1J2YTJWdWN5STZNek1zSW1OaFkyaGxYMk55WldGMGFXOXVYMmx1Y0hWMFgzUnZhMlZ1Y3lJNk1Dd2lZMkZqYUdWZmNtVmhaRjlwYm5CMWRGOTBiMnRsYm5NaU9qQXNJbTkxZEhCMWRGOTBiMnRsYm5NaU9qVXlMQ0p2ZFhSd2RYUmZkRzlyWlc1elgyUmxkR0ZwYkhNaU9uc2lkR2hwYm10cGJtZGZkRzlyWlc1eklqb3dmWDE5IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDUiffnguiQAAAFeAAAAS8hT5X4LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjl6ZEc5d0lpd2lZVzFoZW05dUxXSmxaSEp2WTJzdGFXNTJiMk5oZEdsdmJrMWxkSEpwWTNNaU9uc2lhVzV3ZFhSVWIydGxia052ZFc1MElqb3pNeXdpYjNWMGNIVjBWRzlyWlc1RGIzVnVkQ0k2TlRJc0ltbHVkbTlqWVhScGIyNU1ZWFJsYm1ONUlqbzVOREVzSW1acGNuTjBRbmwwWlV4aGRHVnVZM2tpT2pVd05uMTkiLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTiJ9it5CHQ=="
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "stop_reason": "end_turn",
+    "blocks": [
+      "text"
+    ]
+  },
+  "decoded_events": [
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-sonnet-5-5",
+          "id": "msg_bdrk_xlhfrrqveg6rt4detnpgrpbzl7acrug2znukazooda6ubechagmq",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "container": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 33,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 4,
+            "service_tier": "standard"
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "I can't conf"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "irm that"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": ", since"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " I have no access to your CR"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "M p"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "ipeline or its status data"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "."
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " If you share"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " the met"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "rics or log"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "s, I'"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "m"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " happy to help"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " interpret them."
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn",
+          "stop_sequence": null,
+          "stop_details": null,
+          "container": null
+        },
+        "usage": {
+          "input_tokens": 33,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 52,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 33,
+          "outputTokenCount": 52,
+          "invocationLatency": 941,
+          "firstByteLatency": 506
+        }
+      }
+    }
+  ]
+}

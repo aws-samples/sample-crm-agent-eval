@@ -1,0 +1,250 @@
+{
+  "_provenance": "Recorded live 2026-10-25: one billable call, --region us-east-1, assumed-role SigV4 from an aws-vault session, through the shipped adapter's request builder and the vendor SDK over an httpx2 transport that tees the raw response body; the output-token cap was lowered to 256 for the recording. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "anthropic",
+  "model_profile": "global.anthropic.claude-haiku-5-5",
+  "recorded_on": "2026-10-25",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/model/global.anthropic.claude-haiku-5-5/invoke-with-response-stream",
+    "body": {
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply with one short sentence confirming the CRM pipeline is healthy."
+        }
+      ],
+      "output_config": {
+        "effort": "low"
+      },
+      "thinking": {
+        "type": "adaptive"
+      },
+      "anthropic_version": "bedrock-2023-05-31"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/vnd.amazon.eventstream",
+    "body_b64": "AAADAgAAAEt4eGa/CzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHRnlkQ0lzSW0xbGMzTmhaMlVpT25zaWJXOWtaV3dpT2lKamJHRjFaR1V0YUdGcGEzVXROUzAxSWl3aWFXUWlPaUp0YzJkZlltUnlhMTgxY0d0eWFHOXJaSHB6Y0hsaFpHVnVkbkJ6ZUROc1pXNXJjSFI0WVc5MGFuZGxlSEl6YnpWMGNEZGhaalJsZVdKbWNEWmhJaXdpZEhsd1pTSTZJbTFsYzNOaFoyVWlMQ0p5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2VzEwc0ltTnZiblJoYVc1bGNpSTZiblZzYkN3aWMzUnZjRjl5WldGemIyNGlPbTUxYkd3c0luTjBiM0JmYzJWeGRXVnVZMlVpT201MWJHd3NJbk4wYjNCZlpHVjBZV2xzY3lJNmJuVnNiQ3dpZFhOaFoyVWlPbnNpYVc1d2RYUmZkRzlyWlc1eklqb3pNeXdpWTJGamFHVmZZM0psWVhScGIyNWZhVzV3ZFhSZmRHOXJaVzV6SWpvd0xDSmpZV05vWlY5eVpXRmtYMmx1Y0hWMFgzUnZhMlZ1Y3lJNk1Dd2lZMkZqYUdWZlkzSmxZWFJwYjI0aU9uc2laWEJvWlcxbGNtRnNYelZ0WDJsdWNIVjBYM1J2YTJWdWN5STZNQ3dpWlhCb1pXMWxjbUZzWHpGb1gybHVjSFYwWDNSdmEyVnVjeUk2TUgwc0ltOTFkSEIxZEY5MGIydGxibk1pT2pJc0luTmxjblpwWTJWZmRHbGxjaUk2SW5OMFlXNWtZWEprSW4xOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUYifUu8hQ8AAADrAAAAS9sosb8LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOXpkR0Z5ZENJc0ltbHVaR1Y0SWpvd0xDSmpiMjUwWlc1MFgySnNiMk5ySWpwN0luUjVjR1VpT2lKMFpYaDBJaXdpZEdWNGRDSTZJaUo5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtIn23H8kBAAAA+wAAAEu7yCY9CzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUpKSUdOaGJpSjlmUT09IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHkifSrChX8AAADzAAAAS4u4bfwLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSW5kQ0JqYjI1bWFYSnRJSFJvWVhRc0luMTkiLCJwIjoiYWJjZGUifQdRAzsAAAEcAAAAS+pg7lcLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWRHVjRkRjlrWld4MFlTSXNJblJsZUhRaU9pSWdjMmx1WTJVZ1NTQmtiMjRuZENCb1lYWmxJR0ZqWTJWemN5QjBieUI1YjNWeUluMTkiLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1diJ9eLFC0QAAAPUAAABLBPiYXAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lJZ1ExSk5JSEJwY0dWc2FXNWxJRzl5SW4xOSIsInAiOiJhYmNkZWZnIn1F88n/AAABCQAAAEtCYPalCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlnWVc1NUlHUmhkR0VnWVdKdmRYUWdhWFJ6SW4xOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2dyJ99bUlXQAAAQQAAABLuvAyFAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pZEdWNGRGOWtaV3gwWVNJc0luUmxlSFFpT2lJZ1kzVnljbVZ1ZENKOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNEIn0XtDsyAAABFgAAAEug0Pb2CzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lkR1Y0ZEY5a1pXeDBZU0lzSW5SbGVIUWlPaUlnYzNSaGRIVnpMaUo5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVYifSf5iuQAAADEAAAAS5i5CWoLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOXpkRzl3SWl3aWFXNWtaWGdpT2pCOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdIIn38Mi/+AAACDAAAAEsMFAt7CzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5a1pXeDBZU0lzSW1SbGJIUmhJanA3SW5OMGIzQmZjbVZoYzI5dUlqb2laVzVrWDNSMWNtNGlMQ0p6ZEc5d1gzTmxjWFZsYm1ObElqcHVkV3hzTENKemRHOXdYMlJsZEdGcGJITWlPbTUxYkd3c0ltTnZiblJoYVc1bGNpSTZiblZzYkgwc0luVnpZV2RsSWpwN0ltbHVjSFYwWDNSdmEyVnVjeUk2TXpNc0ltTmhZMmhsWDJOeVpXRjBhVzl1WDJsdWNIVjBYM1J2YTJWdWN5STZNQ3dpWTJGamFHVmZjbVZoWkY5cGJuQjFkRjkwYjJ0bGJuTWlPakFzSW05MWRIQjFkRjkwYjJ0bGJuTWlPak16TENKdmRYUndkWFJmZEc5clpXNXpYMlJsZEdGcGJITWlPbnNpZEdocGJtdHBibWRmZEc5clpXNXpJam93ZlgxOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaMDEifQKAzyAAAAFsAAAASxOyDpgLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjl6ZEc5d0lpd2lZVzFoZW05dUxXSmxaSEp2WTJzdGFXNTJiMk5oZEdsdmJrMWxkSEpwWTNNaU9uc2lhVzV3ZFhSVWIydGxia052ZFc1MElqb3pNeXdpYjNWMGNIVjBWRzlyWlc1RGIzVnVkQ0k2TXpNc0ltbHVkbTlqWVhScGIyNU1ZWFJsYm1ONUlqb3hNelV4TENKbWFYSnpkRUo1ZEdWTVlYUmxibU41SWpveE1UYzJmWDA9IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUFFSU1RVVldYIn04b+ol"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "stop_reason": "end_turn",
+    "blocks": [
+      "text"
+    ]
+  },
+  "decoded_events": [
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-haiku-5-5",
+          "id": "msg_bdrk_5pkrhokdzspyadenvpsx3lenkptxaotjwexr3o5tp7af4eybfp6a",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "container": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 33,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 2,
+            "service_tier": "standard"
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "text",
+          "text": ""
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "I can"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": "'t confirm that,"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " since I don't have access to your"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " CRM pipeline or"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " any data about its"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " current"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "text_delta",
+          "text": " status."
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "end_turn",
+          "stop_sequence": null,
+          "stop_details": null,
+          "container": null
+        },
+        "usage": {
+          "input_tokens": 33,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 33,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 33,
+          "outputTokenCount": 33,
+          "invocationLatency": 1351,
+          "firstByteLatency": 1176
+        }
+      }
+    }
+  ]
+}

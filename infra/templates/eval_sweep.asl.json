@@ -1,0 +1,310 @@
+{
+  "Comment": "eval_sweep: Init -> Start -> Seed -> RunTasks -> Aggregate -> Teardown -> Finalize; a refused Start or Finalize ends at NotThisRunsExecution",
+  "StartAt": "Init",
+  "TimeoutSeconds": 86400,
+  "States": {
+    "Init": {
+      "Type": "Pass",
+      "Parameters": {
+        "run_id.$": "$.run_id",
+        "error": null,
+        "teardown_error": null
+      },
+      "Next": "Start"
+    },
+    "Start": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${sweep_control_arn}",
+        "Payload": {
+          "step": "start",
+          "run_id.$": "$.run_id",
+          "execution_arn.$": "$$.Execution.Id"
+        }
+      },
+      "ResultSelector": {
+        "refused.$": "$.Payload.refused",
+        "cancelled_before_start.$": "$.Payload.cancelled_before_start",
+        "task_refs.$": "$.Payload.task_refs"
+      },
+      "ResultPath": "$.start",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Teardown"
+        }
+      ],
+      "Next": "IsRefused"
+    },
+    "IsRefused": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.start.refused",
+          "BooleanEquals": true,
+          "Next": "NotThisRunsExecution"
+        }
+      ],
+      "Default": "IsCancelled"
+    },
+    "IsCancelled": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.start.cancelled_before_start",
+          "BooleanEquals": true,
+          "Next": "Aggregate"
+        }
+      ],
+      "Default": "Seed"
+    },
+    "Seed": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${sweep_control_arn}",
+        "Payload": {
+          "step": "seed",
+          "run_id.$": "$.run_id"
+        }
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Teardown"
+        }
+      ],
+      "Next": "RunTasks"
+    },
+    "RunTasks": {
+      "Type": "Map",
+      "ItemsPath": "$.start.task_refs",
+      "ItemSelector": {
+        "run_id.$": "$.run_id",
+        "arm_index.$": "$$.Map.Item.Value.arm_index",
+        "repeat_index.$": "$$.Map.Item.Value.repeat_index",
+        "task_id.$": "$$.Map.Item.Value.task_id"
+      },
+      "MaxConcurrency": 1,
+      "ResultPath": null,
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "RunTask",
+        "States": {
+          "RunTask": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${sweep_task_arn}",
+              "Payload": {
+                "run_id.$": "$.run_id",
+                "arm_index.$": "$.arm_index",
+                "repeat_index.$": "$.repeat_index",
+                "task_id.$": "$.task_id"
+              }
+            },
+            "TimeoutSeconds": 330,
+            "ResultSelector": {
+              "item_status.$": "$.Payload.item_status"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.AWSLambdaException",
+                  "Lambda.SdkClientException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 2,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.item_error",
+                "Next": "RecordItemFailure"
+              }
+            ],
+            "End": true
+          },
+          "RecordItemFailure": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${sweep_control_arn}",
+              "Payload": {
+                "step": "item_failed",
+                "run_id.$": "$.run_id",
+                "arm_index.$": "$.arm_index",
+                "repeat_index.$": "$.repeat_index",
+                "task_id.$": "$.task_id",
+                "error.$": "$.item_error"
+              }
+            },
+            "ResultPath": null,
+            "Retry": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Aggregate"
+        }
+      ],
+      "Next": "Aggregate"
+    },
+    "Aggregate": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${sweep_control_arn}",
+        "Payload": {
+          "step": "aggregate",
+          "run_id.$": "$.run_id",
+          "error.$": "$.error"
+        }
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "Teardown"
+        }
+      ],
+      "Next": "Teardown"
+    },
+    "Teardown": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${sweep_control_arn}",
+        "Payload": {
+          "step": "teardown",
+          "run_id.$": "$.run_id",
+          "execution_arn.$": "$$.Execution.Id"
+        }
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.teardown_error",
+          "Next": "Finalize"
+        }
+      ],
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${sweep_control_arn}",
+        "Payload": {
+          "step": "finalize",
+          "run_id.$": "$.run_id",
+          "execution_arn.$": "$$.Execution.Id",
+          "error.$": "$.error",
+          "teardown_error.$": "$.teardown_error"
+        }
+      },
+      "ResultSelector": {
+        "refused.$": "$.Payload.refused"
+      },
+      "ResultPath": "$.finalize",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 5,
+          "BackoffRate": 2
+        }
+      ],
+      "Next": "IsFinalized"
+    },
+    "IsFinalized": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.finalize.refused",
+          "BooleanEquals": true,
+          "Next": "NotThisRunsExecution"
+        }
+      ],
+      "Default": "Done"
+    },
+    "NotThisRunsExecution": {
+      "Type": "Fail",
+      "Error": "SweepExecutionRefused",
+      "Cause": "Another execution owns this evaluation run, or the run is terminal; nothing was changed."
+    },
+    "Done": {
+      "Type": "Succeed"
+    }
+  }
+}

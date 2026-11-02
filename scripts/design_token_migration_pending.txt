@@ -1,0 +1,3 @@
+# Files awaiting their re-skin task. Ratchet: this list may only
+# shrink. check_design_tokens FAILS on an entry that no longer violates, so a line cannot
+# outlive its purpose. Remove the entry in the same change that fixes the file.

@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: MIT
+#
+# Per-model capability matrix: the runtime authority for which tuning parameters may be sent to
+# which model. Values are taken from AWS documentation; `provenance` at the end lists the sources.
+# The schema is enforced by tests/unit/test_model_capabilities.py. Effort is the only tuning axis:
+# the loader rejects a `temperature` key in any model entry.
+
+schema_version: 1
+
+# How each family expresses "effort" in a request. Descriptive: no adapter reads this block.
+effort_parameter:
+  anthropic:
+    # Sibling of `thinking`, NOT a child. Placing effort inside `thinking` returns a
+    # ValidationException.
+    path: output_config.effort
+    sibling_of: thinking
+  openai:
+    path: reasoning.effort
+
+# An identical `effort` label across two families is not a claim of equivalent reasoning budget.
+# `compared_models` is keyed by tier, then by each family's model for that tier in
+# config/models.yaml. `rungs` mirrors each model's own `effort.values` below, and
+# tests/unit/test_model_capabilities.py asserts that they match. Read by no adapter; eval.matrix
+# cites this block in the rendered eval artifacts.
+effort_scale_comparability:
+  labels_are_equivalent_across_families: false
+  compared_models:
+    supervisor:
+      anthropic.claude-sonnet-5-5:
+        rungs: [low, medium, high]
+        default: high
+      openai.gpt-6.1-sol:
+        rungs: [none, low, medium, high, xhigh, max]
+        default: medium
+    subagent:
+      anthropic.claude-sonnet-5-5:
+        rungs: [low, medium, high]
+        default: high
+      openai.gpt-6.1-terra:
+        rungs: [none, low, medium, high, xhigh, max]
+        default: medium
+    tool:
+      anthropic.claude-haiku-5-5:
+        rungs: [low, medium, high, xhigh, max]
+        default: medium
+      openai.gpt-6-luna:
+        rungs: [none, low, medium, high, xhigh, max]
+        default: medium
+  statement: >-
+    An identical effort label across families is pinned for reproducibility and is not a
+    claim of equivalent reasoning budget. Supervisor: `medium` is the second rung of a three-rung
+    scale on anthropic.claude-sonnet-5-5 and the third rung of a six-rung scale (inferred) on
+    openai.gpt-6.1-sol. Subagent: `low` is the lowest rung of a three-rung scale on
+    anthropic.claude-sonnet-5-5 and the second rung of a six-rung scale (inferred), above `none`,
+    on openai.gpt-6.1-terra. Tool: `low` is the lowest rung of a five-rung scale on
+    anthropic.claude-haiku-5-5 and the second rung of a six-rung scale, above `none`, on
+    openai.gpt-6-luna. The scales differ in rung count and in the rung each pinned label occupies,
+    so any cross-family figure from a sweep pinned this way carries an unquantified comparability
+    caveat rather than an established equivalence.
+
+models:
+
+  anthropic.claude-opus-5-5:
+    family: anthropic
+    tier: supervisor
+    inference_profile: global.anthropic.claude-opus-5-5
+    api_path: messages
+    context_window_tokens: 1000000
+    max_output_tokens: 128000
+    effort:
+      supported: true
+      values: [low, medium, high, xhigh, max]
+      default: medium
+      notes: >-
+        Adaptive thinking is always on and cannot be disabled, so there is no disabled-thinking
+        effort cap on this model (the Opus 5 cap to `high` does not apply). effort stays at
+        output_config.effort, a sibling of `thinking`.
+      # No `capped_at_when_thinking_disabled`: thinking cannot be disabled on Opus 5.5, so no cap
+      # exists to describe. The absent key parses to a null cap.
+    thinking:
+      adaptive_default: true
+      # Adaptive only: thinking.type "disabled" is not accepted. Send {"type": "adaptive"}
+      # explicitly.
+      supported_types: [adaptive]
+      must_set_explicitly: true
+    prompt_cache_min_checkpoint_tokens: 512
+
+  anthropic.claude-sonnet-5-5:
+    family: anthropic
+    tier: subagent
+    # The tiers config/models.yaml may assign this model to as a default; absent means [tier].
+    assignable_tiers: [supervisor, subagent]
+    inference_profile: global.anthropic.claude-sonnet-5-5
+    api_path: messages
+    context_window_tokens: 1000000
+    max_output_tokens: 128000
+    effort:
+      supported: true
+      values: [low, medium, high]
+      default: high
+      # The model card lists xhigh and max, but the adaptive-thinking effort table restricts them
+      # to the Opus line, so they are excluded as disputed.
+      disputed_values:
+        - value: xhigh
+          disputed: true
+          excluded: true
+        - value: max
+          disputed: true
+          excluded: true
+      notes: >-
+        Requests using xhigh or max on this model are excluded pending a live probe.
+    thinking:
+      adaptive_default: true
+      # "disabled" is inferred accepted; no source states it. thinking.type "enabled" with
+      # budget_tokens is inferred rejected.
+      supported_types: [adaptive, disabled]
+      must_set_explicitly: true
+      notes: >-
+        thinking.type "enabled" with budget_tokens is not supported and returns a
+        ValidationException. Only adaptive and (inferred) disabled are valid. New on this model:
+        thinking blocks are bound to the AWS account that produced them; a block replayed from
+        another account is dropped silently. Harmless within one account.
+    prompt_cache_min_checkpoint_tokens: 512
+
+  anthropic.claude-haiku-5-5:
+    family: anthropic
+    tier: tool
+    inference_profile: global.anthropic.claude-haiku-5-5
+    api_path: messages
+    context_window_tokens: 1000000
+    max_output_tokens: 128000
+    effort:
+      supported: true
+      values: [low, medium, high, xhigh, max]
+      default: medium
+      # xhigh or max with thinking disabled returns 400 invalid_request_error.
+      capped_at_when_thinking_disabled: high
+      notes: >-
+        output_config.effort accepts low, medium, high, xhigh and max with no beta header. effort
+        stays at output_config.effort, a sibling of `thinking`.
+    thinking:
+      adaptive_default: true
+      # thinking.type "enabled" with budget_tokens is not available on this model.
+      supported_types: [adaptive, disabled]
+      must_set_explicitly: false
+      notes: >-
+        Adaptive is the default when `thinking` is omitted; the adapter sends {"type": "adaptive"}
+        anyway. Count tokens and structured outputs are not supported on bedrock-runtime; the
+        adapter uses neither.
+    prompt_cache_min_checkpoint_tokens: 512
+    lifecycle:
+      launched: "2026-10-07"
+      eol_no_sooner_than: "2027-10-07"
+
+  openai.gpt-6-astra:
+    family: openai
+    tier: supervisor
+    inference_profile: global.openai.gpt-6-astra
+    api_path: responses
+    context_window_tokens: 1050000
+    max_output_tokens: 128000
+    effort:
+      supported: true
+      # INFERRED. No AWS source lists Astra's effort levels or default; both are carried over from
+      # GPT-6 Sol/Luna and GPT-5.6. The path is inferred to be reasoning.effort.
+      values: [none, low, medium, high, xhigh, max]
+      default: medium
+      confidence: inferred
+    prompt_cache_min_checkpoint_tokens: 1024
+
+  openai.gpt-6.1-sol:
+    family: openai
+    tier: supervisor
+    inference_profile: global.openai.gpt-6.1-sol
+    api_path: responses
+    context_window_tokens: 1000000
+    max_output_tokens: 131072
+    effort:
+      supported: true
+      # INFERRED. No AWS source lists GPT-6.1 Sol's effort levels or default; both are carried
+      # over from GPT-6 Sol/Luna and GPT-5.6. The tier's `medium` is in every carried-over set.
+      values: [none, low, medium, high, xhigh, max]
+      default: medium
+      confidence: inferred
+    prompt_cache_min_checkpoint_tokens: 1024
+
+  openai.gpt-6.1-terra:
+    family: openai
+    tier: subagent
+    inference_profile: global.openai.gpt-6.1-terra
+    api_path: responses
+    context_window_tokens: 1050000
+    max_output_tokens: 128000
+    effort:
+      supported: true
+      # INFERRED. The AWS model card lists no effort levels or default; both are carried over
+      # from GPT-6.1 Sol and GPT-6 Luna.
+      values: [none, low, medium, high, xhigh, max]
+      default: medium
+      confidence: inferred
+    # INFERRED from GPT-6.1 Sol and GPT-6 Luna; the model card gives no checkpoint minimum.
+    prompt_cache_min_checkpoint_tokens: 1024
+
+  openai.gpt-6-luna:
+    family: openai
+    tier: tool
+    inference_profile: global.openai.gpt-6-luna
+    api_path: responses
+    context_window_tokens: 1050000
+    effort:
+      supported: true
+      values: [none, low, medium, high, xhigh, max]
+      default: medium
+    prompt_cache_min_checkpoint_tokens: 1024
+
+# Provenance for the rulings encoded above.
+provenance:
+  # Scope: the live availability check below covered only the one region it names, not every
+  # region in infra/regions.json.
+  verified_against_live_aws:
+    region: us-east-1
+    date: "2026-10-09"
+    calls:
+      - bedrock:GetFoundationModel
+      - bedrock:GetInferenceProfile
+      - pricing:GetProducts
+    finding: >-
+      All six model IDs present and their inference profiles ACTIVE in us-east-1 on 2026-10-09:
+      global.anthropic.claude-opus-5-5, global.anthropic.claude-sonnet-5-5,
+      global.anthropic.claude-haiku-5-5, global.openai.gpt-6-astra, global.openai.gpt-6.1-sol and
+      global.openai.gpt-6-luna. Every profile is `global.`: `us.anthropic.claude-sonnet-5-5` does
+      not exist (measured ResourceNotFoundException), so the owner chose `global.` for every
+      tier. Global profiles route to the region-less foundation-model ARN, i.e. anywhere in the
+      world, so an "inference stays within US regions" residency property does not hold for any
+      tier. IAM must cover the region-less and regional foundation-model ARNs, reachable only
+      through the inference profiles this file lists.
+  tier_defaults: >-
+    The anthropic tier defaults are Claude Sonnet 5.5 (supervisor and subagent) and Claude Haiku
+    5.5 (tool). Claude Opus 5.5 stays in the matrix as a selectable, non-default anthropic model;
+    its `tier` is its home tier, and no tier in config/models.yaml assigns it. The openai tier
+    defaults are GPT-6.1 Sol (supervisor), GPT-6.1 Terra (subagent) and GPT-6 Luna
+    (tool). GPT-6 Astra likewise stays a selectable, non-default openai model; its `tier`
+    is its home tier, and no tier in config/models.yaml assigns it. global.openai.gpt-6.1-terra
+    was not part of the 2026-10-09 check above; a live call reached it on 2026-10-27.
+  sources:
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-thinking-block-binding.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-terra.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html

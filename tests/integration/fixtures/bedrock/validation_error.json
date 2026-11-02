@@ -1,0 +1,6 @@
+{
+  "_provenance": "Constructed from the botocore ClientError shape Bedrock's runtime returns for ValidationException, documented at docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html and matching the exact wording docs.anthropic.com's adaptive-thinking page cites for a misplaced effort field ('Placing effort inside thinking will result in a ValidationException'); no live model was invoked and this fixture carries no account identifier or credential.",
+  "error_code": "ValidationException",
+  "http_status_code": 400,
+  "message": "Malformed input request: output_config.effort is not a supported field, please reformat your input and try again."
+}

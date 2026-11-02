@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+#
+# Tracked pre-commit hook: runs the content-hygiene gates on every commit. Install with
+# `git config core.hooksPath githooks`, or run this file directly. Non-interactive; exits non-zero
+# and prints each failing gate's message if any gate fails.
+set -euo pipefail
+
+# Child gates inherit the `C` locale; a UTF-8 charset would blind grep/sed-based matchers.
+export LC_ALL=C
+
+#: Exit status when the subject cannot be established, as distinct from 1 (a gate reported a
+#: violation). Matches `EXIT_UNREADABLE` in the sibling shell gates.
+EXIT_UNREADABLE=4
+
+# Inherited git location variables would make the scans read another repository.
+# `GIT_INDEX_FILE` is validated below rather than unset.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+
+# git sets `GIT_INDEX_FILE` for the hook; for a partial commit it names the temporary index holding
+# the content being committed. Accept it only when it resolves, as a physical path, directly inside
+# this repository's git directory.
+if [[ -n "${GIT_INDEX_FILE:-}" ]]; then
+  case "$GIT_INDEX_FILE" in
+    /*) _staged_index="$GIT_INDEX_FILE" ;;
+    # git sets a relative value (`.git/index`) with the hook's cwd at the top of the work tree.
+    *) _staged_index="$PWD/$GIT_INDEX_FILE" ;;
+  esac
+  _index_dir="$(cd -P -- "$(dirname -- "$_staged_index")" 2> /dev/null && pwd -P)" || _index_dir=""
+  _own_git_dir="$(cd -P -- "$(git rev-parse --absolute-git-dir)" && pwd -P)"
+  if [[ "$_index_dir" != "$_own_git_dir" ]]; then
+    echo "pre-commit: GIT_INDEX_FILE ('$GIT_INDEX_FILE') does not resolve inside this repository's" >&2
+    echo "pre-commit: git directory ('$_own_git_dir'), so the staged content this hook would scan is" >&2
+    echo "pre-commit: not the content being committed. Refusing rather than scanning the wrong index." >&2
+    echo "pre-commit: unset GIT_INDEX_FILE and re-run if you invoked this hook directly." >&2
+    exit "$EXIT_UNREADABLE"
+  fi
+  # Re-exported absolute so the `cd` below cannot move a relative value out from under it.
+  export GIT_INDEX_FILE="$_staged_index"
+fi
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Refuse when the `diff` attribute for an arbitrary path is anything but `unspecified` or `set`: a
+# `* -diff`, `* binary` or `* diff=<driver>` rule (from `.gitattributes` or `core.attributesFile`)
+# changes what `gitleaks protect --staged` reads, and a textconv driver does so while `git grep`
+# still reads the files. The probe path does not exist, so only a rule matching everything trips it.
+STAGED_DIFF_ATTR="$(git check-attr diff -- .gitleaks-staged-scan-probe)"
+case "${STAGED_DIFF_ATTR##*: diff: }" in
+  unspecified | set) ;;
+  *)
+    echo "pre-commit: git reports the 'diff' attribute as '${STAGED_DIFF_ATTR##*: diff: }' for an" >&2
+    echo "pre-commit: arbitrary path, so the differ 'gitleaks protect --staged' reads through has been" >&2
+    echo "pre-commit: redirected or disabled and it would report no leaks having read no content." >&2
+    echo "pre-commit: Check core.attributesFile and .gitattributes for a rule matching '*'." >&2
+    echo "pre-commit: Refusing rather than reporting a vacuous pass." >&2
+    exit "$EXIT_UNREADABLE"
+    ;;
+esac
+
+FAILED=0
+
+#: Secret-scanner binary; overridable for an install outside PATH.
+GITLEAKS_BIN="${GITLEAKS_BIN:-gitleaks}"
+
+# `--cached` scans the staged tree, the content this commit would record. `--ref HEAD` would scan
+# the parent commit instead.
+echo "pre-commit: checking staged content for account ids, VPC/subnet/security-group ids, and private keys..."
+if ! bash scripts/check_no_account_id.sh --cached; then
+  FAILED=1
+fi
+
+echo "pre-commit: checking staged content for vendor API keys..."
+if ! bash scripts/check_no_vendor_keys.sh --cached; then
+  FAILED=1
+fi
+
+# An absent scanner fails the hook rather than skipping.
+if ! command -v "$GITLEAKS_BIN" > /dev/null 2>&1; then
+  echo "pre-commit: '$GITLEAKS_BIN' not found on PATH -- FAILING rather than skipping." >&2
+  echo "pre-commit: this hook is the only place the rule set reaches STAGED content. Install" >&2
+  echo "pre-commit: gitleaks (brew install gitleaks), or set GITLEAKS_BIN to its path." >&2
+  FAILED=1
+else
+  # 1. `protect --staged` scans the staged diff; `--redact` keeps the value out of the output.
+  # 2. `check_secret_scan.py` scans the working tree's non-ignored files; any non-zero status,
+  #    including 3 (gitleaks absent), fails the hook.
+  # No `-c`: gitleaks loads the untracked `.gitleaks.toml` when present, else its built-in rules.
+  echo "pre-commit: running gitleaks over the staged diff..."
+  if ! "$GITLEAKS_BIN" protect --staged --redact ; then
+    FAILED=1
+  fi
+
+  echo "pre-commit: running gitleaks over the working tree's non-ignored files..."
+  # The gate resolves `gitleaks` from PATH, so put the resolved GITLEAKS_BIN's directory first.
+  _gitleaks_dir="$(dirname -- "$(command -v "$GITLEAKS_BIN")")"
+  if ! PATH="$_gitleaks_dir:$PATH" python3 scripts/check_secret_scan.py ; then
+    FAILED=1
+  fi
+fi
+
+if [[ "$FAILED" -ne 0 ]]; then
+  echo "pre-commit: one or more content-hygiene gates FAILED — commit blocked" >&2
+  exit 1
+fi
+
+echo "pre-commit: all content-hygiene gates passed"

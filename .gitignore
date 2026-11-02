@@ -1,0 +1,92 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+
+# Coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Node
+node_modules/
+frontend/dist/
+
+# Packaging archives, recreated by scripts/package_lambdas.sh and scripts/package_relay.sh.
+# Unanchored, so they match at every depth.
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Filled configuration templates; only .example files are committed
+config/app.yaml
+config/*.local.yaml
+infra/terraform.tfvars
+infra/*.tfvars
+infra/*.auto.tfvars
+infra/bootstrap_account/*.tfvars
+infra/backend.hcl
+
+# Terraform local state
+**/.terraform/
+infra/modules/*/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Deploy-time rendered artifacts, restored after apply
+.bedrock_agentcore.yaml
+.agentcore_env.rendered
+# Pre-render backups written by scripts/render_agentcore_env.py
+.bedrock_agentcore.yaml.orig
+.agentcore_env.rendered.orig
+
+# Eval output; regenerated, not committed except the published matrix
+results/raw/
+results/matrix.json
+results/matrix.csv
+
+# Layers 4-6 deployment-verification artifacts (scripts/verify_deployment.sh); embed live
+# resource ARNs carrying the AWS account id
+results/verification-inventory*
+results/verification-inventory/
+results/plan/
+# Per-run stderr capture from scripts/verify_deployment.sh
+results/verify_deployment_stderr.*
+# `terraform output -json` fed to the smoke harness (CRM_TF_OUTPUTS/--outputs default path)
+results/tf-outputs.json
+
+# Runtime logs
+logs/*.log
+logs/*.out
+
+# Operational evidence from live applies
+results/reapply-lambdas/
+results/c-a-apply-evidence.md
+
+# Everything else under results/, keeping only the one tracked artifact. To track a nested file,
+# re-include its parent directory first, then the file.
+results/*
+!results/matrix.md
+
+# Runtime frontend config, rendered from Terraform outputs by scripts/deploy.sh; holds live
+# Cognito user-pool and app-client ids.
+frontend/public/config.json
+
+# Playwright MCP scratch output written to the repo root
+.playwright-mcp/
+
+# Browser-verification screenshots at the repo root only; docs/ images stay tracked.
+/*.png
+
+# CI-only caches, inside the working tree because GitLab's `cache:` can only cache paths under
+# $CI_PROJECT_DIR. Paired with the PIP_CACHE_DIR / frontend/.npm paths in .gitlab-ci.yml.
+.cache/
+frontend/.npm/

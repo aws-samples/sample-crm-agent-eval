@@ -1,0 +1,363 @@
+{
+  "_provenance": "Recorded live 2026-10-25: one billable call, --region us-east-1, assumed-role SigV4 from an aws-vault session, through the shipped adapter's request builder and the vendor SDK over an httpx2 transport that tees the raw response body; the output-token cap was lowered to 256 for the recording. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "openai",
+  "model_profile": "global.openai.gpt-6-astra",
+  "recorded_on": "2026-10-25",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/openai/v1/responses",
+    "body": {
+      "model": "global.openai.gpt-6-astra",
+      "stream": true,
+      "input": [
+        {
+          "role": "user",
+          "content": "Reply with one short sentence confirming the CRM pipeline is healthy."
+        }
+      ],
+      "max_output_tokens": 256,
+      "prompt_cache_options": {
+        "mode": "implicit",
+        "ttl": "30m"
+      },
+      "reasoning": {
+        "effort": "low"
+      }
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/event-stream",
+    "body_b64": "ZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjpudWxsLCJjcmVhdGVkX2F0IjoxNzkyOTM2NDE0LCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwX3YzNXdrcHpic3N1dHczMnVnb2JyN3FzZ3Zhcm1zbnI0YmluejR6Y3Nta3RiYTVycjVteHEiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWFzdHJhIiwib2JqZWN0IjoicmVzcG9uc2UiLCJvdXRwdXQiOltdLCJwYXJhbGxlbF90b29sX2NhbGxzIjp0cnVlLCJwcmVzZW5jZV9wZW5hbHR5IjowLjAsInByZXZpb3VzX3Jlc3BvbnNlX2lkIjpudWxsLCJwcm9tcHRfY2FjaGVfa2V5IjpudWxsLCJwcm9tcHRfY2FjaGVfb3B0aW9ucyI6eyJtb2RlIjoiaW1wbGljaXQiLCJ0dGwiOiIzMG0ifSwicHJvbXB0X2NhY2hlX3JldGVudGlvbiI6ImluX21lbW9yeSIsInJlYXNvbmluZyI6eyJzdW1tYXJ5IjpudWxsLCJlZmZvcnQiOiJsb3ciLCJjb250ZXh0IjoiYWxsX3R1cm5zIn0sInNhZmV0eV9pZGVudGlmaWVyIjpudWxsLCJzZXJ2aWNlX3RpZXIiOiJhdXRvIiwic3RhdHVzIjoiaW5fcHJvZ3Jlc3MiLCJzdG9yZSI6dHJ1ZSwidGVtcGVyYXR1cmUiOjEuMCwidGV4dCI6eyJmb3JtYXQiOnsidHlwZSI6InRleHQifSwidmVyYm9zaXR5IjoibWVkaXVtIn0sInRvb2xfY2hvaWNlIjoiYXV0byIsInRvb2xzIjpbXSwidG9wX2xvZ3Byb2JzIjowLCJ0b3BfcCI6MC45OCwidHJ1bmNhdGlvbiI6ImRpc2FibGVkIiwidXNhZ2UiOm51bGwsInVzZXIiOm51bGwsIm1vZGVyYXRpb24iOm51bGx9LCJzZXF1ZW5jZV9udW1iZXIiOjAsInR5cGUiOiJyZXNwb25zZS5jcmVhdGVkIn0KCmRhdGE6IHsicmVzcG9uc2UiOnsiYmFja2dyb3VuZCI6ZmFsc2UsImNvbXBsZXRlZF9hdCI6bnVsbCwiY3JlYXRlZF9hdCI6MTc5MjkzNjQxNCwiZXJyb3IiOm51bGwsImZyZXF1ZW5jeV9wZW5hbHR5IjowLjAsImlkIjoicmVzcF92MzV3a3B6YnNzdXR3MzJ1Z29icjdxc2d2YXJtc25yNGJpbno0emNzbWt0YmE1cnI1bXhxIiwiaW5jb21wbGV0ZV9kZXRhaWxzIjpudWxsLCJpbnN0cnVjdGlvbnMiOm51bGwsIm1heF9vdXRwdXRfdG9rZW5zIjoyNTYsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sIm1vZGVsIjoiZ2xvYmFsLm9wZW5haS5ncHQtNi1hc3RyYSIsIm9iamVjdCI6InJlc3BvbnNlIiwib3V0cHV0IjpbXSwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwicHJlc2VuY2VfcGVuYWx0eSI6MC4wLCJwcmV2aW91c19yZXNwb25zZV9pZCI6bnVsbCwicHJvbXB0X2NhY2hlX2tleSI6bnVsbCwicHJvbXB0X2NhY2hlX29wdGlvbnMiOnsibW9kZSI6ImltcGxpY2l0IiwidHRsIjoiMzBtIn0sInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwic3RvcmUiOnRydWUsInRlbXBlcmF0dXJlIjoxLjAsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In0sInZlcmJvc2l0eSI6Im1lZGl1bSJ9LCJ0b29sX2Nob2ljZSI6ImF1dG8iLCJ0b29scyI6W10sInRvcF9sb2dwcm9icyI6MCwidG9wX3AiOjAuOTgsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInVzYWdlIjpudWxsLCJ1c2VyIjpudWxsLCJtb2RlcmF0aW9uIjpudWxsfSwic2VxdWVuY2VfbnVtYmVyIjoxLCJ0eXBlIjoicmVzcG9uc2UuaW5fcHJvZ3Jlc3MifQoKZGF0YTogeyJpdGVtIjp7ImNvbnRlbnQiOltdLCJpZCI6Im1zZ180NGEzYjE0MjJlOGM1MTc0OGQwYTRhOGY5MjZjYzEyZCIsInBoYXNlIjoiZmluYWxfYW5zd2VyIiwicm9sZSI6ImFzc2lzdGFudCIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwidHlwZSI6Im1lc3NhZ2UifSwib3V0cHV0X2luZGV4IjowLCJzZXF1ZW5jZV9udW1iZXIiOjIsInR5cGUiOiJyZXNwb25zZS5vdXRwdXRfaXRlbS5hZGRlZCJ9CgpkYXRhOiB7ImNvbnRlbnRfaW5kZXgiOjAsIml0ZW1faWQiOiJtc2dfNDRhM2IxNDIyZThjNTE3NDhkMGE0YThmOTI2Y2MxMmQiLCJvdXRwdXRfaW5kZXgiOjAsInBhcnQiOnsiYW5ub3RhdGlvbnMiOltdLCJsb2dwcm9icyI6W10sInRleHQiOiIiLCJ0eXBlIjoib3V0cHV0X3RleHQifSwic2VxdWVuY2VfbnVtYmVyIjozLCJ0eXBlIjoicmVzcG9uc2UuY29udGVudF9wYXJ0LmFkZGVkIn0KCmRhdGE6IHsiY29udGVudF9pbmRleCI6MCwiZGVsdGEiOiJUaGUiLCJpdGVtX2lkIjoibXNnXzQ0YTNiMTQyMmU4YzUxNzQ4ZDBhNGE4ZjkyNmNjMTJkIiwibG9ncHJvYnMiOltdLCJvYmZ1c2NhdGlvbiI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDIiwib3V0cHV0X2luZGV4IjowLCJzZXF1ZW5jZV9udW1iZXIiOjQsInR5cGUiOiJyZXNwb25zZS5vdXRwdXRfdGV4dC5kZWx0YSJ9CgpkYXRhOiB7ImNvbnRlbnRfaW5kZXgiOjAsImRlbHRhIjoiIENSTSIsIml0ZW1faWQiOiJtc2dfNDRhM2IxNDIyZThjNTE3NDhkMGE0YThmOTI2Y2MxMmQiLCJsb2dwcm9icyI6W10sIm9iZnVzY2F0aW9uIjoiYWJjZGVmZ2hpamtsbW5vcHFycyIsIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjo1LCJ0eXBlIjoicmVzcG9uc2Uub3V0cHV0X3RleHQuZGVsdGEifQoKZGF0YTogeyJjb250ZW50X2luZGV4IjowLCJkZWx0YSI6IiBwaXBlbGluZSIsIml0ZW1faWQiOiJtc2dfNDRhM2IxNDIyZThjNTE3NDhkMGE0YThmOTI2Y2MxMmQiLCJsb2dwcm9icyI6W10sIm9iZnVzY2F0aW9uIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnciLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6NiwidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhIn0KCmRhdGE6IHsiY29udGVudF9pbmRleCI6MCwiZGVsdGEiOiIgaXMiLCJpdGVtX2lkIjoibXNnXzQ0YTNiMTQyMmU4YzUxNzQ4ZDBhNGE4ZjkyNmNjMTJkIiwibG9ncHJvYnMiOltdLCJvYmZ1c2NhdGlvbiI6ImFiY2RlZmdoaWoiLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6NywidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhIn0KCmRhdGE6IHsiY29udGVudF9pbmRleCI6MCwiZGVsdGEiOiIgaGVhbHRoeSIsIml0ZW1faWQiOiJtc2dfNDRhM2IxNDIyZThjNTE3NDhkMGE0YThmOTI2Y2MxMmQiLCJsb2dwcm9icyI6W10sIm9iZnVzY2F0aW9uIjoiYWJjZGUiLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6OCwidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRlbHRhIn0KCmRhdGE6IHsiY29udGVudF9pbmRleCI6MCwiZGVsdGEiOiIuIiwiaXRlbV9pZCI6Im1zZ180NGEzYjE0MjJlOGM1MTc0OGQwYTRhOGY5MjZjYzEyZCIsImxvZ3Byb2JzIjpbXSwib2JmdXNjYXRpb24iOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaMDEyMzQ1NiIsIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjo5LCJ0eXBlIjoicmVzcG9uc2Uub3V0cHV0X3RleHQuZGVsdGEifQoKZGF0YTogeyJjb250ZW50X2luZGV4IjowLCJpdGVtX2lkIjoibXNnXzQ0YTNiMTQyMmU4YzUxNzQ4ZDBhNGE4ZjkyNmNjMTJkIiwibG9ncHJvYnMiOltdLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6MTAsInRleHQiOiJUaGUgQ1JNIHBpcGVsaW5lIGlzIGhlYWx0aHkuIiwidHlwZSI6InJlc3BvbnNlLm91dHB1dF90ZXh0LmRvbmUifQoKZGF0YTogeyJjb250ZW50X2luZGV4IjowLCJpdGVtX2lkIjoibXNnXzQ0YTNiMTQyMmU4YzUxNzQ4ZDBhNGE4ZjkyNmNjMTJkIiwib3V0cHV0X2luZGV4IjowLCJwYXJ0Ijp7ImFubm90YXRpb25zIjpbXSwibG9ncHJvYnMiOltdLCJ0ZXh0IjoiVGhlIENSTSBwaXBlbGluZSBpcyBoZWFsdGh5LiIsInR5cGUiOiJvdXRwdXRfdGV4dCJ9LCJzZXF1ZW5jZV9udW1iZXIiOjExLCJ0eXBlIjoicmVzcG9uc2UuY29udGVudF9wYXJ0LmRvbmUifQoKZGF0YTogeyJpdGVtIjp7ImNvbnRlbnQiOlt7ImFubm90YXRpb25zIjpbXSwibG9ncHJvYnMiOltdLCJ0ZXh0IjoiVGhlIENSTSBwaXBlbGluZSBpcyBoZWFsdGh5LiIsInR5cGUiOiJvdXRwdXRfdGV4dCJ9XSwiaWQiOiJtc2dfNDRhM2IxNDIyZThjNTE3NDhkMGE0YThmOTI2Y2MxMmQiLCJwaGFzZSI6ImZpbmFsX2Fuc3dlciIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJ0eXBlIjoibWVzc2FnZSJ9LCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6MTIsInR5cGUiOiJyZXNwb25zZS5vdXRwdXRfaXRlbS5kb25lIn0KCmRhdGE6IHsicmVzcG9uc2UiOnsiYmFja2dyb3VuZCI6ZmFsc2UsImNvbXBsZXRlZF9hdCI6MTc5MjkzNjQxNCwiY3JlYXRlZF9hdCI6MTc5MjkzNjQxNCwiZXJyb3IiOm51bGwsImZyZXF1ZW5jeV9wZW5hbHR5IjowLjAsImlkIjoicmVzcF92MzV3a3B6YnNzdXR3MzJ1Z29icjdxc2d2YXJtc25yNGJpbno0emNzbWt0YmE1cnI1bXhxIiwiaW5jb21wbGV0ZV9kZXRhaWxzIjpudWxsLCJpbnN0cnVjdGlvbnMiOm51bGwsIm1heF9vdXRwdXRfdG9rZW5zIjoyNTYsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sIm1vZGVsIjoiZ2xvYmFsLm9wZW5haS5ncHQtNi1hc3RyYSIsIm9iamVjdCI6InJlc3BvbnNlIiwib3V0cHV0IjpbeyJjb250ZW50IjpbeyJhbm5vdGF0aW9ucyI6W10sImxvZ3Byb2JzIjpbXSwidGV4dCI6IlRoZSBDUk0gcGlwZWxpbmUgaXMgaGVhbHRoeS4iLCJ0eXBlIjoib3V0cHV0X3RleHQifV0sImlkIjoibXNnXzQ0YTNiMTQyMmU4YzUxNzQ4ZDBhNGE4ZjkyNmNjMTJkIiwicGhhc2UiOiJmaW5hbF9hbnN3ZXIiLCJyb2xlIjoiYXNzaXN0YW50Iiwic3RhdHVzIjoiY29tcGxldGVkIiwidHlwZSI6Im1lc3NhZ2UifV0sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9vcHRpb25zIjp7Im1vZGUiOiJpbXBsaWNpdCIsInR0bCI6IjMwbSJ9LCJwcm9tcHRfY2FjaGVfcmV0ZW50aW9uIjoiaW5fbWVtb3J5IiwicmVhc29uaW5nIjp7InN1bW1hcnkiOm51bGwsImVmZm9ydCI6ImxvdyIsImNvbnRleHQiOiJhbGxfdHVybnMifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInNlcnZpY2VfdGllciI6ImRlZmF1bHQiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJzdG9yZSI6dHJ1ZSwidGVtcGVyYXR1cmUiOjEuMCwidGV4dCI6eyJmb3JtYXQiOnsidHlwZSI6InRleHQifSwidmVyYm9zaXR5IjoibWVkaXVtIn0sInRvb2xfY2hvaWNlIjoiYXV0byIsInRvb2xzIjpbXSwidG9wX2xvZ3Byb2JzIjowLCJ0b3BfcCI6MC45OCwidHJ1bmNhdGlvbiI6ImRpc2FibGVkIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjoxOCwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVfd3JpdGVfdG9rZW5zIjowLCJjYWNoZWRfdG9rZW5zIjowfSwib3V0cHV0X3Rva2VucyI6MTAsIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJyZWFzb25pbmdfdG9rZW5zIjowfSwidG90YWxfdG9rZW5zIjoyOH0sInVzZXIiOm51bGwsIm1vZGVyYXRpb24iOm51bGx9LCJzZXF1ZW5jZV9udW1iZXIiOjEzLCJ0eXBlIjoicmVzcG9uc2UuY29tcGxldGVkIn0KCmRhdGE6IFtET05FXQoK"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "final_status": "completed",
+    "outputs": [
+      "message"
+    ]
+  },
+  "decoded_events": [
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1792936414,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_v35wkpzbssutw32ugobr7qsgvarmsnr4binz4zcsmktba5rr5mxq",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-astra",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_options": {
+          "mode": "implicit",
+          "ttl": "30m"
+        },
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 0,
+      "type": "response.created"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1792936414,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_v35wkpzbssutw32ugobr7qsgvarmsnr4binz4zcsmktba5rr5mxq",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-astra",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_options": {
+          "mode": "implicit",
+          "ttl": "30m"
+        },
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 1,
+      "type": "response.in_progress"
+    },
+    {
+      "item": {
+        "content": [],
+        "id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+        "phase": "final_answer",
+        "role": "assistant",
+        "status": "in_progress",
+        "type": "message"
+      },
+      "output_index": 0,
+      "sequence_number": 2,
+      "type": "response.output_item.added"
+    },
+    {
+      "content_index": 0,
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "output_index": 0,
+      "part": {
+        "annotations": [],
+        "logprobs": [],
+        "text": "",
+        "type": "output_text"
+      },
+      "sequence_number": 3,
+      "type": "response.content_part.added"
+    },
+    {
+      "content_index": 0,
+      "delta": "The",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcdefghijklmnopqrstuvwxyzABC",
+      "output_index": 0,
+      "sequence_number": 4,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": " CRM",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcdefghijklmnopqrs",
+      "output_index": 0,
+      "sequence_number": 5,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": " pipeline",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcdefghijklmnopqrstuvw",
+      "output_index": 0,
+      "sequence_number": 6,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": " is",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcdefghij",
+      "output_index": 0,
+      "sequence_number": 7,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": " healthy",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcde",
+      "output_index": 0,
+      "sequence_number": 8,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": ".",
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "obfuscation": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456",
+      "output_index": 0,
+      "sequence_number": 9,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "logprobs": [],
+      "output_index": 0,
+      "sequence_number": 10,
+      "text": "The CRM pipeline is healthy.",
+      "type": "response.output_text.done"
+    },
+    {
+      "content_index": 0,
+      "item_id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+      "output_index": 0,
+      "part": {
+        "annotations": [],
+        "logprobs": [],
+        "text": "The CRM pipeline is healthy.",
+        "type": "output_text"
+      },
+      "sequence_number": 11,
+      "type": "response.content_part.done"
+    },
+    {
+      "item": {
+        "content": [
+          {
+            "annotations": [],
+            "logprobs": [],
+            "text": "The CRM pipeline is healthy.",
+            "type": "output_text"
+          }
+        ],
+        "id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+        "phase": "final_answer",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      },
+      "output_index": 0,
+      "sequence_number": 12,
+      "type": "response.output_item.done"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": 1792936414,
+        "created_at": 1792936414,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_v35wkpzbssutw32ugobr7qsgvarmsnr4binz4zcsmktba5rr5mxq",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-astra",
+        "object": "response",
+        "output": [
+          {
+            "content": [
+              {
+                "annotations": [],
+                "logprobs": [],
+                "text": "The CRM pipeline is healthy.",
+                "type": "output_text"
+              }
+            ],
+            "id": "msg_44a3b1422e8c51748d0a4a8f926cc12d",
+            "phase": "final_answer",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_options": {
+          "mode": "implicit",
+          "ttl": "30m"
+        },
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "default",
+        "status": "completed",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 18,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 10,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 28
+        },
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 13,
+      "type": "response.completed"
+    },
+    "[DONE]"
+  ]
+}

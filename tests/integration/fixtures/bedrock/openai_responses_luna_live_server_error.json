@@ -1,0 +1,309 @@
+{
+  "_provenance": "Recorded live 2026-09-30: one billable call, --profile default --region us-east-1, IAM-user SigV4, through the vendor SDK over an httpx2 transport that tees the raw response body. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "openai",
+  "model_profile": "global.openai.gpt-6-luna",
+  "recorded_on": "2026-09-30",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/openai/v1/responses",
+    "body": {
+      "input": "Call get_account for account a-1.",
+      "max_output_tokens": 256,
+      "model": "global.openai.gpt-6-luna",
+      "reasoning": {
+        "effort": "low"
+      },
+      "stream": true,
+      "tools": [
+        {
+          "type": "function",
+          "name": "get_account",
+          "description": "Fetch one CRM account by id.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "account_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account_id"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/event-stream",
+    "body_b64": "ZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjpudWxsLCJjcmVhdGVkX2F0IjoxNzkwNzg3MzM4LCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwXzd0bXJ0aW9xaDRlMm94aXJzaHlreTNzb2kzeDZod21uaWI1enpndDVxaGNnZG9pdzdzdGEiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJvYmplY3QiOiJyZXNwb25zZSIsIm91dHB1dCI6W10sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwic3RvcmUiOnRydWUsInRlbXBlcmF0dXJlIjoxLjAsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In0sInZlcmJvc2l0eSI6Im1lZGl1bSJ9LCJ0b29sX2Nob2ljZSI6ImF1dG8iLCJ0b29scyI6W3siZGVzY3JpcHRpb24iOiJGZXRjaCBvbmUgQ1JNIGFjY291bnQgYnkgaWQuIiwibmFtZSI6ImdldF9hY2NvdW50Iiwib3V0cHV0X3NjaGVtYSI6bnVsbCwicGFyYW1ldGVycyI6eyJ0eXBlIjoib2JqZWN0IiwicHJvcGVydGllcyI6eyJhY2NvdW50X2lkIjp7InR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImFjY291bnRfaWQiXX0sInN0cmljdCI6dHJ1ZSwidHlwZSI6ImZ1bmN0aW9uIn1dLCJ0b3BfbG9ncHJvYnMiOjAsInRvcF9wIjowLjk4LCJ0cnVuY2F0aW9uIjoiZGlzYWJsZWQiLCJ1c2FnZSI6bnVsbCwidXNlciI6bnVsbCwibW9kZXJhdGlvbiI6bnVsbH0sInNlcXVlbmNlX251bWJlciI6MCwidHlwZSI6InJlc3BvbnNlLmNyZWF0ZWQifQoKZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjpudWxsLCJjcmVhdGVkX2F0IjoxNzkwNzg3MzM4LCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwXzd0bXJ0aW9xaDRlMm94aXJzaHlreTNzb2kzeDZod21uaWI1enpndDVxaGNnZG9pdzdzdGEiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJvYmplY3QiOiJyZXNwb25zZSIsIm91dHB1dCI6W10sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwic3RvcmUiOnRydWUsInRlbXBlcmF0dXJlIjoxLjAsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In0sInZlcmJvc2l0eSI6Im1lZGl1bSJ9LCJ0b29sX2Nob2ljZSI6ImF1dG8iLCJ0b29scyI6W3siZGVzY3JpcHRpb24iOiJGZXRjaCBvbmUgQ1JNIGFjY291bnQgYnkgaWQuIiwibmFtZSI6ImdldF9hY2NvdW50Iiwib3V0cHV0X3NjaGVtYSI6bnVsbCwicGFyYW1ldGVycyI6eyJ0eXBlIjoib2JqZWN0IiwicHJvcGVydGllcyI6eyJhY2NvdW50X2lkIjp7InR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImFjY291bnRfaWQiXX0sInN0cmljdCI6dHJ1ZSwidHlwZSI6ImZ1bmN0aW9uIn1dLCJ0b3BfbG9ncHJvYnMiOjAsInRvcF9wIjowLjk4LCJ0cnVuY2F0aW9uIjoiZGlzYWJsZWQiLCJ1c2FnZSI6bnVsbCwidXNlciI6bnVsbCwibW9kZXJhdGlvbiI6bnVsbH0sInNlcXVlbmNlX251bWJlciI6MSwidHlwZSI6InJlc3BvbnNlLmluX3Byb2dyZXNzIn0KCmRhdGE6IHsiZXJyb3IiOnsiY29kZSI6InNlcnZlcl9lcnJvciIsIm1lc3NhZ2UiOiJUaGUgc2VydmVyIGhhZCBhbiBlcnJvciB3aGlsZSBwcm9jZXNzaW5nIHlvdXIgcmVxdWVzdC4gU29ycnkgYWJvdXQgdGhhdCEiLCJwYXJhbSI6bnVsbCwidHlwZSI6InNlcnZlcl9lcnJvciJ9LCJzZXF1ZW5jZV9udW1iZXIiOjIsInR5cGUiOiJlcnJvciJ9CgpkYXRhOiB7InJlc3BvbnNlIjp7ImJhY2tncm91bmQiOmZhbHNlLCJjb21wbGV0ZWRfYXQiOjE3OTA3ODczNDMsImNyZWF0ZWRfYXQiOjE3OTA3ODczMzgsImVycm9yIjp7ImNvZGUiOiJzZXJ2ZXJfZXJyb3IiLCJtZXNzYWdlIjoiVGhlIHNlcnZlciBoYWQgYW4gZXJyb3Igd2hpbGUgcHJvY2Vzc2luZyB5b3VyIHJlcXVlc3QuIFNvcnJ5IGFib3V0IHRoYXQhIn0sImZyZXF1ZW5jeV9wZW5hbHR5IjowLjAsImlkIjoicmVzcF83dG1ydGlvcWg0ZTJveGlyc2h5a3kzc29pM3g2aHdtbmliNXp6Z3Q1cWhjZ2RvaXc3c3RhIiwiaW5jb21wbGV0ZV9kZXRhaWxzIjpudWxsLCJpbnN0cnVjdGlvbnMiOm51bGwsIm1heF9vdXRwdXRfdG9rZW5zIjoyNTYsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sIm1vZGVsIjoiZ2xvYmFsLm9wZW5haS5ncHQtNi1sdW5hIiwib2JqZWN0IjoicmVzcG9uc2UiLCJvdXRwdXQiOltdLCJwYXJhbGxlbF90b29sX2NhbGxzIjp0cnVlLCJwcmVzZW5jZV9wZW5hbHR5IjowLjAsInByZXZpb3VzX3Jlc3BvbnNlX2lkIjpudWxsLCJwcm9tcHRfY2FjaGVfa2V5IjpudWxsLCJwcm9tcHRfY2FjaGVfcmV0ZW50aW9uIjoiaW5fbWVtb3J5IiwicmVhc29uaW5nIjp7InN1bW1hcnkiOm51bGwsImVmZm9ydCI6ImxvdyIsImNvbnRleHQiOiJhbGxfdHVybnMifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInNlcnZpY2VfdGllciI6ImRlZmF1bHQiLCJzdGF0dXMiOiJmYWlsZWQiLCJzdG9yZSI6dHJ1ZSwidGVtcGVyYXR1cmUiOjEuMCwidGV4dCI6eyJmb3JtYXQiOnsidHlwZSI6InRleHQifSwidmVyYm9zaXR5IjoibWVkaXVtIn0sInRvb2xfY2hvaWNlIjoiYXV0byIsInRvb2xzIjpbeyJkZXNjcmlwdGlvbiI6IkZldGNoIG9uZSBDUk0gYWNjb3VudCBieSBpZC4iLCJuYW1lIjoiZ2V0X2FjY291bnQiLCJvdXRwdXRfc2NoZW1hIjpudWxsLCJwYXJhbWV0ZXJzIjp7InR5cGUiOiJvYmplY3QiLCJwcm9wZXJ0aWVzIjp7ImFjY291bnRfaWQiOnsidHlwZSI6InN0cmluZyJ9fSwicmVxdWlyZWQiOlsiYWNjb3VudF9pZCJdfSwic3RyaWN0Ijp0cnVlLCJ0eXBlIjoiZnVuY3Rpb24ifV0sInRvcF9sb2dwcm9icyI6MCwidG9wX3AiOjAuOTgsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6MCwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVfd3JpdGVfdG9rZW5zIjowLCJjYWNoZWRfdG9rZW5zIjowfSwib3V0cHV0X3Rva2VucyI6MCwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjB9LCJ0b3RhbF90b2tlbnMiOjB9LCJ1c2VyIjpudWxsLCJtb2RlcmF0aW9uIjpudWxsfSwic2VxdWVuY2VfbnVtYmVyIjozLCJ0eXBlIjoicmVzcG9uc2UuZmFpbGVkIn0KCmRhdGE6IFtET05FXQoK"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "error": "APIError: The server had an error while processing your request. Sorry about that!"
+  },
+  "decoded_events": [
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1790787338,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_7tmrtioqh4e2oxirshyky3soi3x6hwmnib5zzgt5qhcgdoiw7sta",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 0,
+      "type": "response.created"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1790787338,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_7tmrtioqh4e2oxirshyky3soi3x6hwmnib5zzgt5qhcgdoiw7sta",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 1,
+      "type": "response.in_progress"
+    },
+    {
+      "error": {
+        "code": "server_error",
+        "message": "The server had an error while processing your request. Sorry about that!",
+        "param": null,
+        "type": "server_error"
+      },
+      "sequence_number": 2,
+      "type": "error"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": 1790787343,
+        "created_at": 1790787338,
+        "error": {
+          "code": "server_error",
+          "message": "The server had an error while processing your request. Sorry about that!"
+        },
+        "frequency_penalty": 0.0,
+        "id": "resp_7tmrtioqh4e2oxirshyky3soi3x6hwmnib5zzgt5qhcgdoiw7sta",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "default",
+        "status": "failed",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 0
+        },
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 3,
+      "type": "response.failed"
+    },
+    "[DONE]"
+  ],
+  "sse_event_sequence": [
+    "response.created",
+    "response.in_progress",
+    "error",
+    "response.failed",
+    "[DONE]"
+  ],
+  "sdk_surfaces": {
+    "raised_by": "openai/_streaming.py:217 (AsyncStream.__stream__; sync Stream.__stream__ at :102)",
+    "raised_where": "inside `async for` over the AsyncStream, at the `error` data frame; create() returns the AsyncStream without raising",
+    "exception_class": "openai.APIError (exact type; not APIStatusError, no status_code)",
+    "code": "server_error",
+    "type": "server_error",
+    "param": null,
+    "body_keys": [
+      "code",
+      "message",
+      "param",
+      "type"
+    ],
+    "events_yielded_before_raise": [
+      "response.created",
+      "response.in_progress"
+    ],
+    "response_failed_yielded": false
+  }
+}

@@ -1,0 +1,105 @@
+# Example root variable values. Copy to `terraform.tfvars` (gitignored) and replace every
+# placeholder. No AWS account id is set through this file; deploy.sh resolves it from STS.
+
+aws_profile = "default"
+aws_region  = "us-east-1"
+
+service             = "crm-agent-eval"
+environment         = "dev"
+owner               = "crm-agent-eval-team"
+cost_center         = "crm-agent-eval"
+data_classification = "confidential"
+
+# ---------------------------------------------------------------------------
+# The existing VPC this stack deploys into. REQUIRED: none of these has a default.
+# ---------------------------------------------------------------------------
+#
+# The values below are placeholders and will not plan. The module's `validation`
+# blocks accept only `vpc-`/`subnet-`/`rtb-` followed by 8 or 17 hex digits, so a
+# placeholder left in place fails at plan time and names the variable.
+#
+# Discover the real ids read-only:
+#   aws ec2 describe-vpcs --region us-east-1 \
+#     --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output table
+#   aws ec2 describe-subnets --region us-east-1 \
+#     --filters Name=vpc-id,Values=<vpc-id> \
+#     --query 'Subnets[].[SubnetId,AvailabilityZone,AvailabilityZoneId,MapPublicIpOnLaunch]' --output table
+
+vpc_id = "vpc-REPLACE_ME"
+
+# Private subnets for the Lambda functions and interface endpoints. At least two,
+# in different Availability Zones.
+vpc_private_subnet_ids = [
+  "subnet-REPLACE_ME_PRIVATE_A",
+  "subnet-REPLACE_ME_PRIVATE_B",
+]
+
+# An existing internet-routed subnet for the NAT gateway. Must not appear in
+# `vpc_private_subnet_ids`; a plan-time precondition enforces this.
+vpc_nat_public_subnet_id = "subnet-REPLACE_ME_PUBLIC"
+
+# The private subnets' route tables. Each receives a 0.0.0.0/0 route to this
+# stack's NAT gateway and the S3/DynamoDB gateway-endpoint associations.
+#   aws ec2 describe-route-tables --region us-east-1 \
+#     --filters Name=vpc-id,Values=<vpc-id> \
+#     --query 'RouteTables[].[RouteTableId,Associations[].SubnetId]' --output table
+vpc_private_route_table_ids = [
+  "rtb-REPLACE_ME_PRIVATE_A",
+  "rtb-REPLACE_ME_PRIVATE_B",
+]
+
+# Private subnets for the AgentCore Runtime, which runs in VPC mode: an empty list
+# fails the plan. Each must be in an AgentCore-supported Availability Zone for
+# aws_region, as listed in infra/regions.json, and must not be the NAT subnet.
+vpc_runtime_subnet_ids = [
+  "subnet-REPLACE_ME_RUNTIME_A",
+]
+
+# Route tables of the Runtime subnets, associated with the S3/DynamoDB gateway
+# endpoints. They do not receive the NAT route.
+vpc_runtime_route_table_ids = [
+  "rtb-REPLACE_ME_RUNTIME_A",
+]
+
+# ---------------------------------------------------------------------------
+# NAT gateway. REQUIRED, no default.
+# ---------------------------------------------------------------------------
+#
+# `true` creates a NAT gateway, which is billed hourly and per GB. `false` leaves
+# the relay unable to fetch the Cognito signing keys, so it rejects every request.
+vpc_nat_gateway_enabled = true
+
+# ---------------------------------------------------------------------------
+# The CloudFront VPC origin's security group. REQUIRED, no default.
+# ---------------------------------------------------------------------------
+#
+# The value is the service-managed group `CloudFront-VPCOrigins-Service-SG`, which
+# AWS creates only when the VPC origin is first applied. The first deployment
+# therefore takes two applies:
+#
+#   1. apply with this set to a security group that already exists in the VPC. The
+#      groups this stack creates do not exist yet, so create an empty placeholder
+#      (a group with no members admits nothing); `/api/*` fails until step 3:
+#        aws ec2 create-security-group --region us-east-1 --no-cli-pager \
+#          --vpc-id <vpc-id> --group-name crm-agent-eval-bootstrap \
+#          --description "Placeholder for the first apply" --query GroupId --output text
+#   2. read the id AWS created:
+#        aws ec2 describe-security-groups --region us-east-1 --no-cli-pager \
+#          --filters Name=vpc-id,Values=<vpc-id> \
+#                    Name=group-name,Values=CloudFront-VPCOrigins-Service-SG \
+#          --query 'SecurityGroups[].GroupId' --output text
+#   3. set it here and apply again; the placeholder group can then be deleted.
+#
+# Only an `sg-` id is accepted; a CIDR or prefix list is rejected by validation.
+api_origin_ingress_security_group_ids = ["sg-REPLACE_ME_CLOUDFRONT_VPC_ORIGIN"]
+
+# ---------------------------------------------------------------------------
+# DynamoDB principal boundary. REQUIRED, no default.
+# ---------------------------------------------------------------------------
+#
+# The operator role or user ARNs that deploy, seed and smoke-test the stack. Only
+# these and the project's Lambda roles reach the tables and their KMS key; a plan
+# run by a caller not listed here fails. Find your own caller's role ARN:
+#   aws sts get-caller-identity --query Arn --output text
+#   (for an assumed role, use arn:aws:iam::<account>:role/<role-name>)
+crm_operator_principal_arns = ["arn:aws:iam::123456789012:role/REPLACE_ME-operator"]

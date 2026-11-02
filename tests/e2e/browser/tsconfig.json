@@ -1,0 +1,41 @@
+{
+  "//": [
+    "Type-checks the T4 browser journeys. Referenced by the G10 tasks' `Run:` commands as",
+    "`npx --yes tsc --noEmit -p tsconfig.json`, which had no file to read until this one existed.",
+    "",
+    "This is not belt-and-braces on top of `playwright test --list`. The runner transpiles with esbuild,",
+    "which strips type-only imports WITHOUT checking them: a `import type { Page } from \"@playwright/test\"`",
+    "naming an export that does not exist gives `tsc` a TS2459 and `--list` exit 0. So `--list` proves the",
+    "specs are discoverable and this proves they would compile.",
+    "",
+    "`noEmit` with no `outDir`: nothing here is built, and a stray `dist/` in a test package would be",
+    "collected by nothing and cleaned by nobody.",
+    "",
+    "Deliberately standalone rather than extending `frontend/tsconfig.json`: this package installs",
+    "Playwright and the compiler and nothing else, precisely so a journey cannot import application code",
+    "and test a module instead of the deployed stack (see package.json). Inheriting the frontend's",
+    "`paths` would hand it back the ability to resolve those imports.",
+    "",
+    "`DOM` and `DOM.Iterable` are both needed even though this is a Node process: the bodies passed to",
+    "`page.evaluate` run in the browser and are type-checked here, and a spread over a `NodeList` needs",
+    "`DOM.Iterable`. Without it, journey 03 fails to compile on code that is correct at runtime."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["journeys/**/*.ts", "fixtures/**/*.ts", "playwright.config.ts"]
+}

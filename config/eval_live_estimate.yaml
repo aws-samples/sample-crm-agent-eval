@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: MIT
+#
+# Static per-task token figures for the live-sweep estimate, used by `eval.runs.estimate`
+# only when no completed live run exists to take them from. Tokens are per golden task, per family
+# arm, per tier; the estimate prices them with `crm.metering.cost_for_usage` against
+# config/pricing.yaml and multiplies by the golden task count. Each `model_id` must be that family's
+# tier model in config/models.yaml (tests/unit/test_eval_live_estimate_config.py).
+#
+# `measured_at_supervisor_effort` is the supervisor effort the figures were measured at; when it
+# differs from the sweep default the estimate carries a caveat (`eval.runs.Estimate.effort_caveat`).
+# `source` names the sweep's matrix.json as recorded; that file is not kept in the repository.
+# Each figure is the tier's recorded input or output tokens summed over the arm's roles, divided by
+# the arm's scored task count. Every row was measured on its current tier model.
+
+schema_version: 1
+
+source: results/mu3-closing/matrix.json (live sweep of 2026-10-29)
+
+measured_at_supervisor_effort: medium
+
+per_task:
+  anthropic:
+    supervisor: { model_id: anthropic.claude-sonnet-5-5, input_tokens: 3642, output_tokens: 410 }
+    subagent: { model_id: anthropic.claude-sonnet-5-5, input_tokens: 4651, output_tokens: 439 }
+    tool: { model_id: anthropic.claude-haiku-5-5, input_tokens: 1287, output_tokens: 255 }
+  openai:
+    supervisor: { model_id: openai.gpt-6.1-sol, input_tokens: 5769, output_tokens: 195 }
+    subagent: { model_id: openai.gpt-6.1-terra, input_tokens: 14668, output_tokens: 238 }
+    tool: { model_id: openai.gpt-6-luna, input_tokens: 568, output_tokens: 165 }

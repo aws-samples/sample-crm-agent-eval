@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="FirstCRM">
+  <!--
+    Declared in `index.html` so browsers stop probing `/favicon.ico`, which the origin bucket
+    correctly answers 403 for: Block Public Access denies `s3:ListBucket`, so a missing key is
+    indistinguishable from a forbidden one and S3 must not disclose which.
+
+    Colour is `--accent-emphasis`'s light-theme value from `frontend/src/styles/tokens.css`, copied
+    rather than referenced because a favicon is fetched as a standalone document and inherits no
+    stylesheet. `check_design_tokens` does not scan `public/`, so nothing enforces that copy — if the
+    accent changes, this is a hand-update.
+
+    Three ascending bars, not a letterform: glyphs turn to mush at the 16px this is usually drawn at.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0b57c4" />
+  <g fill="#ffffff">
+    <rect x="7" y="18" width="4.5" height="7" rx="1.25" />
+    <rect x="13.75" y="13" width="4.5" height="12" rx="1.25" />
+    <rect x="20.5" y="7" width="4.5" height="18" rx="1.25" />
+  </g>
+</svg>

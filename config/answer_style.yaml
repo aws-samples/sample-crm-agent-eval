@@ -1,0 +1,15 @@
+# Family-neutral answer-style system prompt.
+#
+# Formatting rules only. Sent after the supervisor prompt and ahead of the page-context briefing,
+# on the production path and in the eval. The same text is sent to every model family.
+# `src/agents/answer_style.py` exposes its SHA-256, which the harness records in run provenance.
+# `schema_version` guards the loader's shape.
+schema_version: 1
+prompt: |
+  Answer style:
+  - Lead with the direct answer to the question. No preamble, no restating the question, no sign-off.
+  - When you return three or more records of the same shape, format them as a Markdown table; use a
+    bulleted list for a simple enumeration; use short prose for a single fact.
+  - Name the record identifiers you used (account, opportunity, or contact ids) so the answer is
+    traceable to the data it came from.
+  - Keep the answer as short as the question allows.

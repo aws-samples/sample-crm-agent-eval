@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "source": {
+    "agentcore_vpc_zones_url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-vpc.html",
+    "agentcore_regions_url": "https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html",
+    "checked": "2026-10-22"
+  },
+  "regions": {
+    "us-east-1": {
+      "agentcore_az_ids": ["use1-az1", "use1-az2", "use1-az4"],
+      "bootstrap": {
+        "private_az_ids": ["use1-az1", "use1-az2"],
+        "runtime_az_ids": ["use1-az1", "use1-az2"],
+        "nat_az_id": "use1-az1"
+      }
+    },
+    "us-east-2": {
+      "agentcore_az_ids": ["use2-az1", "use2-az2", "use2-az3"],
+      "bootstrap": {
+        "private_az_ids": ["use2-az1", "use2-az2"],
+        "runtime_az_ids": ["use2-az1", "use2-az2"],
+        "nat_az_id": "use2-az1"
+      }
+    },
+    "us-west-1": {
+      "agentcore_az_ids": ["usw1-az1", "usw1-az3"],
+      "bootstrap": {
+        "private_az_ids": ["usw1-az1", "usw1-az3"],
+        "runtime_az_ids": ["usw1-az1", "usw1-az3"],
+        "nat_az_id": "usw1-az1"
+      }
+    },
+    "us-west-2": {
+      "agentcore_az_ids": ["usw2-az1", "usw2-az2", "usw2-az3"],
+      "bootstrap": {
+        "private_az_ids": ["usw2-az1", "usw2-az2"],
+        "runtime_az_ids": ["usw2-az1", "usw2-az2"],
+        "nat_az_id": "usw2-az1"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MIT
+#
+# Template. Copy to config/app.yaml (gitignored; only this .example file is committed).
+#
+# Application code reads only `aws.profile` and `aws.region` from this file
+# (src/crm/config.py:resolve_aws_config), as the last fallback after a CLI flag and the
+# AWS_PROFILE/AWS_REGION environment variables.
+#
+# No AWS account identifier, credential, VPC, subnet, or security-group identifier belongs in
+# this file or in the filled copy.
+
+schema_version: 1
+
+aws:
+  profile: default
+  region: us-east-1

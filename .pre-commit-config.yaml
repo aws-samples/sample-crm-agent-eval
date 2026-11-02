@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MIT
+#
+# `pre-commit` framework configuration running the same content-hygiene scripts as
+# `githooks/pre-commit`. Install with `pre-commit install`, or use the git hook directly via
+# `git config core.hooksPath githooks`.
+
+repos:
+  - repo: local
+    hooks:
+      # `--cached` scans the staged tree, matching `githooks/pre-commit`.
+      - id: check-no-account-id
+        name: check no AWS account id, VPC/subnet/security-group id, private key, or local path (staged)
+        entry: scripts/check_no_account_id.sh --cached
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-no-vendor-keys
+        name: check no vendor (Anthropic/OpenAI) API key (staged)
+        entry: scripts/check_no_vendor_keys.sh --cached
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-log-redaction
+        name: check no log call site under src/ can emit a token, secret, or full record payload
+        entry: python3 scripts/check_log_redaction.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # One scan of the staged diff and one of the working tree's non-ignored files, as
+      # `githooks/pre-commit` runs; the latter is the `check_secret_scan.py` gate itself.
+      # No `-c`: gitleaks loads the untracked `.gitleaks.toml` when present, else its built-in rules.
+      # `env -u` drops inherited git location variables, which would point gitleaks at another
+      # repository. `GIT_INDEX_FILE` is kept: for a partial commit it names the index being committed.
+      # `githooks/pre-commit` additionally validates `GIT_INDEX_FILE` and the attributes file, which
+      # an argv `entry` cannot express.
+      - id: gitleaks-staged
+        name: gitleaks secret scan (staged diff — would this commit record a secret?)
+        entry: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY gitleaks protect --staged --redact
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: gitleaks
+        name: gitleaks secret scan (working tree, non-ignored files)
+        entry: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY python3 scripts/check_secret_scan.py
+        language: system
+        pass_filenames: false
+        always_run: true

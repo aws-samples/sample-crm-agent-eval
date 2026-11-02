@@ -1,0 +1,6 @@
+{
+  "_provenance": "Constructed from the botocore ClientError shape Bedrock's runtime returns for ThrottlingException, documented at docs.aws.amazon.com/bedrock/latest/APIReference/CommonErrors.html; no live model was invoked and this fixture carries no account identifier or credential.",
+  "error_code": "ThrottlingException",
+  "http_status_code": 429,
+  "message": "Too many requests, please wait before trying again."
+}

@@ -1,0 +1,7 @@
+
+# Playwright run artefacts (T4 browser journeys). Never committed: a real run leaves traces,
+# screenshots and videos of a live deployment, and `.last-run.json` is a bare {"status": ...} that
+# reads as evidence while proving nothing -- a run collecting ZERO tests writes "passed".
+test-results/
+playwright-report/
+blob-report/

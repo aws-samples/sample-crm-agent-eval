@@ -1,0 +1,29 @@
+{
+  "name": "crm-eval-relay",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Thin streaming relay: verifies a Cognito JWT, calls InvokeAgentRuntime with SigV4, and re-emits SSE frames verbatim.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "gen:types": "node scripts/gen-events.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "3.1159.0",
+    "@aws-sdk/client-ssm": "3.1159.0",
+    "aws-jwt-verify": "5.2.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "8.10.164",
+    "@types/node": "24.19.2",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5"
+  }
+}

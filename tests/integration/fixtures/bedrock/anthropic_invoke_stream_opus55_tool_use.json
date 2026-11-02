@@ -1,0 +1,224 @@
+{
+  "_provenance": "Recorded live 2026-09-30: one billable call, --profile default --region us-east-1, IAM-user SigV4, through the vendor SDK over an httpx2 transport that tees the raw response body. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "anthropic",
+  "model_profile": "global.anthropic.claude-opus-5-5",
+  "recorded_on": "2026-09-30",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/model/global.anthropic.claude-opus-5-5/invoke-with-response-stream",
+    "body": {
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_account for account a-1."
+        }
+      ],
+      "output_config": {
+        "effort": "low"
+      },
+      "tools": [
+        {
+          "name": "get_account",
+          "description": "Fetch one CRM account by id.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "account_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account_id"
+            ]
+          }
+        }
+      ],
+      "thinking": {
+        "type": "adaptive"
+      },
+      "anthropic_version": "bedrock-2023-05-31"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/vnd.amazon.eventstream",
+    "body_b64": "AAAC7QAAAEsZoOUUCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHRnlkQ0lzSW0xbGMzTmhaMlVpT25zaWJXOWtaV3dpT2lKamJHRjFaR1V0YjNCMWN5MDFMVFVpTENKcFpDSTZJbTF6WjE5aVpISnJYM2xpWkd0aWNtMXljV3BoY0hOcGF6TjNOelpqYVc5NGJYVnlaMkUxYmpOcU1tSnROMmxwZDJKdU4yWm5NbnBwWjNsdWIyRWlMQ0owZVhCbElqb2liV1Z6YzJGblpTSXNJbkp2YkdVaU9pSmhjM05wYzNSaGJuUWlMQ0pqYjI1MFpXNTBJanBiWFN3aVkyOXVkR0ZwYm1WeUlqcHVkV3hzTENKemRHOXdYM0psWVhOdmJpSTZiblZzYkN3aWMzUnZjRjl6WlhGMVpXNWpaU0k2Ym5Wc2JDd2ljM1J2Y0Y5a1pYUmhhV3h6SWpwdWRXeHNMQ0oxYzJGblpTSTZleUpwYm5CMWRGOTBiMnRsYm5NaU9qTTRNaXdpWTJGamFHVmZZM0psWVhScGIyNWZhVzV3ZFhSZmRHOXJaVzV6SWpvd0xDSmpZV05vWlY5eVpXRmtYMmx1Y0hWMFgzUnZhMlZ1Y3lJNk1Dd2lZMkZqYUdWZlkzSmxZWFJwYjI0aU9uc2laWEJvWlcxbGNtRnNYelZ0WDJsdWNIVjBYM1J2YTJWdWN5STZNQ3dpWlhCb1pXMWxjbUZzWHpGb1gybHVjSFYwWDNSdmEyVnVjeUk2TUgwc0ltOTFkSEIxZEY5MGIydGxibk1pT2pFMkxDSnpaWEoyYVdObFgzUnBaWElpT2lKemRHRnVaR0Z5WkNKOWZYMD0iLCJwIjoiYWJjZGVmZ2hpamsifSaySVwAAAE9AAAASxbB6OMLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOXpkR0Z5ZENJc0ltbHVaR1Y0SWpvd0xDSmpiMjUwWlc1MFgySnNiMk5ySWpwN0luUjVjR1VpT2lKMGIyOXNYM1Z6WlNJc0ltbGtJam9pZEc5dmJIVmZZbVJ5YTE4d01VWkhValp0ZFdocVZrYzJhVU0xZEZGbU4zZFlkMlVpTENKdVlXMWxJam9pWjJWMFgyRmpZMjkxYm5RaUxDSnBibkIxZENJNmUzMTlmUT09IiwicCI6ImFiYyJ9YbRpvwAAAQIAAABLNbDHtAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pYVc1d2RYUmZhbk52Ymw5a1pXeDBZU0lzSW5CaGNuUnBZV3hmYW5OdmJpSTZJaUo5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdCJ9jJNKXgAAASUAAABLRlE0oAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pYVc1d2RYUmZhbk52Ymw5a1pXeDBZU0lzSW5CaGNuUnBZV3hmYW5OdmJpSTZJbnRjSW1FaWZYMD0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZIn1N82qZAAABMgAAAEuUkX8yCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lhVzV3ZFhSZmFuTnZibDlrWld4MFlTSXNJbkJoY25ScFlXeGZhbk52YmlJNkltTmpiM1Z1ZEY5cFpGd2lPaUFpZlgwPSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaIn2bFIBaAAAA/AAAAEsJ6PotCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lhVzV3ZFhSZmFuTnZibDlrWld4MFlTSXNJbkJoY25ScFlXeGZhbk52YmlJNklsd2lZUzB4WENKOUluMTkiLCJwIjoiYWJjZGVmIn3RfqEvAAAAuQAAAEuZ+y0UCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTl6ZEc5d0lpd2lhVzVrWlhnaU9qQjkiLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dncifW40LTgAAAHvAAAAS+X0xNoLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjlrWld4MFlTSXNJbVJsYkhSaElqcDdJbk4wYjNCZmNtVmhjMjl1SWpvaWRHOXZiRjkxYzJVaUxDSnpkRzl3WDNObGNYVmxibU5sSWpwdWRXeHNMQ0p6ZEc5d1gyUmxkR0ZwYkhNaU9tNTFiR3dzSW1OdmJuUmhhVzVsY2lJNmJuVnNiSDBzSW5WellXZGxJanA3SW1sdWNIVjBYM1J2YTJWdWN5STZNemd5TENKallXTm9aVjlqY21WaGRHbHZibDlwYm5CMWRGOTBiMnRsYm5NaU9qQXNJbU5oWTJobFgzSmxZV1JmYVc1d2RYUmZkRzlyWlc1eklqb3dMQ0p2ZFhSd2RYUmZkRzlyWlc1eklqbzFNU3dpYjNWMGNIVjBYM1J2YTJWdWMxOWtaWFJoYVd4eklqcDdJblJvYVc1cmFXNW5YM1J2YTJWdWN5STZNSDE5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHUifQI+3k8AAAFOAAAAS6izcvwLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjl6ZEc5d0lpd2lZVzFoZW05dUxXSmxaSEp2WTJzdGFXNTJiMk5oZEdsdmJrMWxkSEpwWTNNaU9uc2lhVzV3ZFhSVWIydGxia052ZFc1MElqb3pPRElzSW05MWRIQjFkRlJ2YTJWdVEyOTFiblFpT2pVeExDSnBiblp2WTJGMGFXOXVUR0YwWlc1amVTSTZNakUyT0N3aVptbHljM1JDZVhSbFRHRjBaVzVqZVNJNk1qRXpNMzE5IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0In3F55io"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "stop_reason": "tool_use",
+    "blocks": [
+      "tool_use"
+    ]
+  },
+  "decoded_events": [
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-opus-5-5",
+          "id": "msg_bdrk_ybdkbrmrqjapsik3w76cioxmurga5n3j2bm7iiwbn7fg2zigynoa",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "container": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 382,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 16,
+            "service_tier": "standard"
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "toolu_bdrk_01FGR6muhjVG6iC5tQf7wXwe",
+          "name": "get_account",
+          "input": {}
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": ""
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"a"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "ccount_id\": "
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "\"a-1\"}"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use",
+          "stop_sequence": null,
+          "stop_details": null,
+          "container": null
+        },
+        "usage": {
+          "input_tokens": 382,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 51,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 382,
+          "outputTokenCount": 51,
+          "invocationLatency": 2168,
+          "firstByteLatency": 2133
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,193 @@
+{
+  "$schema_note": "Machine-readable table x action x role matrix. Not read by Terraform at plan time -- it is the reference the root composition's per-instantiation table_action_role_matrix_entries values are transcribed from, and what the consolidated Layer 3 gate (scripts/check_plan_security_baseline.py) asserts the deployed IAM grants against. 'role' here names the action Lambda (by tool/function name), not yet the generated IAM role name -- the root composition fills that in from each module.lambda_action instantiation's role_name output.",
+  "$functions_without_dynamodb_grants_note": "Functions the composition creates that hold NO DynamoDB grant, declared explicitly because a flat {function, table, actions} grant row cannot express a zero -- there is no table to name. scripts/smoke/iam_roles.py enumerates these so each execution role is passed to simulate-principal-policy and asserted DENY on every other role's actions; each role's only DynamoDB policy is an explicit Deny on every table and index, so that simulation is the evidence of their zero-grant property.",
+  "functions_without_dynamodb_grants": ["capabilities"],
+  "isolation_mechanism_legend": {
+    "leading_keys": "dynamodb:LeadingKeys condition on this grant genuinely restricts the caller to rows whose partition key encodes their own identity (rep_id). Only valid where the table's partition key IS the rep id.",
+    "application_code": "The table's partition key is a synthetic per-record id (account_id, contact_id, opportunity_id, activity_id, ...), not the rep id -- LeadingKeys cannot correlate the caller's identity to that key, so a condition here would never match anything and must not be added. Rep-scoped isolation for this row is enforced by crm.authz.filter_to_scope / require_scope in the Lambda handler.",
+    "not_applicable": "The action is a cross-tenant/administrative bookkeeping operation (eval harness catalog tables) with no per-rep scope to isolate.",
+    "key_prefix": "dynamodb:LeadingKeys condition present, prefix only: it confines the grant to a key family (e.g. usersettings#*, job#*, eval-*) but does not pin the caller's own identity; the handler confines the row."
+  },
+  "tables": {
+    "accounts": {
+      "partition_key": "account_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the account's own synthetic id, not owner_rep_id."
+    },
+    "contacts": {
+      "partition_key": "contact_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the contact's own synthetic id."
+    },
+    "opportunities": {
+      "partition_key": "opportunity_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the opportunity's own synthetic id, not owner_rep_id, even though owner_rep_id is a GSI partition key dimension."
+    },
+    "activities": {
+      "partition_key": "activity_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the activity's own synthetic id."
+    },
+    "notes": {
+      "partition_key": "note_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the note's own synthetic id."
+    },
+    "proposals": {
+      "partition_key": "proposal_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the proposal's own synthetic id, even though actor_rep_id is a GSI dimension."
+    },
+    "audit_records": {
+      "partition_key": "audit_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the audit record's own synthetic id."
+    },
+    "usage_records": {
+      "partition_key": "usage_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Partition key is the usage record's own synthetic id."
+    },
+    "reps": {
+      "partition_key": "rep_id",
+      "leading_keys_can_enforce_rep_isolation": true,
+      "reason": "Partition key IS the rep id -- a genuine LeadingKeys condition is possible here, and the Gateway identity interceptor's GetItem grant carries one, pinned to the single configured service-principal rep_id. The Cognito pre-token-generation trigger's GetItem grant cannot: it reads whichever user is signing in, so no static value exists to pin -- an administrative cross-rep read (isolation_mechanism not_applicable), not an unenforced control. The user-settings (`usersettings#*`) and chat-target (`usersettings#*`, `conversation#*`) grants carry a LeadingKeys condition that is a key-PREFIX scope, not a per-rep pin: IAM confines them to those item kinds, and the handler (crm.user_settings / crm.conversations) confines each call to the caller's own item. They are labelled leading_keys because the condition is present."
+    },
+    "eval_runs": {
+      "partition_key": "run_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Not a rep-scoped entity table -- harness bookkeeping across all tenants (see crm.store.schema)."
+    },
+    "eval_results": {
+      "partition_key": "run_id",
+      "leading_keys_can_enforce_rep_isolation": false,
+      "reason": "Same as eval_runs."
+    }
+  },
+  "grants": [
+    { "function": "search_opportunities", "table": "opportunities", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "search_accounts", "table": "accounts", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_opportunity", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "get_opportunity", "table": "activities", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_opportunity", "table": "notes", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_opportunity", "table": "contacts", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_account", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "get_account", "table": "contacts", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_contact", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "list_activities", "table": "activities", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "list_activities", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "pipeline_aggregate", "table": "opportunities", "actions": ["dynamodb:Query", "dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "list_proposals", "table": "proposals", "actions": ["dynamodb:Query", "dynamodb:BatchGetItem"], "isolation_mechanism": "application_code" },
+    { "function": "list_audit_records", "table": "audit_records", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "get_audit_record", "table": "audit_records", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "draft_message", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "draft_message", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+
+    { "function": "create_account", "table": "accounts", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_account", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_account", "table": "accounts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_account", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_contact", "table": "contacts", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_contact", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_contact", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_contact", "table": "contacts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_contact", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_opportunity", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_opportunity", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_opportunity", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_opportunity", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_opportunity", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_opportunity", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "log_activity", "table": "activities", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "log_activity", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "application_code" },
+    { "function": "log_activity", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_activity", "table": "activities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "update_activity", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_note", "table": "notes", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_note", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "create_note", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+
+    { "function": "submit_proposal", "table": "proposals", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "submit_proposal", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "submit_proposal", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "submit_proposal", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "submit_proposal", "table": "activities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "proposals", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "accounts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "contacts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "activities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "approve_proposal", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "reject_proposal", "table": "proposals", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "application_code" },
+    { "function": "reject_proposal", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "reject_proposal", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "reject_proposal", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "reject_proposal", "table": "activities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "proposals", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "activities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "rebase_proposal", "table": "audit_records", "actions": ["dynamodb:PutItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "audit_records", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "accounts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "contacts", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "opportunities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "activities", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "contacts", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "opportunities", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "activities", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "notes", "actions": ["dynamodb:Query"], "isolation_mechanism": "application_code" },
+    { "function": "revert_audit_record", "table": "notes", "actions": ["dynamodb:DeleteItem"], "isolation_mechanism": "application_code" },
+
+    { "function": "get_page_context", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "get_page_context", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "get_page_context", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+    { "function": "get_page_context", "table": "activities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" },
+
+    { "function": "identity-interceptor", "table": "reps", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "leading_keys" },
+    { "function": "pre-token-generation", "table": "reps", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "not_applicable" },
+
+    { "function": "eval-trigger", "table": "eval_runs", "actions": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem", "dynamodb:BatchGetItem", "dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+
+    { "function": "user-settings", "table": "reps", "actions": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"], "isolation_mechanism": "key_prefix" },
+
+    { "function": "chat-target", "table": "reps", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "chat-identity-interceptor", "table": "reps", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "leading_keys" },
+
+    { "function": "sweep-control", "table": "eval_runs", "actions": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "eval_results", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "not_applicable" },
+    { "function": "sweep-control", "table": "accounts", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "accounts", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "contacts", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "contacts", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "opportunities", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "opportunities", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "activities", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "activities", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "notes", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "notes", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "audit_records", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "audit_records", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "proposals", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "proposals", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "usage_records", "actions": ["dynamodb:BatchWriteItem"], "isolation_mechanism": "application_code" },
+    { "function": "sweep-control", "table": "usage_records", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-control", "table": "reps", "actions": ["dynamodb:BatchWriteItem", "dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+
+    { "function": "sweep-task", "table": "eval_runs", "actions": ["dynamodb:GetItem", "dynamodb:UpdateItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "eval_results", "actions": ["dynamodb:GetItem", "dynamodb:PutItem"], "isolation_mechanism": "not_applicable" },
+    { "function": "sweep-task", "table": "accounts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "accounts", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "contacts", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "contacts", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "opportunities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "opportunities", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "activities", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "activities", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "notes", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "notes", "actions": ["dynamodb:Query"], "isolation_mechanism": "key_prefix" },
+    { "function": "sweep-task", "table": "proposals", "actions": ["dynamodb:GetItem"], "isolation_mechanism": "application_code" }
+  ]
+}

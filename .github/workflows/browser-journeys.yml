@@ -1,0 +1,119 @@
+# SPDX-License-Identifier: MIT
+#
+# T4 browser journeys against a deployed dev stack. Manual dispatch only; it costs money.
+#
+# Two gates, both required: the `run_browser_journeys` input, and `billable_acknowledgment` typed
+# exactly as `--i-understand-this-is-billable` (the token scripts/verify_deployment.sh requires).
+# Absent either, the job fails with exit 3 ("verified nothing") rather than skipping.
+#
+# Playwright discovers the specs under tests/e2e/browser/journeys/; this file does not list them.
+# Workflow inputs reach shells only through `env:`, never through `${{ }}` inside a `run:` block.
+name: browser journeys (billable, opt-in)
+
+on:
+  # checkov:skip=CKV_GHA_7: test-only workflow that builds no release artefact; inputs are run gates and the dev target
+  workflow_dispatch:
+    inputs:
+      run_browser_journeys:
+        description: "Run the T4 browser journeys against a deployed dev stack. Costs money."
+        type: boolean
+        required: false
+        default: false
+      billable_acknowledgment:
+        description: "Type exactly: --i-understand-this-is-billable"
+        type: string
+        required: false
+        default: ""
+      base_url:
+        description: "Dev stack base URL (CRM_E2E_BASE_URL). Leave empty to use the CRM_TF_OUTPUTS_JSON secret. Never a production URL."
+        type: string
+        required: false
+        default: ""
+
+# Reads the repository only; the target comes from an input or a saved outputs document, not AWS.
+permissions:
+  contents: read
+
+jobs:
+  browser-journeys:
+    name: T4 browser journeys (deployed dev stack)
+    runs-on: ubuntu-24.04
+
+    env:
+      # Derived from the dispatch input.
+      CRM_RUN_BROWSER_JOURNEYS: "${{ inputs.run_browser_journeys && '1' || '0' }}"
+      CRM_E2E_BASE_URL: "${{ inputs.base_url }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Both gates are checked here, before any install or network call.
+      - name: Opt-in gate (exit 3 = verified nothing)
+        env:
+          BILLABLE_ACKNOWLEDGMENT: "${{ inputs.billable_acknowledgment }}"
+        run: |
+          set -euo pipefail
+          if [[ "${CRM_RUN_BROWSER_JOURNEYS}" != "1" ]]; then
+            echo "::error title=Browser tier did not run::CRM_RUN_BROWSER_JOURNEYS is not 1 (the run_browser_journeys input was not set). This tier verified NOTHING; do not read this run as browser coverage." >&2
+            exit 3
+          fi
+          if [[ "${BILLABLE_ACKNOWLEDGMENT}" != "--i-understand-this-is-billable" ]]; then
+            echo "::error title=Browser tier did not run::billable_acknowledgment must be typed exactly as --i-understand-this-is-billable. These journeys drive a deployed stack and cost money. This tier verified NOTHING." >&2
+            exit 3
+          fi
+          echo "Both gates satisfied; the browser tier will run against a deployed dev stack."
+
+      # frontend/.nvmrc is the repository's Node pin.
+      - name: Read pinned Node version
+        id: nvm
+        run: echo "version=$(cat frontend/.nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "${{ steps.nvm.outputs.version }}"
+          package-manager-cache: false
+
+      # The lockfile is the sole install authority; @playwright/test is exact-pinned.
+      - name: Install the journey package from its lockfile only
+        working-directory: tests/e2e/browser
+        run: npm ci
+
+      - name: Install the Chromium build for the pinned Playwright version
+        working-directory: tests/e2e/browser
+        run: npx --yes playwright install --with-deps chromium
+
+      # playwright.config.ts reads CRM_TF_OUTPUTS_JSON as a path. The document is never echoed.
+      - name: Materialise the stack outputs document
+        if: ${{ inputs.base_url == '' }}
+        env:
+          TF_OUTPUTS_JSON: "${{ secrets.CRM_TF_OUTPUTS_JSON }}"
+        run: |
+          set -euo pipefail
+          if [[ -z "${TF_OUTPUTS_JSON}" ]]; then
+            echo "::error::No base_url input and no CRM_TF_OUTPUTS_JSON secret, so the target cannot be resolved. Refusing to guess a target." >&2
+            exit 1
+          fi
+          mkdir -p results
+          printf '%s' "${TF_OUTPUTS_JSON}" > results/tf-outputs.json
+          echo "CRM_TF_OUTPUTS_JSON=${GITHUB_WORKSPACE}/results/tf-outputs.json" >> "$GITHUB_ENV"
+
+      # A failed journey fails the job.
+      - name: Run the browser journeys
+        working-directory: tests/e2e/browser
+        env:
+          CRM_DEMO_USER_EMAIL: "${{ secrets.CRM_DEMO_USER_EMAIL }}"
+          CRM_DEMO_USER_PASSWORD: "${{ secrets.CRM_DEMO_USER_PASSWORD }}"
+        run: npx --yes playwright test journeys
+
+      - name: Upload traces and screenshots
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-journey-artifacts
+          path: |
+            tests/e2e/browser/test-results/**
+            tests/e2e/browser/playwright-report/**
+          retention-days: 7
+          if-no-files-found: ignore

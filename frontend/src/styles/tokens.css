@@ -1,0 +1,403 @@
+/*
+ * Design token layer. The single source of colour, type, spacing, radius,
+ * elevation, and motion for the application.
+ *
+ * Usage: import once at the app entry, before any component stylesheet. Components reference
+ * tokens only — via a Tailwind utility whose theme key maps to the variable (see
+ * `tailwind.config.ts`) or via `var(--token)` directly. A component must never hardcode a colour,
+ * a `px` font size, or an off-scale spacing value; `scripts/check_design_tokens.py` enforces this.
+ *
+ * Themes: light is the `:root` default. Dark is `[data-theme="dark"]` on the document element,
+ * which the app shell must set before first paint from the per-user persisted preference.
+ * There is no `prefers-color-scheme` colour block.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---------------------------------------------------------------- typography */
+
+  /*
+   * Two roles from one superfamily. `--font-sans` carries all prose and UI text.
+   * `--font-numeric` is for identifiers, currency, quantities, and timestamps — chosen for true
+   * tabular figures so table columns align, not as a decorative label face.
+   */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-numeric: "IBM Plex Mono", ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo,
+    Consolas, monospace;
+
+  /* Modular scale, ratio 1.2, base 0.9375rem (15px) for CRM density. */
+  --text-3xs: 0.6875rem;
+  --text-2xs: 0.75rem;
+  --text-xs: 0.8125rem;
+  --text-sm: 0.875rem;
+  --text-base: 0.9375rem;
+  --text-md: 1.0625rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 1.875rem;
+  --text-3xl: 2.375rem;
+
+  --leading-tight: 1.15;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0em;
+  --tracking-wide: 0.01em;
+
+  /* Comfortable measure for prose; below 80 characters at the base size. */
+  --measure-prose: 68ch;
+  --measure-narrow: 46ch;
+
+  /* ------------------------------------------------------------------- spacing */
+
+  /* 4px grid expressed in rem so a root font-size change scales the whole layout. */
+  --space-0: 0rem;
+  --space-px: 0.0625rem;
+  --space-1: 0.125rem;
+  --space-2: 0.25rem;
+  --space-3: 0.375rem;
+  --space-4: 0.5rem;
+  --space-5: 0.75rem;
+  --space-6: 1rem;
+  --space-7: 1.25rem;
+  --space-8: 1.5rem;
+  --space-9: 2rem;
+  --space-10: 2.5rem;
+  --space-11: 3rem;
+  --space-12: 4rem;
+  --space-13: 6rem;
+
+  /* -------------------------------------------------------------------- density */
+
+  --row-height-dense: 2rem;
+  --row-height-default: 2.375rem;
+  --row-height-relaxed: 2.875rem;
+  --control-height-sm: 1.75rem;
+  --control-height-md: 2.125rem;
+  --control-height-lg: 2.5rem;
+  --cell-padding-x: var(--space-5);
+  --cell-padding-y: var(--space-3);
+
+  /* --------------------------------------------------------------------- radius */
+
+  /*
+   * A hierarchy, not one value on everything: controls are crisper than the surfaces that hold
+   * them, table cells are square, badges are pills.
+   */
+  --radius-none: 0rem;
+  --radius-control: 0.375rem;
+  --radius-surface: 0.75rem;
+  --radius-overlay: 1.25rem;
+  --radius-pill: 9999px;
+
+  --border-width-hairline: 0.0625rem;
+  --border-width-emphasis: 0.125rem;
+
+  /* ---------------------------------------------------------------------- layout */
+
+  --layout-nav-width: 14rem;
+  --layout-nav-width-collapsed: 3.5rem;
+  --layout-panel-width: clamp(30rem, 42vw, 52rem);
+  --layout-content-max: 88rem;
+  --layout-header-height: 3.25rem;
+
+  /* Breakpoints. Exposed as tokens so Tailwind screens and any container query agree. */
+  --breakpoint-md: 48rem;
+  --breakpoint-lg: 64rem;
+  --breakpoint-xl: 80rem;
+
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-panel: 20;
+  --z-overlay: 30;
+  --z-popover: 40;
+  --z-toast: 50;
+
+  /* ---------------------------------------------------------------------- motion */
+
+  --duration-instant: 90ms;
+  --duration-fast: 140ms;
+  --duration-normal: 200ms;
+  --duration-slow: 280ms;
+
+  --ease-standard: cubic-bezier(0.2, 0, 0.38, 1);
+  --ease-entrance: cubic-bezier(0, 0, 0.38, 1);
+  --ease-exit: cubic-bezier(0.2, 0, 1, 1);
+
+  /* -------------------------------------------------------------------- elevation */
+
+  /*
+   * Shadows are hue-matched to the ink rather than neutral black, and every raised surface also
+   * carries a border so elevation survives a low-contrast display. In dark mode these collapse
+   * and lightness carries elevation instead — see the dark block.
+   */
+  --elevation-flush: none;
+  --elevation-raised: 0 1px 2px 0 rgb(20 20 19 / 0.05), 0 4px 12px -2px rgb(20 20 19 / 0.08);
+  --elevation-overlay: 0 2px 6px -1px rgb(20 20 19 / 0.06), 0 16px 32px -8px rgb(20 20 19 / 0.14);
+  --elevation-popover: 0 2px 8px -1px rgb(20 20 19 / 0.08), 0 24px 48px -12px rgb(20 20 19 / 0.2);
+
+  /* ----------------------------------------------------------------------- colour */
+
+  /* Surfaces, sunken through overlay. Warm neutral ground. */
+  --surface-sunken: #e8e6df;
+  --surface-base: #f4f2ec;
+  --surface-raised: #ffffff;
+  --surface-overlay: #ffffff;
+  --surface-inset: #eeece4;
+  --surface-hover: #eceae1;
+  --surface-selected: #f3e7df;
+  --surface-inverse: #141413;
+
+  /* Text. `--text-muted` is still text and holds AA against every surface above. */
+  --text-primary: #141413;
+  --text-secondary: #403e38;
+  --text-muted: #5a5850;
+  --text-inverse: #f4f2ec;
+  --text-on-accent: #ffffff;
+  --text-link: #9a3e1b;
+
+  /*
+   * Borders. `--border-subtle` and `--border-default` are separation only (gridlines, surface
+   * outlines). `--border-control` is the boundary of an interactive control and `--border-strong`
+   * its emphasised state; both hold WCAG 1.4.11's 3:1 non-text contrast, which is why they are
+   * separate tokens rather than one value doing both jobs.
+   */
+  --border-subtle: #dad6cc;
+  --border-default: #bdb7a9;
+  --border-control: #7a7468;
+  --border-strong: #615c52;
+  --border-inverse: #403e38;
+
+  /* Interactive accent. Clay family; emphasis is deep enough to
+     hold AA for white `--text-on-accent`, so the button remains clay, not blue. */
+  --accent-emphasis: #b0492a;
+  --accent-emphasis-hover: #9a3e22;
+  --accent-emphasis-active: #85351c;
+  --accent-surface: #f6e7de;
+  --accent-surface-hover: #f1dacb;
+  --accent-border: #e0b29b;
+  --accent-text: #9a3e1b;
+
+  /* Focus ring. Never removed; keyboard navigation depends on it staying visible. */
+  --focus-ring-color: #b0492a;
+  --focus-ring-width: 0.1875rem;
+  --focus-ring-offset: 0.125rem;
+
+  /*
+   * Semantic states. `denied` is a hue of its own and not a shade of `danger`: a scope refusal is
+   * an authorization outcome, not a failure, so a 403 reads differently from both an error and an
+   * empty result.
+   */
+  --denied-emphasis: #a5147f;
+  --denied-surface: #fbe8f5;
+  --denied-border: #dd92c6;
+  --denied-text: #8c1069;
+
+  --danger-emphasis: #c2281f;
+  --danger-emphasis-hover: #a51f18;
+  --danger-surface: #fbe7e4;
+  --danger-border: #eca39e;
+  --danger-text: #a41d16;
+
+  --caution-emphasis: #b57500;
+  --caution-surface: #faefd8;
+  --caution-border: #dfb374;
+  --caution-text: #835200;
+
+  --positive-emphasis: #0f7a45;
+  --positive-surface: #e0f0e4;
+  --positive-border: #8fceab;
+  --positive-text: #0c6438;
+
+  --info-emphasis: #1d6c8c;
+  --info-surface: #e2eef3;
+  --info-border: #93c3d6;
+  --info-text: #175872;
+
+  /* Neutral, non-alarming emptiness. An empty state is an invitation, not a warning. */
+  --empty-surface: #eeebe2;
+  --empty-border: #cfc9bb;
+  --empty-text: #5a5850;
+
+  /*
+   * Pending (a proposal awaiting approval). Distinguished structurally as well as by colour, so a
+   * locked card reads as locked without relying on hue: consumers apply
+   * `--pending-border-style` and `--pending-hatch` alongside the surface.
+   */
+  --pending-surface: #eeeff8;
+  --pending-border: #6b73a4;
+  --pending-text: #3f4577;
+  --pending-border-style: dashed;
+  --pending-hatch: repeating-linear-gradient(
+    135deg,
+    rgb(63 69 119 / 0.07) 0 0.25rem,
+    transparent 0.25rem 0.5rem
+  );
+
+  /*
+   * Approval diff. Before/after are distinguishable without colour: each side carries a decoration and a marker glyph in addition to its surface.
+   */
+  --diff-removed-surface: #fbe9e7;
+  --diff-removed-border: #e5a49d;
+  --diff-removed-text: #97231b;
+  --diff-removed-decoration: line-through;
+  --diff-removed-marker: "\2212"; /* minus sign */
+
+  --diff-added-surface: #e3f0e7;
+  --diff-added-border: #8ec9a9;
+  --diff-added-text: #0b6033;
+  --diff-added-decoration: underline;
+  --diff-added-marker: "\002B"; /* plus sign */
+
+  --diff-unchanged-surface: transparent;
+  --diff-unchanged-text: var(--text-muted);
+  --diff-unchanged-marker: "\00A0";
+
+  /*
+   * Model-family series marks. Co-equal peers with no primary/secondary relationship and no
+   * luminance separation, so series identity does not rest on colour at all: each carries a fill
+   * pattern and a dash pattern, and a consumer must apply both.
+   */
+  --series-1: #1f6fb2;
+  --series-2: #8a5620;
+  --series-1-surface: #e4eff8;
+  --series-2-surface: #f6ecdf;
+  --series-1-fill: none;
+  --series-2-fill: repeating-linear-gradient(
+    45deg,
+    rgb(255 255 255 / 0.55) 0 0.1875rem,
+    transparent 0.1875rem 0.375rem
+  );
+  --series-1-dash: none;
+  --series-2-dash: 0.375rem 0.25rem;
+
+  /* Skeleton loading. Loading states use a skeleton, never a bare spinner. */
+  --skeleton-base: #e8e6df;
+  --skeleton-shimmer: #f4f2ec;
+
+  --overlay-scrim: rgb(20 20 19 / 0.45);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface-sunken: #100f0c;
+  --surface-base: #1a1815;
+  --surface-raised: #232019;
+  --surface-overlay: #2b2721;
+  --surface-inset: #141210;
+  --surface-hover: #2a2620;
+  --surface-selected: #3a2a20;
+  --surface-inverse: #f4f2ec;
+
+  --text-primary: #ece9e1;
+  --text-secondary: #c3beb2;
+  --text-muted: #989386;
+  --text-inverse: #141413;
+  --text-on-accent: #1e140d;
+  --text-link: #eaa98c;
+
+  --border-subtle: #2e2a24;
+  --border-default: #453f36;
+  --border-control: #8c867a;
+  --border-strong: #a8a295;
+  --border-inverse: #c3beb2;
+
+  --accent-emphasis: #e08a66;
+  --accent-emphasis-hover: #e79a78;
+  --accent-emphasis-active: #edaa8c;
+  --accent-surface: #2e1e15;
+  --accent-surface-hover: #3a2519;
+  --accent-border: #6a4230;
+  --accent-text: #eaa98c;
+
+  --focus-ring-color: #e79a78;
+
+  --denied-emphasis: #e888c9;
+  --denied-surface: #2c1226;
+  --denied-border: #6a3059;
+  --denied-text: #eda0d4;
+
+  --danger-emphasis: #f39490;
+  --danger-emphasis-hover: #f7aaa6;
+  --danger-surface: #2e1413;
+  --danger-border: #6d3230;
+  --danger-text: #f4a09c;
+
+  --caution-emphasis: #e6ad55;
+  --caution-surface: #2b2113;
+  --caution-border: #634920;
+  --caution-text: #e8b464;
+
+  --positive-emphasis: #6bcb95;
+  --positive-surface: #0f2a1d;
+  --positive-border: #2c5c42;
+  --positive-text: #7ad2a1;
+
+  --info-emphasis: #74b9d6;
+  --info-surface: #10262f;
+  --info-border: #2f5566;
+  --info-text: #86c3dc;
+
+  --empty-surface: #1b1915;
+  --empty-border: #2e2a24;
+  --empty-text: #989386;
+
+  --pending-surface: #191d2e;
+  --pending-border: #7c85bd;
+  --pending-text: #b3b9e2;
+  --pending-hatch: repeating-linear-gradient(
+    135deg,
+    rgb(179 185 226 / 0.1) 0 0.25rem,
+    transparent 0.25rem 0.5rem
+  );
+
+  --diff-removed-surface: #2d1514;
+  --diff-removed-border: #6b3330;
+  --diff-removed-text: #f0a09b;
+
+  --diff-added-surface: #10281c;
+  --diff-added-border: #2c5940;
+  --diff-added-text: #7ccea0;
+
+  --series-1: #63aae2;
+  --series-2: #d3a469;
+  --series-1-surface: #14283a;
+  --series-2-surface: #2c2317;
+
+  --skeleton-base: #1f1d18;
+  --skeleton-shimmer: #2a2620;
+
+  --overlay-scrim: rgb(6 6 5 / 0.62);
+
+  /*
+   * Dark elevation is carried by surface lightness, not by shadow — a black shadow on a dark
+   * ground is invisible. The tokens keep their names so consumers need no theme-aware branching;
+   * only the ring that separates a lifted surface from its backdrop survives.
+   */
+  --elevation-raised: 0 0 0 1px rgb(255 255 255 / 0.04);
+  --elevation-overlay: 0 0 0 1px rgb(255 255 255 / 0.06), 0 16px 32px -12px rgb(0 0 0 / 0.6);
+  --elevation-popover: 0 0 0 1px rgb(255 255 255 / 0.08), 0 20px 40px -16px rgb(0 0 0 / 0.7);
+}
+
+/*
+ * Motion answers a person's action; it is never decorative. Under a reduced-motion preference the
+ * duration tokens collapse so every consumer respects it without writing its own media query.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-instant: 1ms;
+    --duration-fast: 1ms;
+    --duration-normal: 1ms;
+    --duration-slow: 1ms;
+  }
+}

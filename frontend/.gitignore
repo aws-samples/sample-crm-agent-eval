@@ -1,0 +1,32 @@
+# Generated from src/crm/toolspec/definitions.py by scripts/generate-types.mjs. Never hand-edited
+# and never committed; every gen:types/typecheck/build/test run regenerates it. Requires the Python
+# venv from the repo root.
+src/types/generated/
+
+# Vitest coverage report (`vitest run --coverage`); generated, never committed.
+coverage/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

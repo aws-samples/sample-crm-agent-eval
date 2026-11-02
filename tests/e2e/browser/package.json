@@ -1,0 +1,14 @@
+{
+  "name": "crm-eval-v2-browser-journeys",
+  "private": true,
+  "type": "module",
+  "description": "T4 browser journeys against a deployed stack. Isolated from frontend/ and src/relay/: installs only Playwright and the TypeScript compiler, so a journey cannot import application code.",
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "26.6.6",
+    "typescript": "7.0.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

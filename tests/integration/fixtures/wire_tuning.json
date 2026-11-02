@@ -1,0 +1,47 @@
+{
+  "description": "Written by frontend/src/components/AssistantPanel/wireTuning.test.ts; decoded by providers.tier_tuning.parse_wire_tuning in tests/integration.",
+  "blocks": {
+    "mixed_families": {
+      "schema": 3,
+      "source": "settings.tuning",
+      "tiers": {
+        "supervisor": {
+          "family": "openai",
+          "model": "openai.gpt-6-astra",
+          "effort": "none"
+        },
+        "subagent": {
+          "family": "anthropic",
+          "model": "anthropic.claude-sonnet-5-5",
+          "effort": "low"
+        },
+        "tool": {
+          "family": "anthropic",
+          "model": "anthropic.claude-haiku-5-5",
+          "effort": null
+        }
+      }
+    },
+    "all_defaults": {
+      "schema": 3,
+      "source": "settings.tuning",
+      "tiers": {
+        "supervisor": {
+          "family": null,
+          "model": null,
+          "effort": null
+        },
+        "subagent": {
+          "family": null,
+          "model": null,
+          "effort": null
+        },
+        "tool": {
+          "family": null,
+          "model": null,
+          "effort": null
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "_provenance": "Constructed to model a connection drop mid-stream on the Bedrock Messages API path: the EventStream ends after a tool_use content block's input_json_delta but before content_block_stop, message_delta, or message_stop ever arrive -- a truncated wire stream, not a well-formed short response. No live model was invoked and this fixture carries no account identifier or credential.",
+  "model_id": "anthropic.claude-sonnet-5-5",
+  "events": [
+    {
+      "type": "message_start",
+      "message": {
+        "id": "msg_bdrk_01FixtureTrunc0001",
+        "type": "message",
+        "role": "assistant",
+        "usage": { "input_tokens": 200, "output_tokens": 0 }
+      }
+    },
+    {
+      "type": "content_block_start",
+      "index": 0,
+      "content_block": {
+        "type": "tool_use",
+        "id": "toolu_bdrk_01FixtureTrunc0001",
+        "name": "update_opportunity",
+        "input": {}
+      }
+    },
+    {
+      "type": "content_block_delta",
+      "index": 0,
+      "delta": { "type": "input_json_delta", "partial_json": "{\"opportunity_id\": \"opp-1\", \"fields\": {\"stage\": " }
+    }
+  ]
+}

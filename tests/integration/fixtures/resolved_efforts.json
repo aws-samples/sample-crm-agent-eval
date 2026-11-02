@@ -1,0 +1,634 @@
+{
+  "capabilities": {
+    "default_family": "openai",
+    "models": {
+      "anthropic.claude-haiku-5-5": {
+        "assignable_tiers": [
+          "tool"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": "high",
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "anthropic",
+        "inference_profile": "global.anthropic.claude-haiku-5-5",
+        "model_id": "anthropic.claude-haiku-5-5",
+        "tier": "tool"
+      },
+      "anthropic.claude-opus-5-5": {
+        "assignable_tiers": [
+          "supervisor"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "anthropic",
+        "inference_profile": "global.anthropic.claude-opus-5-5",
+        "model_id": "anthropic.claude-opus-5-5",
+        "tier": "supervisor"
+      },
+      "anthropic.claude-sonnet-5-5": {
+        "assignable_tiers": [
+          "supervisor",
+          "subagent"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "high",
+          "supported": true,
+          "values": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "family": "anthropic",
+        "inference_profile": "global.anthropic.claude-sonnet-5-5",
+        "model_id": "anthropic.claude-sonnet-5-5",
+        "tier": "subagent"
+      },
+      "openai.gpt-6-astra": {
+        "assignable_tiers": [
+          "supervisor"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6-astra",
+        "model_id": "openai.gpt-6-astra",
+        "tier": "supervisor"
+      },
+      "openai.gpt-6-luna": {
+        "assignable_tiers": [
+          "tool"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6-luna",
+        "model_id": "openai.gpt-6-luna",
+        "tier": "tool"
+      },
+      "openai.gpt-6.1-sol": {
+        "assignable_tiers": [
+          "supervisor"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6.1-sol",
+        "model_id": "openai.gpt-6.1-sol",
+        "tier": "supervisor"
+      },
+      "openai.gpt-6.1-terra": {
+        "assignable_tiers": [
+          "subagent"
+        ],
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6.1-terra",
+        "model_id": "openai.gpt-6.1-terra",
+        "tier": "subagent"
+      }
+    },
+    "tiers": {
+      "anthropic": {
+        "subagent": {
+          "model_id": "anthropic.claude-sonnet-5-5",
+          "tuning": {
+            "effort": "low"
+          }
+        },
+        "supervisor": {
+          "model_id": "anthropic.claude-sonnet-5-5",
+          "tuning": {
+            "effort": "medium"
+          }
+        },
+        "tool": {
+          "model_id": "anthropic.claude-haiku-5-5",
+          "tuning": {
+            "effort": "low"
+          }
+        }
+      },
+      "openai": {
+        "subagent": {
+          "model_id": "openai.gpt-6.1-terra",
+          "tuning": {
+            "effort": "low"
+          }
+        },
+        "supervisor": {
+          "model_id": "openai.gpt-6.1-sol",
+          "tuning": {
+            "effort": "medium"
+          }
+        },
+        "tool": {
+          "model_id": "openai.gpt-6-luna",
+          "tuning": {
+            "effort": "low"
+          }
+        }
+      }
+    }
+  },
+  "cells": [
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "supervisor"
+    },
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "subagent"
+    },
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": null,
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-haiku-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-haiku-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-opus-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-opus-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": null,
+      "resolved_effort": "high",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "anthropic",
+      "model": "anthropic.claude-sonnet-5-5",
+      "requested": "low",
+      "resolved_effort": "low",
+      "resolved_model": "anthropic.claude-sonnet-5-5",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-luna",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-luna",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6-astra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6-astra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-sol",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-sol",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "tool"
+    }
+  ],
+  "description": "Written by tests/integration/test_effort_resolver_contract.py from providers.tier_tuning.resolve_tier; read by frontend/src/components/tuning/capabilityMatrix.test.ts. Never hand-edited."
+}

@@ -1,0 +1,96 @@
+{
+  "App.tsx": {
+    "aria-live": 1
+  },
+  "auth/SignInForm.tsx": {
+    "role=\"alert\"": 1
+  },
+  "components/RootErrorBoundary.tsx": {
+    "role=\"alert\"": 1
+  },
+  "components/diff/ConflictNotice.tsx": {
+    "role=\"alert\"": 1
+  },
+  "components/diff/ScopeDeniedNotice.tsx": {
+    "role=\"alert\"": 1
+  },
+  "components/forms/DeleteProposalButton.tsx": {
+    "role=\"alert\"": 1,
+    "role=\"status\"": 1
+  },
+  "components/forms/DepartureNotice.tsx": {
+    "role=\"status\"": 1
+  },
+  "components/forms/ErrorBanner.tsx": {
+    "role=\"alert\"": 1
+  },
+  "components/forms/ScopeDeniedNotice.tsx": {
+    "role=\"status\"": 1
+  },
+  "components/tuning/TuningControls.tsx": {
+    "role=\"alert\"": 3
+  },
+  "pages/accounts/AccountDetailPage.tsx": {
+    "aria-live": 1,
+    "role=\"status\"": 1
+  },
+  "pages/accounts/AccountEditPage.tsx": {
+    "aria-live": 1
+  },
+  "pages/activities/ActivitiesPage.tsx": {
+    "role=\"alert\"": 1
+  },
+  "pages/activities/ActivityForm.tsx": {
+    "role=\"alert\"": 1
+  },
+  "pages/activities/ActivityTimeline.tsx": {
+    "role=\"alert\"": 2
+  },
+  "pages/approvals/ApprovalsPage.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 2
+  },
+  "pages/audit/AuditPage.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 2
+  },
+  "pages/contacts/ContactDetailPage.tsx": {
+    "aria-live": 1,
+    "role=\"status\"": 1
+  },
+  "pages/contacts/ContactEditPage.tsx": {
+    "aria-live": 1
+  },
+  "pages/evals/EvalArmResults.tsx": {
+    "role=\"status\"": 1
+  },
+  "pages/evals/EvalDashboardPage.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 1,
+    "role=\"status\"": 2
+  },
+  "pages/opportunities/ApiErrorBanner.tsx": {
+    "role=\"alert\"": 1
+  },
+  "pages/opportunities/OpportunityDetailPage.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 1,
+    "role=\"status\"": 2
+  },
+  "pages/opportunities/TruncationNotice.tsx": {
+    "role=\"status\"": 1
+  },
+  "pages/pipeline/PipelineBoard.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 2,
+    "role=\"status\"": 2
+  },
+  "pages/pipeline/StageChangeConfirmDialog.tsx": {
+    "role=\"alert\"": 2
+  },
+  "pages/settings/SettingsPage.tsx": {
+    "aria-live": 1,
+    "role=\"alert\"": 2,
+    "role=\"status\"": 1
+  }
+}

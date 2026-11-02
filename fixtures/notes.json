@@ -1,0 +1,1872 @@
+[
+  {
+    "body": "Champion hinted budget could grow to 45000 and that they might sign by 2026-03-31. Nothing is confirmed yet.",
+    "created_at": "2024-06-27T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-defect-pd05",
+    "opportunity_id": "opp-demo-0056",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-06-27T00:00:00Z"
+  },
+  {
+    "body": "Technical evaluation passed. Their security team starts its review next week, so this deal is now in Security Review. Procurement confirmed a target signature date of 2026-05-29.",
+    "created_at": "2024-10-11T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-defect-pd04",
+    "opportunity_id": "opp-demo-0016",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-10-11T00:00:00Z"
+  },
+  {
+    "body": "Budget was re-approved after the freeze at 180000. Procurement now targets signature on 2026-06-30. The stage stays Discovery until the new evaluation starts.",
+    "created_at": "2024-01-28T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-defect-pd02",
+    "opportunity_id": "opp-demo-0001",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-01-28T00:00:00Z"
+  },
+  {
+    "body": "Before leaving, our champion said the security review now sits with their Head of Infrastructure, who should own this deal going forward.",
+    "created_at": "2025-11-06T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-defect-pd01",
+    "opportunity_id": "opp-demo-0000",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-06T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-21T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0000",
+    "opportunity_id": "opp-demo-0003",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-21T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0001",
+    "opportunity_id": "opp-demo-0004",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-19T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0002",
+    "opportunity_id": "opp-demo-0009",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-26T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0003",
+    "opportunity_id": "opp-demo-0011",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-14T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0004",
+    "opportunity_id": "opp-demo-0014",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-14T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-23T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0005",
+    "opportunity_id": "opp-demo-0015",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-25T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0006",
+    "opportunity_id": "opp-demo-0017",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-02-12T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0007",
+    "opportunity_id": "opp-demo-0020",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-02-12T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-19T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0008",
+    "opportunity_id": "opp-demo-0021",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-01-09T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0009",
+    "opportunity_id": "opp-demo-0022",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-01-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-10-20T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0010",
+    "opportunity_id": "opp-demo-0025",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-10-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-11-28T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0011",
+    "opportunity_id": "opp-demo-0026",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-11-28T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-26T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0012",
+    "opportunity_id": "opp-demo-0027",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-27T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0013",
+    "opportunity_id": "opp-demo-0032",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-13T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0014",
+    "opportunity_id": "opp-demo-0033",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-13T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-23T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0015",
+    "opportunity_id": "opp-demo-0034",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-09T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0016",
+    "opportunity_id": "opp-demo-0035",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-26T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0017",
+    "opportunity_id": "opp-demo-0036",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-20T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0018",
+    "opportunity_id": "opp-demo-0037",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-27T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0019",
+    "opportunity_id": "opp-demo-0039",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-05-22T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0020",
+    "opportunity_id": "opp-demo-0040",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-05-22T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-11T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0021",
+    "opportunity_id": "opp-demo-0043",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-11T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-19T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0022",
+    "opportunity_id": "opp-demo-0044",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-01T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0023",
+    "opportunity_id": "opp-demo-0046",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-03T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0024",
+    "opportunity_id": "opp-demo-0047",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-21T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0025",
+    "opportunity_id": "opp-demo-0048",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-22T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0026",
+    "opportunity_id": "opp-demo-0050",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-22T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-08T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0027",
+    "opportunity_id": "opp-demo-0052",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-27T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0028",
+    "opportunity_id": "opp-demo-0053",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-02-21T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0029",
+    "opportunity_id": "opp-demo-0054",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-02-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-24T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0030",
+    "opportunity_id": "opp-demo-0055",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-03-01T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0031",
+    "opportunity_id": "opp-demo-0056",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-03-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-24T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0032",
+    "opportunity_id": "opp-demo-0057",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-26T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0033",
+    "opportunity_id": "opp-demo-0059",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-03-08T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0034",
+    "opportunity_id": "opp-demo-0060",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-03-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-22T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0035",
+    "opportunity_id": "opp-demo-0062",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-22T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-26T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0036",
+    "opportunity_id": "opp-demo-0063",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-08-15T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0037",
+    "opportunity_id": "opp-demo-0065",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-08-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-27T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0038",
+    "opportunity_id": "opp-demo-0066",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-09T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0039",
+    "opportunity_id": "opp-demo-0067",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-04-23T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0040",
+    "opportunity_id": "opp-demo-0068",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-04-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-10T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0041",
+    "opportunity_id": "opp-demo-0069",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-11T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0042",
+    "opportunity_id": "opp-demo-0070",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-11T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-21T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0043",
+    "opportunity_id": "opp-demo-0071",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-01-07T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0044",
+    "opportunity_id": "opp-demo-0072",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-01-07T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-15T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0045",
+    "opportunity_id": "opp-demo-0073",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-08T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0046",
+    "opportunity_id": "opp-demo-0076",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-06T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0047",
+    "opportunity_id": "opp-demo-0077",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-06T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-31T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0048",
+    "opportunity_id": "opp-demo-0078",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-31T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-02-26T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0049",
+    "opportunity_id": "opp-demo-0079",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-02-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-13T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0050",
+    "opportunity_id": "opp-demo-0080",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-13T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-06T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0051",
+    "opportunity_id": "opp-demo-0081",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-06T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-27T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0052",
+    "opportunity_id": "opp-demo-0082",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-21T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0053",
+    "opportunity_id": "opp-demo-0083",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2023-12-11T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0054",
+    "opportunity_id": "opp-demo-0084",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2023-12-11T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-29T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0055",
+    "opportunity_id": "opp-demo-0085",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-21T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0056",
+    "opportunity_id": "opp-demo-0086",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-06T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0057",
+    "opportunity_id": "opp-demo-0087",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-06T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-30T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0058",
+    "opportunity_id": "opp-demo-0089",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-30T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-04-26T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0059",
+    "opportunity_id": "opp-demo-0093",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-04-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-08T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0060",
+    "opportunity_id": "opp-demo-0095",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-23T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0061",
+    "opportunity_id": "opp-demo-0096",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-04-11T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0062",
+    "opportunity_id": "opp-demo-0099",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-04-11T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-13T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0063",
+    "opportunity_id": "opp-demo-0100",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-13T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-05T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0064",
+    "opportunity_id": "opp-demo-0101",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-05T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-05T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0065",
+    "opportunity_id": "opp-demo-0102",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-05T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-01T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0066",
+    "opportunity_id": "opp-demo-0106",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-19T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0067",
+    "opportunity_id": "opp-demo-0110",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-07-20T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0068",
+    "opportunity_id": "opp-demo-0113",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-07-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-23T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0069",
+    "opportunity_id": "opp-demo-0116",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-10T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0070",
+    "opportunity_id": "opp-demo-0117",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-09-14T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0071",
+    "opportunity_id": "opp-demo-0119",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-09-14T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-25T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0072",
+    "opportunity_id": "opp-demo-0120",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-17T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0073",
+    "opportunity_id": "opp-demo-0122",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-17T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-26T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0074",
+    "opportunity_id": "opp-demo-0124",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-21T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0075",
+    "opportunity_id": "opp-demo-0126",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-10T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0076",
+    "opportunity_id": "opp-demo-0127",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-19T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0077",
+    "opportunity_id": "opp-demo-0128",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-23T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0078",
+    "opportunity_id": "opp-demo-0129",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-17T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0079",
+    "opportunity_id": "opp-demo-0130",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-17T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-08T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0080",
+    "opportunity_id": "opp-demo-0131",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-28T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0081",
+    "opportunity_id": "opp-demo-0132",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-28T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-02T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0082",
+    "opportunity_id": "opp-demo-0135",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-02T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-02-15T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0083",
+    "opportunity_id": "opp-demo-0141",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-02-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-02T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0084",
+    "opportunity_id": "opp-demo-0142",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-02T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-07T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0085",
+    "opportunity_id": "opp-demo-0144",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-07T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-25T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0086",
+    "opportunity_id": "opp-demo-0148",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-05T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0087",
+    "opportunity_id": "opp-demo-0152",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-05T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-23T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0088",
+    "opportunity_id": "opp-demo-0154",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-29T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0089",
+    "opportunity_id": "opp-demo-0155",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-24T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0090",
+    "opportunity_id": "opp-demo-0156",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-25T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0091",
+    "opportunity_id": "opp-demo-0157",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-23T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0092",
+    "opportunity_id": "opp-demo-0160",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-28T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0093",
+    "opportunity_id": "opp-demo-0162",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-28T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-09T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0094",
+    "opportunity_id": "opp-demo-0164",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-16T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0095",
+    "opportunity_id": "opp-demo-0167",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-16T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-05-09T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0096",
+    "opportunity_id": "opp-demo-0169",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-05-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-20T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0097",
+    "opportunity_id": "opp-demo-0171",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-08T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0098",
+    "opportunity_id": "opp-demo-0172",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-08T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-08-23T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0099",
+    "opportunity_id": "opp-demo-0174",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-08-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-30T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0100",
+    "opportunity_id": "opp-demo-0177",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-30T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-25T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0101",
+    "opportunity_id": "opp-demo-0178",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-25T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0102",
+    "opportunity_id": "opp-demo-0179",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-15T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0103",
+    "opportunity_id": "opp-demo-0180",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-03-23T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0104",
+    "opportunity_id": "opp-demo-0181",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-03-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-16T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0105",
+    "opportunity_id": "opp-demo-0182",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-16T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-29T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0106",
+    "opportunity_id": "opp-demo-0183",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-06-03T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0107",
+    "opportunity_id": "opp-demo-0184",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-06-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-21T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0108",
+    "opportunity_id": "opp-demo-0185",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-26T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0109",
+    "opportunity_id": "opp-demo-0187",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-06-24T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0110",
+    "opportunity_id": "opp-demo-0189",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-06-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-04-21T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0111",
+    "opportunity_id": "opp-demo-0190",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-04-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-02T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0112",
+    "opportunity_id": "opp-demo-0192",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-02T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-02-21T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0113",
+    "opportunity_id": "opp-demo-0193",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-02-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2026-01-01T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0114",
+    "opportunity_id": "opp-demo-0195",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-17T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0115",
+    "opportunity_id": "opp-demo-0197",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-17T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-03T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0116",
+    "opportunity_id": "opp-demo-0199",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-09-20T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0117",
+    "opportunity_id": "opp-demo-0200",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-09-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-16T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0118",
+    "opportunity_id": "opp-demo-0201",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-16T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-04-24T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0119",
+    "opportunity_id": "opp-demo-0202",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-04-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-10T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0120",
+    "opportunity_id": "opp-demo-0203",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-29T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0121",
+    "opportunity_id": "opp-demo-0205",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-10T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0122",
+    "opportunity_id": "opp-demo-0206",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-05T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0123",
+    "opportunity_id": "opp-demo-0207",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-05T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-31T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0124",
+    "opportunity_id": "opp-demo-0208",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-31T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-20T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0125",
+    "opportunity_id": "opp-demo-0210",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-25T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0126",
+    "opportunity_id": "opp-demo-0211",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-13T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0127",
+    "opportunity_id": "opp-demo-0212",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-13T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-01T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0128",
+    "opportunity_id": "opp-demo-0213",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-19T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0129",
+    "opportunity_id": "opp-demo-0214",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-18T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0130",
+    "opportunity_id": "opp-demo-0216",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-18T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-30T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0131",
+    "opportunity_id": "opp-demo-0217",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-30T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-18T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0132",
+    "opportunity_id": "opp-demo-0218",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-18T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-25T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0133",
+    "opportunity_id": "opp-demo-0220",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-26T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0134",
+    "opportunity_id": "opp-demo-0221",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2026-01-01T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0135",
+    "opportunity_id": "opp-demo-0222",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2026-01-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-12-19T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0136",
+    "opportunity_id": "opp-demo-0223",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-12-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-29T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0137",
+    "opportunity_id": "opp-demo-0224",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-19T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0138",
+    "opportunity_id": "opp-demo-0225",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-22T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0139",
+    "opportunity_id": "opp-demo-0227",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-22T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-15T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0140",
+    "opportunity_id": "opp-demo-0228",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-03T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0141",
+    "opportunity_id": "opp-demo-0231",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-27T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0142",
+    "opportunity_id": "opp-demo-0232",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-12T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0143",
+    "opportunity_id": "opp-demo-0234",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-12T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-07-17T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0144",
+    "opportunity_id": "opp-demo-0235",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-07-17T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-02T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0145",
+    "opportunity_id": "opp-demo-0236",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-02T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-30T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0146",
+    "opportunity_id": "opp-demo-0237",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-30T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-25T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0147",
+    "opportunity_id": "opp-demo-0239",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-23T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0148",
+    "opportunity_id": "opp-demo-0240",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-03-01T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0149",
+    "opportunity_id": "opp-demo-0242",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-03-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-24T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0150",
+    "opportunity_id": "opp-demo-0243",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-24T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-21T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0151",
+    "opportunity_id": "opp-demo-0244",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-21T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-29T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0152",
+    "opportunity_id": "opp-demo-0245",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-29T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-09-27T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0153",
+    "opportunity_id": "opp-demo-0246",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-09-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-01-28T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0154",
+    "opportunity_id": "opp-demo-0247",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-01-28T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-01T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0155",
+    "opportunity_id": "opp-demo-0248",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-10T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0156",
+    "opportunity_id": "opp-demo-0250",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-10T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-03-03T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0157",
+    "opportunity_id": "opp-demo-0251",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-03-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-17T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0158",
+    "opportunity_id": "opp-demo-0254",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-17T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-15T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0159",
+    "opportunity_id": "opp-demo-0255",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-15T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-23T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0160",
+    "opportunity_id": "opp-demo-0257",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-23T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-27T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0161",
+    "opportunity_id": "opp-demo-0258",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-27T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-01T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0162",
+    "opportunity_id": "opp-demo-0259",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-01T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-08-06T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0163",
+    "opportunity_id": "opp-demo-0260",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-08-06T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-14T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0164",
+    "opportunity_id": "opp-demo-0262",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-14T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2024-05-30T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0165",
+    "opportunity_id": "opp-demo-0266",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2024-05-30T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-09T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0166",
+    "opportunity_id": "opp-demo-0267",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-14T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0167",
+    "opportunity_id": "opp-demo-0268",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-14T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-25T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0168",
+    "opportunity_id": "opp-demo-0269",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-09T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0169",
+    "opportunity_id": "opp-demo-0270",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-10-28T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0170",
+    "opportunity_id": "opp-demo-0275",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-10-28T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-01-19T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0171",
+    "opportunity_id": "opp-demo-0277",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-01-19T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-03T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0172",
+    "opportunity_id": "opp-demo-0278",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-26T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0173",
+    "opportunity_id": "opp-demo-0281",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-04T00:00:00Z",
+    "created_by": "rep-emberly",
+    "note_id": "note-demo-0174",
+    "opportunity_id": "opp-demo-0284",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-04T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-20T00:00:00Z",
+    "created_by": "rep-greenlaw",
+    "note_id": "note-demo-0175",
+    "opportunity_id": "opp-demo-0286",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-11-26T00:00:00Z",
+    "created_by": "rep-ashford",
+    "note_id": "note-demo-0176",
+    "opportunity_id": "opp-demo-0288",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-11-26T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-20T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0177",
+    "opportunity_id": "opp-demo-0289",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-20T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-06-09T00:00:00Z",
+    "created_by": "rep-calder",
+    "note_id": "note-demo-0178",
+    "opportunity_id": "opp-demo-0290",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-06-09T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-22T00:00:00Z",
+    "created_by": "rep-delgado",
+    "note_id": "note-demo-0179",
+    "opportunity_id": "opp-demo-0291",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-22T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-12-25T00:00:00Z",
+    "created_by": "rep-farro",
+    "note_id": "note-demo-0180",
+    "opportunity_id": "opp-demo-0293",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-12-25T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-02-03T00:00:00Z",
+    "created_by": "rep-holcombe",
+    "note_id": "note-demo-0181",
+    "opportunity_id": "opp-demo-0295",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-02-03T00:00:00Z"
+  },
+  {
+    "body": "Standard check-in; no material change to plan.",
+    "created_at": "2025-09-23T00:00:00Z",
+    "created_by": "rep-brixton",
+    "note_id": "note-demo-0182",
+    "opportunity_id": "opp-demo-0297",
+    "schema_version": 1,
+    "tenant": "demo",
+    "updated_at": "2025-09-23T00:00:00Z"
+  }
+]

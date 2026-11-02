@@ -1,0 +1,224 @@
+{
+  "_provenance": "Recorded live 2026-10-25: one billable call, --region us-east-1, assumed-role SigV4 from an aws-vault session, through the shipped adapter's request builder and the vendor SDK over an httpx2 transport that tees the raw response body; the output-token cap was lowered to 256 for the recording. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "anthropic",
+  "model_profile": "global.anthropic.claude-haiku-5-5",
+  "recorded_on": "2026-10-25",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/model/global.anthropic.claude-haiku-5-5/invoke-with-response-stream",
+    "body": {
+      "max_tokens": 256,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call get_account for account a-1."
+        }
+      ],
+      "output_config": {
+        "effort": "low"
+      },
+      "thinking": {
+        "type": "adaptive"
+      },
+      "tools": [
+        {
+          "name": "get_account",
+          "description": "Fetch one CRM account by id.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "account_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account_id"
+            ]
+          }
+        }
+      ],
+      "anthropic_version": "bedrock-2023-05-31"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/vnd.amazon.eventstream",
+    "body_b64": "AAAC7AAAAEskwMykCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaWJXVnpjMkZuWlY5emRHRnlkQ0lzSW0xbGMzTmhaMlVpT25zaWJXOWtaV3dpT2lKamJHRjFaR1V0YUdGcGEzVXROUzAxSWl3aWFXUWlPaUp0YzJkZlltUnlhMTkwTW5kMmMyaHJObTUwZG01bGRUUmpjbkkyZFRjM2NESmtaSGQ1YUdWd2JEVmpaak5sYTNSeWMzWTJOSEpqY0RRM05HOWhJaXdpZEhsd1pTSTZJbTFsYzNOaFoyVWlMQ0p5YjJ4bElqb2lZWE56YVhOMFlXNTBJaXdpWTI5dWRHVnVkQ0k2VzEwc0ltTnZiblJoYVc1bGNpSTZiblZzYkN3aWMzUnZjRjl5WldGemIyNGlPbTUxYkd3c0luTjBiM0JmYzJWeGRXVnVZMlVpT201MWJHd3NJbk4wYjNCZlpHVjBZV2xzY3lJNmJuVnNiQ3dpZFhOaFoyVWlPbnNpYVc1d2RYUmZkRzlyWlc1eklqb3pPRElzSW1OaFkyaGxYMk55WldGMGFXOXVYMmx1Y0hWMFgzUnZhMlZ1Y3lJNk1Dd2lZMkZqYUdWZmNtVmhaRjlwYm5CMWRGOTBiMnRsYm5NaU9qQXNJbU5oWTJobFgyTnlaV0YwYVc5dUlqcDdJbVZ3YUdWdFpYSmhiRjgxYlY5cGJuQjFkRjkwYjJ0bGJuTWlPakFzSW1Wd2FHVnRaWEpoYkY4eGFGOXBibkIxZEY5MGIydGxibk1pT2pCOUxDSnZkWFJ3ZFhSZmRHOXJaVzV6SWpveE5pd2ljMlZ5ZG1salpWOTBhV1Z5SWpvaWMzUmhibVJoY21RaWZYMTkiLCJwIjoiYWJjZGVmZ2hpaiJ92qfb6AAAAWgAAABL5jKoWAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5emRHRnlkQ0lzSW1sdVpHVjRJam93TENKamIyNTBaVzUwWDJKc2IyTnJJanA3SW5SNWNHVWlPaUowYjI5c1gzVnpaU0lzSW1sa0lqb2lkRzl2YkhWZlltUnlhMTh3TVZaMmEwTjZSRGhqYUVoSVRtNDNSa0UyTmpGWVIzTWlMQ0p1WVcxbElqb2laMlYwWDJGalkyOTFiblFpTENKcGJuQjFkQ0k2ZTMxOWZRPT0iLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKS0xNTk9QUVJTVCJ9azb+zQAAAPYAAABLQ1jijAs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pYVc1d2RYUmZhbk52Ymw5a1pXeDBZU0lzSW5CaGNuUnBZV3hmYW5OdmJpSTZJaUo5ZlE9PSIsInAiOiJhYmNkZWZnaCJ99my+5QAAARIAAABLVVBQNgs6ZXZlbnQtdHlwZQcABWNodW5rDTpjb250ZW50LXR5cGUHABBhcHBsaWNhdGlvbi9qc29uDTptZXNzYWdlLXR5cGUHAAVldmVudHsiYnl0ZXMiOiJleUowZVhCbElqb2lZMjl1ZEdWdWRGOWliRzlqYTE5a1pXeDBZU0lzSW1sdVpHVjRJam93TENKa1pXeDBZU0k2ZXlKMGVYQmxJam9pYVc1d2RYUmZhbk52Ymw5a1pXeDBZU0lzSW5CaGNuUnBZV3hmYW5OdmJpSTZJbnRjSW1GalkyOTFiblJmSW4xOSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3gifSIfR3IAAAESAAAAS1VQUDYLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOWtaV3gwWVNJc0ltbHVaR1Y0SWpvd0xDSmtaV3gwWVNJNmV5SjBlWEJsSWpvaWFXNXdkWFJmYW5OdmJsOWtaV3gwWVNJc0luQmhjblJwWVd4ZmFuTnZiaUk2SW1sa0luMTkiLCJwIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQkNERUZHSElKIn29LgXkAAABMQAAAEvTMQXiCzpldmVudC10eXBlBwAFY2h1bmsNOmNvbnRlbnQtdHlwZQcAEGFwcGxpY2F0aW9uL2pzb24NOm1lc3NhZ2UtdHlwZQcABWV2ZW50eyJieXRlcyI6ImV5SjBlWEJsSWpvaVkyOXVkR1Z1ZEY5aWJHOWphMTlrWld4MFlTSXNJbWx1WkdWNElqb3dMQ0prWld4MFlTSTZleUowZVhCbElqb2lhVzV3ZFhSZmFuTnZibDlrWld4MFlTSXNJbkJoY25ScFlXeGZhbk52YmlJNklsd2lPaUJjSW1FdE1Wd2lmU0o5ZlE9PSIsInAiOiJhYmNkZWZnaGlqa2xtbm9wcXJzdHV2d3h5ekFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFkifdCdWrEAAACoAAAAS8R7kyYLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pWTI5dWRHVnVkRjlpYkc5amExOXpkRzl3SWl3aWFXNWtaWGdpT2pCOSIsInAiOiJhYmNkZWYifa3NXToAAAHjAAAASyAEKdsLOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjlrWld4MFlTSXNJbVJsYkhSaElqcDdJbk4wYjNCZmNtVmhjMjl1SWpvaWRHOXZiRjkxYzJVaUxDSnpkRzl3WDNObGNYVmxibU5sSWpwdWRXeHNMQ0p6ZEc5d1gyUmxkR0ZwYkhNaU9tNTFiR3dzSW1OdmJuUmhhVzVsY2lJNmJuVnNiSDBzSW5WellXZGxJanA3SW1sdWNIVjBYM1J2YTJWdWN5STZNemd5TENKallXTm9aVjlqY21WaGRHbHZibDlwYm5CMWRGOTBiMnRsYm5NaU9qQXNJbU5oWTJobFgzSmxZV1JmYVc1d2RYUmZkRzlyWlc1eklqb3dMQ0p2ZFhSd2RYUmZkRzlyWlc1eklqbzFNU3dpYjNWMGNIVjBYM1J2YTJWdWMxOWtaWFJoYVd4eklqcDdJblJvYVc1cmFXNW5YM1J2YTJWdWN5STZNSDE5ZlE9PSIsInAiOiJhYmNkZWZnaGkifRzbdtwAAAFRAAAAS0oDcq8LOmV2ZW50LXR5cGUHAAVjaHVuaw06Y29udGVudC10eXBlBwAQYXBwbGljYXRpb24vanNvbg06bWVzc2FnZS10eXBlBwAFZXZlbnR7ImJ5dGVzIjoiZXlKMGVYQmxJam9pYldWemMyRm5aVjl6ZEc5d0lpd2lZVzFoZW05dUxXSmxaSEp2WTJzdGFXNTJiMk5oZEdsdmJrMWxkSEpwWTNNaU9uc2lhVzV3ZFhSVWIydGxia052ZFc1MElqb3pPRElzSW05MWRIQjFkRlJ2YTJWdVEyOTFiblFpT2pVeExDSnBiblp2WTJGMGFXOXVUR0YwWlc1amVTSTZNVE13T0N3aVptbHljM1JDZVhSbFRHRjBaVzVqZVNJNk1USXdObjE5IiwicCI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3In2MIRhz"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "stop_reason": "tool_use",
+    "blocks": [
+      "tool_use"
+    ]
+  },
+  "decoded_events": [
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_start",
+        "message": {
+          "model": "claude-haiku-5-5",
+          "id": "msg_bdrk_t2wvshk6ntvneu4crr6u77p2ddwyhepl5cf3ektrsv64rcp474oa",
+          "type": "message",
+          "role": "assistant",
+          "content": [],
+          "container": null,
+          "stop_reason": null,
+          "stop_sequence": null,
+          "stop_details": null,
+          "usage": {
+            "input_tokens": 382,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens": 16,
+            "service_tier": "standard"
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+          "type": "tool_use",
+          "id": "toolu_bdrk_01VvkCzD8chHHNn7FA661XGs",
+          "name": "get_account",
+          "input": {}
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": ""
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "{\"account_"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "id"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {
+          "type": "input_json_delta",
+          "partial_json": "\": \"a-1\"}"
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "content_block_stop",
+        "index": 0
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_delta",
+        "delta": {
+          "stop_reason": "tool_use",
+          "stop_sequence": null,
+          "stop_details": null,
+          "container": null
+        },
+        "usage": {
+          "input_tokens": 382,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 51,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          }
+        }
+      }
+    },
+    {
+      "headers": {
+        ":event-type": "chunk",
+        ":content-type": "application/json",
+        ":message-type": "event"
+      },
+      "event": {
+        "type": "message_stop",
+        "amazon-bedrock-invocationMetrics": {
+          "inputTokenCount": 382,
+          "outputTokenCount": 51,
+          "invocationLatency": 1308,
+          "firstByteLatency": 1206
+        }
+      }
+    }
+  ]
+}

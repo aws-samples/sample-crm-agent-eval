@@ -1,0 +1,12 @@
+# Example partial-backend config for `terraform init -backend-config=backend.hcl`.
+#
+# Copy this file to `backend.hcl` (gitignored) or let
+# `infra/bootstrap_state_backend.sh` write it for you after it creates the state
+# bucket, KMS CMK, access-log bucket, and lock table. Never commit the
+# real `backend.hcl` — it names account-specific resources.
+
+bucket         = "REPLACE_WITH_STATE_BUCKET_NAME"
+key            = "crm-agent-eval/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "REPLACE_WITH_LOCK_TABLE_NAME"
+encrypt        = true

@@ -1,0 +1,19 @@
+{
+  "arm": "anthropic",
+  "attributions": "[{\"cache\": {\"read_tokens\": 0, \"write_tokens\": 0}, \"latency_ms\": null, \"model_id\": \"anthropic.claude-opus-5-5\", \"role\": \"supervisor\", \"tier\": \"supervisor\", \"tokens\": {\"input_tokens\": 128, \"output_tokens\": 32}}]",
+  "cost_usd": 0.0011519999999999998,
+  "exclusions": "[]",
+  "item_status": "done",
+  "outcome": "{\"budget_exhausted\": false, \"denial_missing_scope\": null, \"denial_outcome\": null, \"observed_outcomes\": [], \"proposals\": [], \"tenant\": \"eval-dc5d3b52290b47a9b169083f874fcc1c\", \"tool_calls\": [], \"truncated\": false, \"truncation_disclosed\": false}",
+  "result_id": "00#gt-01-investigation-pd01-successor",
+  "run_id": "dc5d3b52290b47a9b169083f874fcc1c",
+  "run_id_task_id": "dc5d3b52290b47a9b169083f874fcc1c#gt-01-investigation-pd01-successor",
+  "stream_calls": 1,
+  "task_id": "gt-01-investigation-pd01-successor",
+  "task_score": "{\"assertion_results\": [{\"detail\": \"\", \"name\": \"must_not_change[opportunities.opp-eval-dc5d3b52290b47a9b169083f874fcc1c-0000.stage]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"\", \"name\": \"must_not_change[opportunities.opp-eval-dc5d3b52290b47a9b169083f874fcc1c-0000.value]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"\", \"name\": \"must_not_change[opportunities.opp-eval-dc5d3b52290b47a9b169083f874fcc1c-0000.close_date]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"\", \"name\": \"must_not_change[opportunities.opp-eval-dc5d3b52290b47a9b169083f874fcc1c-0000.owner_rep_id]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"\", \"name\": \"must_not_change[contacts.cont-eval-dc5d3b52290b47a9b169083f874fcc1c-0000.status]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"created 0 proposal(s), limit is 1\", \"name\": \"max_proposal_count\", \"passed\": true, \"unscored\": false}, {\"detail\": \"no proposal matched {'target_table': 'opportunities', 'target_id': 'opp-eval-dc5d3b52290b47a9b169083f874fcc1c-0000', 'operation': 'update'}\", \"name\": \"expected_proposal\", \"passed\": false, \"unscored\": false}, {\"detail\": \"\", \"name\": \"forbidden_outcomes[fabricated_contact_name]\", \"passed\": true, \"unscored\": false}, {\"detail\": \"turn made no tool call at all; a do-nothing turn cannot be tool-call correct\", \"name\": \"tool_call_correctness\", \"passed\": false, \"unscored\": false}], \"bad_write\": false, \"budget_exhausted\": false, \"correctness\": 0.7777777777777778, \"scoring_mode\": \"machine\", \"task_id\": \"gt-01-investigation-pd01-successor\", \"tool_call_correct\": false, \"truncated\": false, \"unscored_reason\": null}",
+  "tenant": "eval-dc5d3b52290b47a9b169083f874fcc1c",
+  "tier_scores": "{\"subagent\": {\"applicable\": true, \"detail\": \"delegation outcome None, expected 'data'\", \"passed\": false}, \"supervisor\": {\"applicable\": true, \"detail\": \"task correctness 0.777778 is below 1.0\", \"passed\": false}, \"task_id\": \"gt-01-investigation-pd01-successor\", \"tool\": {\"applicable\": true, \"detail\": \"none of ['submit_proposal'] was called\", \"passed\": false}}",
+  "tool_arguments": "[]",
+  "tool_calls": "[]",
+  "turn_latency_ms": 3.7153330004002783
+}

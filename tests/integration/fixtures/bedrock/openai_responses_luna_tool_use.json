@@ -1,0 +1,379 @@
+{
+  "_provenance": "Recorded live 2026-09-30: one billable call, --profile default --region us-east-1, IAM-user SigV4, through the vendor SDK over an httpx2 transport that tees the raw response body. body_b64 is the byte-exact wire body; only response headers carrying request ids and the date were dropped. decoded_events is a plaintext decode of every frame for review and scanning; it is derived, not authoritative.",
+  "kind": "recorded",
+  "family": "openai",
+  "model_profile": "global.openai.gpt-6-luna",
+  "recorded_on": "2026-09-30",
+  "region": "us-east-1",
+  "request": {
+    "method": "POST",
+    "path": "/openai/v1/responses",
+    "body": {
+      "input": "Call get_account for account a-1.",
+      "max_output_tokens": 256,
+      "model": "global.openai.gpt-6-luna",
+      "reasoning": {
+        "effort": "low"
+      },
+      "stream": true,
+      "tools": [
+        {
+          "type": "function",
+          "name": "get_account",
+          "description": "Fetch one CRM account by id.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "account_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "account_id"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "text/event-stream",
+    "body_b64": "ZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjpudWxsLCJjcmVhdGVkX2F0IjoxNzkwNzg3OTgwLCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwX3loejNweW50ejVrNmpmc3c0ZHh5anZvd2kzbmJkbzI0aGdpajZjb3FqeDZoZ2pwcGF0c2EiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJvYmplY3QiOiJyZXNwb25zZSIsIm91dHB1dCI6W10sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwic3RvcmUiOnRydWUsInRlbXBlcmF0dXJlIjoxLjAsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In0sInZlcmJvc2l0eSI6Im1lZGl1bSJ9LCJ0b29sX2Nob2ljZSI6ImF1dG8iLCJ0b29scyI6W3siZGVzY3JpcHRpb24iOiJGZXRjaCBvbmUgQ1JNIGFjY291bnQgYnkgaWQuIiwibmFtZSI6ImdldF9hY2NvdW50Iiwib3V0cHV0X3NjaGVtYSI6bnVsbCwicGFyYW1ldGVycyI6eyJ0eXBlIjoib2JqZWN0IiwicHJvcGVydGllcyI6eyJhY2NvdW50X2lkIjp7InR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImFjY291bnRfaWQiXX0sInN0cmljdCI6dHJ1ZSwidHlwZSI6ImZ1bmN0aW9uIn1dLCJ0b3BfbG9ncHJvYnMiOjAsInRvcF9wIjowLjk4LCJ0cnVuY2F0aW9uIjoiZGlzYWJsZWQiLCJ1c2FnZSI6bnVsbCwidXNlciI6bnVsbCwibW9kZXJhdGlvbiI6bnVsbH0sInNlcXVlbmNlX251bWJlciI6MCwidHlwZSI6InJlc3BvbnNlLmNyZWF0ZWQifQoKZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjpudWxsLCJjcmVhdGVkX2F0IjoxNzkwNzg3OTgwLCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwX3loejNweW50ejVrNmpmc3c0ZHh5anZvd2kzbmJkbzI0aGdpajZjb3FqeDZoZ2pwcGF0c2EiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJvYmplY3QiOiJyZXNwb25zZSIsIm91dHB1dCI6W10sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInN0YXR1cyI6ImluX3Byb2dyZXNzIiwic3RvcmUiOnRydWUsInRlbXBlcmF0dXJlIjoxLjAsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In0sInZlcmJvc2l0eSI6Im1lZGl1bSJ9LCJ0b29sX2Nob2ljZSI6ImF1dG8iLCJ0b29scyI6W3siZGVzY3JpcHRpb24iOiJGZXRjaCBvbmUgQ1JNIGFjY291bnQgYnkgaWQuIiwibmFtZSI6ImdldF9hY2NvdW50Iiwib3V0cHV0X3NjaGVtYSI6bnVsbCwicGFyYW1ldGVycyI6eyJ0eXBlIjoib2JqZWN0IiwicHJvcGVydGllcyI6eyJhY2NvdW50X2lkIjp7InR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImFjY291bnRfaWQiXX0sInN0cmljdCI6dHJ1ZSwidHlwZSI6ImZ1bmN0aW9uIn1dLCJ0b3BfbG9ncHJvYnMiOjAsInRvcF9wIjowLjk4LCJ0cnVuY2F0aW9uIjoiZGlzYWJsZWQiLCJ1c2FnZSI6bnVsbCwidXNlciI6bnVsbCwibW9kZXJhdGlvbiI6bnVsbH0sInNlcXVlbmNlX251bWJlciI6MSwidHlwZSI6InJlc3BvbnNlLmluX3Byb2dyZXNzIn0KCmRhdGE6IHsiaXRlbSI6eyJhcmd1bWVudHMiOiIiLCJjYWxsX2lkIjoiY2FsbF85MDIzNDZlMjdiN2Y1OWY1ODIyYWU3MWY5Yjk5M2Y5MSIsImlkIjoiZmNfZmQzYjAxODc4MjhmNWQ0M2ExNDgzMWUyZWM0MGYzN2QiLCJuYW1lIjoiZ2V0X2FjY291bnQiLCJzdGF0dXMiOiJpbl9wcm9ncmVzcyIsInR5cGUiOiJmdW5jdGlvbl9jYWxsIn0sIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjoyLCJ0eXBlIjoicmVzcG9uc2Uub3V0cHV0X2l0ZW0uYWRkZWQifQoKZGF0YTogeyJkZWx0YSI6IntcIiIsIml0ZW1faWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm9iZnVzY2F0aW9uIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1Iiwib3V0cHV0X2luZGV4IjowLCJzZXF1ZW5jZV9udW1iZXIiOjMsInR5cGUiOiJyZXNwb25zZS5mdW5jdGlvbl9jYWxsX2FyZ3VtZW50cy5kZWx0YSJ9CgpkYXRhOiB7ImRlbHRhIjoiYWNjb3VudCIsIml0ZW1faWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm9iZnVzY2F0aW9uIjoiYWJjZGUiLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6NCwidHlwZSI6InJlc3BvbnNlLmZ1bmN0aW9uX2NhbGxfYXJndW1lbnRzLmRlbHRhIn0KCmRhdGE6IHsiZGVsdGEiOiJfaWQiLCJpdGVtX2lkIjoiZmNfZmQzYjAxODc4MjhmNWQ0M2ExNDgzMWUyZWM0MGYzN2QiLCJvYmZ1c2NhdGlvbiI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSksiLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6NSwidHlwZSI6InJlc3BvbnNlLmZ1bmN0aW9uX2NhbGxfYXJndW1lbnRzLmRlbHRhIn0KCmRhdGE6IHsiZGVsdGEiOiJcIjpcIiIsIml0ZW1faWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm9iZnVzY2F0aW9uIjoiYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXpBQiIsIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjo2LCJ0eXBlIjoicmVzcG9uc2UuZnVuY3Rpb25fY2FsbF9hcmd1bWVudHMuZGVsdGEifQoKZGF0YTogeyJkZWx0YSI6ImEiLCJpdGVtX2lkIjoiZmNfZmQzYjAxODc4MjhmNWQ0M2ExNDgzMWUyZWM0MGYzN2QiLCJvYmZ1c2NhdGlvbiI6ImFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6QUJDREVGR0hJSktMTU5PUCIsIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjo3LCJ0eXBlIjoicmVzcG9uc2UuZnVuY3Rpb25fY2FsbF9hcmd1bWVudHMuZGVsdGEifQoKZGF0YTogeyJkZWx0YSI6Ii0iLCJpdGVtX2lkIjoiZmNfZmQzYjAxODc4MjhmNWQ0M2ExNDgzMWUyZWM0MGYzN2QiLCJvYmZ1c2NhdGlvbiI6ImFiY2RlZmdoaWprbG1ub3BxIiwib3V0cHV0X2luZGV4IjowLCJzZXF1ZW5jZV9udW1iZXIiOjgsInR5cGUiOiJyZXNwb25zZS5mdW5jdGlvbl9jYWxsX2FyZ3VtZW50cy5kZWx0YSJ9CgpkYXRhOiB7ImRlbHRhIjoiMSIsIml0ZW1faWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm9iZnVzY2F0aW9uIjoiYWJjZGVmZ2hpIiwib3V0cHV0X2luZGV4IjowLCJzZXF1ZW5jZV9udW1iZXIiOjksInR5cGUiOiJyZXNwb25zZS5mdW5jdGlvbl9jYWxsX2FyZ3VtZW50cy5kZWx0YSJ9CgpkYXRhOiB7ImRlbHRhIjoiXCJ9IiwiaXRlbV9pZCI6ImZjX2ZkM2IwMTg3ODI4ZjVkNDNhMTQ4MzFlMmVjNDBmMzdkIiwib2JmdXNjYXRpb24iOiJhYmNkZWZnaGlqa2wiLCJvdXRwdXRfaW5kZXgiOjAsInNlcXVlbmNlX251bWJlciI6MTAsInR5cGUiOiJyZXNwb25zZS5mdW5jdGlvbl9jYWxsX2FyZ3VtZW50cy5kZWx0YSJ9CgpkYXRhOiB7ImFyZ3VtZW50cyI6IntcImFjY291bnRfaWRcIjpcImEtMVwifSIsIml0ZW1faWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjoxMSwidHlwZSI6InJlc3BvbnNlLmZ1bmN0aW9uX2NhbGxfYXJndW1lbnRzLmRvbmUifQoKZGF0YTogeyJpdGVtIjp7ImFyZ3VtZW50cyI6IntcImFjY291bnRfaWRcIjpcImEtMVwifSIsImNhbGxfaWQiOiJjYWxsXzkwMjM0NmUyN2I3ZjU5ZjU4MjJhZTcxZjliOTkzZjkxIiwiaWQiOiJmY19mZDNiMDE4NzgyOGY1ZDQzYTE0ODMxZTJlYzQwZjM3ZCIsIm5hbWUiOiJnZXRfYWNjb3VudCIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInR5cGUiOiJmdW5jdGlvbl9jYWxsIn0sIm91dHB1dF9pbmRleCI6MCwic2VxdWVuY2VfbnVtYmVyIjoxMiwidHlwZSI6InJlc3BvbnNlLm91dHB1dF9pdGVtLmRvbmUifQoKZGF0YTogeyJyZXNwb25zZSI6eyJiYWNrZ3JvdW5kIjpmYWxzZSwiY29tcGxldGVkX2F0IjoxNzkwNzg3OTkwLCJjcmVhdGVkX2F0IjoxNzkwNzg3OTgwLCJlcnJvciI6bnVsbCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAuMCwiaWQiOiJyZXNwX3loejNweW50ejVrNmpmc3c0ZHh5anZvd2kzbmJkbzI0aGdpajZjb3FqeDZoZ2pwcGF0c2EiLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsImluc3RydWN0aW9ucyI6bnVsbCwibWF4X291dHB1dF90b2tlbnMiOjI1NiwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJvYmplY3QiOiJyZXNwb25zZSIsIm91dHB1dCI6W3siYXJndW1lbnRzIjoie1wiYWNjb3VudF9pZFwiOlwiYS0xXCJ9IiwiY2FsbF9pZCI6ImNhbGxfOTAyMzQ2ZTI3YjdmNTlmNTgyMmFlNzFmOWI5OTNmOTEiLCJpZCI6ImZjX2ZkM2IwMTg3ODI4ZjVkNDNhMTQ4MzFlMmVjNDBmMzdkIiwibmFtZSI6ImdldF9hY2NvdW50Iiwic3RhdHVzIjoiY29tcGxldGVkIiwidHlwZSI6ImZ1bmN0aW9uX2NhbGwifV0sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInByZXNlbmNlX3BlbmFsdHkiOjAuMCwicHJldmlvdXNfcmVzcG9uc2VfaWQiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9yZXRlbnRpb24iOiJpbl9tZW1vcnkiLCJyZWFzb25pbmciOnsic3VtbWFyeSI6bnVsbCwiZWZmb3J0IjoibG93IiwiY29udGV4dCI6ImFsbF90dXJucyJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwic2VydmljZV90aWVyIjoiZGVmYXVsdCIsInN0YXR1cyI6ImNvbXBsZXRlZCIsInN0b3JlIjp0cnVlLCJ0ZW1wZXJhdHVyZSI6MS4wLCJ0ZXh0Ijp7ImZvcm1hdCI6eyJ0eXBlIjoidGV4dCJ9LCJ2ZXJib3NpdHkiOiJtZWRpdW0ifSwidG9vbF9jaG9pY2UiOiJhdXRvIiwidG9vbHMiOlt7ImRlc2NyaXB0aW9uIjoiRmV0Y2ggb25lIENSTSBhY2NvdW50IGJ5IGlkLiIsIm5hbWUiOiJnZXRfYWNjb3VudCIsIm91dHB1dF9zY2hlbWEiOm51bGwsInBhcmFtZXRlcnMiOnsidHlwZSI6Im9iamVjdCIsInByb3BlcnRpZXMiOnsiYWNjb3VudF9pZCI6eyJ0eXBlIjoic3RyaW5nIn19LCJyZXF1aXJlZCI6WyJhY2NvdW50X2lkIl19LCJzdHJpY3QiOnRydWUsInR5cGUiOiJmdW5jdGlvbiJ9XSwidG9wX2xvZ3Byb2JzIjowLCJ0b3BfcCI6MC45OCwidHJ1bmNhdGlvbiI6ImRpc2FibGVkIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo1MywiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVfd3JpdGVfdG9rZW5zIjowLCJjYWNoZWRfdG9rZW5zIjowfSwib3V0cHV0X3Rva2VucyI6MjEsIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJyZWFzb25pbmdfdG9rZW5zIjowfSwidG90YWxfdG9rZW5zIjo3NH0sInVzZXIiOm51bGwsIm1vZGVyYXRpb24iOm51bGx9LCJzZXF1ZW5jZV9udW1iZXIiOjEzLCJ0eXBlIjoicmVzcG9uc2UuY29tcGxldGVkIn0KCmRhdGE6IFtET05FXQoK"
+  },
+  "scrubbed_response_headers": [
+    "x-amzn-requestid",
+    "x-request-id",
+    "date"
+  ],
+  "sdk_observed": {
+    "final_status": "completed",
+    "outputs": [
+      "function_call"
+    ]
+  },
+  "decoded_events": [
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1790787980,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_yhz3pyntz5k6jfsw4dxyjvowi3nbdo24hgij6coqjx6hgjppatsa",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 0,
+      "type": "response.created"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": null,
+        "created_at": 1790787980,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_yhz3pyntz5k6jfsw4dxyjvowi3nbdo24hgij6coqjx6hgjppatsa",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "auto",
+        "status": "in_progress",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": null,
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 1,
+      "type": "response.in_progress"
+    },
+    {
+      "item": {
+        "arguments": "",
+        "call_id": "call_902346e27b7f59f5822ae71f9b993f91",
+        "id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+        "name": "get_account",
+        "status": "in_progress",
+        "type": "function_call"
+      },
+      "output_index": 0,
+      "sequence_number": 2,
+      "type": "response.output_item.added"
+    },
+    {
+      "delta": "{\"",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijklmnopqrstu",
+      "output_index": 0,
+      "sequence_number": 3,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "account",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcde",
+      "output_index": 0,
+      "sequence_number": 4,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "_id",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJK",
+      "output_index": 0,
+      "sequence_number": 5,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "\":\"",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijklmnopqrstuvwxyzAB",
+      "output_index": 0,
+      "sequence_number": 6,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "a",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOP",
+      "output_index": 0,
+      "sequence_number": 7,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "-",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijklmnopq",
+      "output_index": 0,
+      "sequence_number": 8,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "1",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghi",
+      "output_index": 0,
+      "sequence_number": 9,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "\"}",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "obfuscation": "abcdefghijkl",
+      "output_index": 0,
+      "sequence_number": 10,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "arguments": "{\"account_id\":\"a-1\"}",
+      "item_id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+      "output_index": 0,
+      "sequence_number": 11,
+      "type": "response.function_call_arguments.done"
+    },
+    {
+      "item": {
+        "arguments": "{\"account_id\":\"a-1\"}",
+        "call_id": "call_902346e27b7f59f5822ae71f9b993f91",
+        "id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+        "name": "get_account",
+        "status": "completed",
+        "type": "function_call"
+      },
+      "output_index": 0,
+      "sequence_number": 12,
+      "type": "response.output_item.done"
+    },
+    {
+      "response": {
+        "background": false,
+        "completed_at": 1790787990,
+        "created_at": 1790787980,
+        "error": null,
+        "frequency_penalty": 0.0,
+        "id": "resp_yhz3pyntz5k6jfsw4dxyjvowi3nbdo24hgij6coqjx6hgjppatsa",
+        "incomplete_details": null,
+        "instructions": null,
+        "max_output_tokens": 256,
+        "max_tool_calls": null,
+        "metadata": {},
+        "model": "global.openai.gpt-6-luna",
+        "object": "response",
+        "output": [
+          {
+            "arguments": "{\"account_id\":\"a-1\"}",
+            "call_id": "call_902346e27b7f59f5822ae71f9b993f91",
+            "id": "fc_fd3b0187828f5d43a14831e2ec40f37d",
+            "name": "get_account",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "parallel_tool_calls": true,
+        "presence_penalty": 0.0,
+        "previous_response_id": null,
+        "prompt_cache_key": null,
+        "prompt_cache_retention": "in_memory",
+        "reasoning": {
+          "summary": null,
+          "effort": "low",
+          "context": "all_turns"
+        },
+        "safety_identifier": null,
+        "service_tier": "default",
+        "status": "completed",
+        "store": true,
+        "temperature": 1.0,
+        "text": {
+          "format": {
+            "type": "text"
+          },
+          "verbosity": "medium"
+        },
+        "tool_choice": "auto",
+        "tools": [
+          {
+            "description": "Fetch one CRM account by id.",
+            "name": "get_account",
+            "output_schema": null,
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "account_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "account_id"
+              ]
+            },
+            "strict": true,
+            "type": "function"
+          }
+        ],
+        "top_logprobs": 0,
+        "top_p": 0.98,
+        "truncation": "disabled",
+        "usage": {
+          "input_tokens": 53,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 21,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 74
+        },
+        "user": null,
+        "moderation": null
+      },
+      "sequence_number": 13,
+      "type": "response.completed"
+    },
+    "[DONE]"
+  ]
+}

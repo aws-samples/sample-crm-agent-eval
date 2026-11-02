@@ -1,0 +1,29 @@
+{
+  "_provenance": "Constructed to model a malformed wire payload on the OpenAI Responses API path: the function_call output item is marked done with an arguments string that is not valid JSON, which the real OpenAI/Bedrock service does not knowingly emit but which a truncated or corrupted transport can produce. No live model was invoked and this fixture carries no account identifier or credential.",
+  "model_id": "openai.gpt-6-luna",
+  "events": [
+    {
+      "type": "response.output_item.added",
+      "output_index": 0,
+      "item": { "id": "fc_fixture_malformed", "call_id": "call_malformed", "type": "function_call", "name": "get_contact", "status": "in_progress" }
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "item_id": "fc_fixture_malformed",
+      "output_index": 0,
+      "delta": "{\"contact_id\": \"c-1"
+    },
+    {
+      "type": "response.output_item.done",
+      "output_index": 0,
+      "item": {
+        "id": "fc_fixture_malformed",
+        "call_id": "call_malformed",
+        "type": "function_call",
+        "name": "get_contact",
+        "arguments": "{\"contact_id\": \"c-1",
+        "status": "incomplete"
+      }
+    }
+  ]
+}

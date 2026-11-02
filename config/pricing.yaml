@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: MIT
+#
+# Versioned token price table. Cost is computed from recorded token counts against this table,
+# never estimated or read from a live pricing API at measurement time.
+#
+# Rates are the global-route per-1M-token prices for the models this system uses. While
+# `provisional: false`, absolute currency figures may appear in published artifacts;
+# scripts/check_cost_withheld.sh fails the build if `provisional` is `true` and a figure appears
+# in results/ or README.md.
+#
+# These are third-party Marketplace models whose charges appear in Cost Explorer under the provider
+# rather than under Bedrock. Rates are transcribed from the sources named in `sourced_from`;
+# the refresh procedure is documented in docs/eval-methodology.md.
+#
+# Cache-write TTL: the Anthropic adapter sets no `cache_control` `ttl`, so the 5-minute Anthropic
+# cache-write rate is priced here. The OpenAI models publish only a 30-minute cache-write figure,
+# which is priced for them.
+
+schema_version: 1
+price_table_version: "1.2.0"
+provisional: false
+currency: USD
+unit: per_1m_tokens
+
+sourced_from: >-
+  Global-route on-demand Standard rates, short context. Opus 5.5, Sonnet 5.5, Haiku 5.5 and GPT-6
+  Astra from the live AWS Price List: `aws pricing get-products --profile default --region
+  us-east-1 --service-code AmazonBedrockFoundationModels`, read 2026-10-10T04:28:30Z, servicename
+  "<model> (Amazon Bedrock Edition)", regionCode us-east-1, usagetypes
+  `USE1-MP:USE1_*_global_standard-Units` (5m cache write for Anthropic, 30m for GPT-6 Astra). That
+  read carries the Sonnet 5.5 cache-read cut effective 2026-10-07 (0.20 to 0.10). GPT-6.1 Sol and
+  GPT-6 Luna are absent from the us-east-1 Price List, so their rates come from the AWS Bedrock model
+  cards (model-card-openai-gpt-6-1-sol.html, model-card-openai-gpt-6-luna.html; Global CRIS, short
+  context), read 2026-10-09. GPT-6.1 Terra is also absent from it; its rates come from its AWS
+  Bedrock model card (model-card-openai-gpt-6-1-terra.html; Global CRIS, short context), read
+  2026-10-27. The openai tier defaults are Sol, Terra and Luna; Astra stays priced as a
+  selectable non-default.
+  Transcribed by hand; see docs/eval-methodology.md.
+sourced_on: "2026-10-27"
+sourced_by: "repository owner"
+
+# Per-1M-token rates, global route. cache_write is the 5-minute (Anthropic) / 30-minute (GPT-6) rate.
+models:
+  anthropic.claude-opus-5-5:
+    input: 4.00
+    output: 20.00
+    cache_write: 5.00
+    cache_read: 0.20
+  anthropic.claude-sonnet-5-5:
+    input: 2.00
+    output: 10.00
+    cache_write: 2.50
+    cache_read: 0.10
+  anthropic.claude-haiku-5-5:
+    input: 0.10
+    output: 0.50
+    cache_write: 0.125
+    cache_read: 0.01
+  openai.gpt-6-astra:
+    input: 10.00
+    output: 50.00
+    cache_write: 12.50
+    cache_read: 1.00
+  openai.gpt-6.1-sol:
+    input: 2.00
+    output: 10.00
+    cache_write: 2.50
+    cache_read: 0.10
+  openai.gpt-6.1-terra:
+    input: 1.00
+    output: 5.00
+    cache_write: 1.25
+    cache_read: 0.05
+  openai.gpt-6-luna:
+    input: 0.10
+    output: 0.50
+    cache_write: 0.125
+    cache_read: 0.01
+
+# Reasoning and thinking tokens are billed as output tokens and recorded separately.
+reasoning_tokens_billed_as: output
+
+# Per-model prompt-cache minimum checkpoint sizes live in model_capabilities.yaml and are
+# reported alongside cost.

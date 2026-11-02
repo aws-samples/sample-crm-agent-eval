@@ -1,0 +1,9 @@
+{
+  "cognitoUserPoolId": "REPLACE_AT_DEPLOY_TIME",
+  "cognitoClientId": "REPLACE_AT_DEPLOY_TIME",
+  "cognitoRegion": "REPLACE_AT_DEPLOY_TIME",
+  "cognitoHostedUiDomain": "REPLACE_AT_DEPLOY_TIME_OR_EMPTY_STRING",
+  "apiBaseUrl": "/api",
+  "agentBaseUrl": "/agent",
+  "agentRuntimeArn": "REPLACE_AT_DEPLOY_TIME"
+}

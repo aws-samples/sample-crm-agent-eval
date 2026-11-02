@@ -1,0 +1,289 @@
+# Runs `make verify` -- the offline aggregate gate: lint, typecheck, unit, stub, integration,
+# relay, gates, shellcheck. No AWS credential and no cost.
+# Tag must match the interpreter in .python-version.
+image: python:3.13.18-slim
+
+stages:
+  - verify
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  GIT_DEPTH: "0"
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  DEBIAN_FRONTEND: "noninteractive"
+  # Installed into each job's .venv before the lock.
+  PIP_VERSION: "26.2.2"
+
+# Base packages both jobs install.
+.apt_deps: &apt_deps
+  - apt-get update -qq
+  - apt-get install -y -qq --no-install-recommends
+    make git jq zip unzip curl xz-utils socat ca-certificates gnupg
+
+verify:
+  stage: verify
+  # Runner shape requested for this job.
+  tags:
+    - arch:arm64
+    - size:large
+  # Upper bound on the whole job.
+  timeout: 4 hours
+  # DynamoDB Local for the Layer 2 integration suite, pinned by digest.
+  services:
+    - name: amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+      alias: dynamodb-local
+  variables:
+    FF_NETWORK_PER_BUILD: "true"
+    FF_TIMESTAMPS: "true"
+    CRM_REQUIRE_DYNAMODB_LOCAL: "1"
+    AWS_ACCESS_KEY_ID: "local"
+    AWS_SECRET_ACCESS_KEY: "local"  # pragma: allowlist secret
+    AWS_DEFAULT_REGION: "us-east-1"
+    TERRAFORM_VERSION: "1.17.0"
+    GITLEAKS_VERSION: "8.30.1"
+    GITLEAKS_SHA256_X64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"  # pragma: allowlist secret
+    GITLEAKS_SHA256_ARM64: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"  # pragma: allowlist secret
+    SHELLCHECK_VERSION: "0.11.0"
+    SHELLCHECK_SHA256_X86_64: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"  # pragma: allowlist secret
+    SHELLCHECK_SHA256_AARCH64: "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"  # pragma: allowlist secret
+    # Major must equal the relay Lambda runtime in infra/modules/agent_relay/variables.tf.
+    NODE_VERSION: "24.22.1"
+    NODE_SHA256_X64: "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6"  # pragma: allowlist secret
+    NODE_SHA256_ARM64: "dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e"  # pragma: allowlist secret
+    # Minimum pytest-xdist worker count; equal to the Makefile's PYTEST_WORKERS default.
+    PYTEST_WORKERS_FLOOR: "4"
+  cache:
+    key:
+      files:
+        - requirements.txt
+        - src/relay/package-lock.json
+    paths:
+      - .cache/pip
+  before_script:
+    - set -euo pipefail
+    - *apt_deps
+
+    # Bridge the service container to 127.0.0.1:8000, where the test suite expects it.
+    - socat TCP-LISTEN:8000,fork,reuseaddr,bind=127.0.0.1 TCP:dynamodb-local:8000 &
+    - |
+      for i in $(seq 1 30); do
+        if (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
+          echo "DynamoDB Local reachable on 127.0.0.1:8000 via socat"; break
+        fi
+        [ "$i" -eq 30 ] && { echo "ERROR: 127.0.0.1:8000 never became reachable" >&2; exit 1; }
+        sleep 1
+      done
+
+    # terraform, gitleaks, shellcheck and node are each downloaded, checksum-verified, then installed.
+    - ARCH="$(dpkg --print-architecture)"
+    - curl -fsSL --retry 3 --retry-all-errors -o /tmp/tf.zip
+      "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip"
+    - curl -fsSL --retry 3 --retry-all-errors -o /tmp/tf.sums
+      "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_SHA256SUMS"
+    - (cd /tmp && grep " terraform_${TERRAFORM_VERSION}_linux_${ARCH}.zip$" tf.sums | sed 's/terraform_.*/tf.zip/' | sha256sum -c -)
+    - unzip -q -o /tmp/tf.zip -d /usr/local/bin && rm -f /tmp/tf.zip /tmp/tf.sums
+    - terraform version
+    - terraform -chdir=infra init -backend=false -input=false
+
+    - |
+      case "$(uname -m)" in
+        x86_64)  gl_arch="x64";   gl_sha="${GITLEAKS_SHA256_X64}" ;;
+        aarch64) gl_arch="arm64"; gl_sha="${GITLEAKS_SHA256_ARM64}" ;;
+        *) echo "ERROR: no pinned gitleaks digest for architecture $(uname -m)" >&2; exit 1 ;;
+      esac
+      asset="gitleaks_${GITLEAKS_VERSION}_linux_${gl_arch}.tar.gz"
+      curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${asset}" \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${asset}"
+      echo "${gl_sha}  /tmp/${asset}" | sha256sum --check --strict -
+      tar -xzf "/tmp/${asset}" -C /usr/local/bin gitleaks
+      rm -f "/tmp/${asset}"
+      gitleaks version
+
+    - |
+      case "$(uname -m)" in
+        x86_64)  sc_arch="x86_64";  sc_sha="${SHELLCHECK_SHA256_X86_64}" ;;
+        aarch64) sc_arch="aarch64"; sc_sha="${SHELLCHECK_SHA256_AARCH64}" ;;
+        *) echo "ERROR: no pinned shellcheck digest for architecture $(uname -m)" >&2; exit 1 ;;
+      esac
+      asset="shellcheck-v${SHELLCHECK_VERSION}.linux.${sc_arch}.tar.xz"
+      curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${asset}" \
+        "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${asset}"
+      echo "${sc_sha}  /tmp/${asset}" | sha256sum --check --strict -
+      tar -xJf "/tmp/${asset}" -C /tmp "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+      install -m 0755 "/tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+      rm -rf "/tmp/${asset}" "/tmp/shellcheck-v${SHELLCHECK_VERSION}"
+      resolved="$(command -v shellcheck)"
+      [ "$resolved" = /usr/local/bin/shellcheck ] || {
+        echo "ERROR: PATH resolves shellcheck to ${resolved}, not the pinned install" >&2; exit 1; }
+      installed="$(shellcheck --version | sed -n 's/^version: //p')"
+      [ "$installed" = "${SHELLCHECK_VERSION}" ] || {
+        echo "ERROR: pinned shellcheck ${SHELLCHECK_VERSION} but PATH resolves ${installed}" >&2; exit 1; }
+      echo "shellcheck ${installed} pinned at ${resolved}"
+
+    - |
+      # Install the pinned Node release; its major must be the relay module's Lambda runtime.
+      source_file="infra/modules/agent_relay/variables.tf"
+      runtime="$(grep -A6 '^variable "runtime"' "$source_file" | grep -oE 'nodejs[0-9]+\.x' | head -1 || true)"
+      if [ -z "$runtime" ]; then
+        echo "ERROR: could not parse a nodejs<major>.x runtime default from $source_file" >&2
+        exit 1
+      fi
+      NODE_MAJOR="${runtime#nodejs}"; NODE_MAJOR="${NODE_MAJOR%.x}"
+      echo "derived Node major ${NODE_MAJOR} from ${runtime} in ${source_file}"
+      [ "${NODE_VERSION%%.*}" = "$NODE_MAJOR" ] || {
+        echo "ERROR: NODE_VERSION ${NODE_VERSION} is not on the derived major ${NODE_MAJOR}" >&2; exit 1; }
+      case "$(uname -m)" in
+        x86_64)  node_arch="x64";   node_sha="${NODE_SHA256_X64}" ;;
+        aarch64) node_arch="arm64"; node_sha="${NODE_SHA256_ARM64}" ;;
+        *) echo "ERROR: no pinned Node digest for architecture $(uname -m)" >&2; exit 1 ;;
+      esac
+      node_dir="node-v${NODE_VERSION}-linux-${node_arch}"
+      asset="${node_dir}.tar.xz"
+      curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${asset}" \
+        "https://nodejs.org/dist/v${NODE_VERSION}/${asset}"
+      echo "${node_sha}  /tmp/${asset}" | sha256sum --check --strict -
+      tar -xJf "/tmp/${asset}" -C /usr/local --strip-components=1 --no-same-owner \
+        "${node_dir}/bin" "${node_dir}/include" "${node_dir}/lib"
+      rm -f "/tmp/${asset}"
+      resolved="$(command -v node)"
+      [ "$resolved" = /usr/local/bin/node ] || {
+        echo "ERROR: PATH resolves node to ${resolved}, not the pinned install" >&2; exit 1; }
+      installed="$(node --version)"
+      [ "$installed" = "v${NODE_VERSION}" ] || {
+        echo "ERROR: pinned Node ${NODE_VERSION} but PATH resolves ${installed}" >&2; exit 1; }
+      echo "node ${installed} (npm $(npm --version)) pinned at ${resolved}"
+
+    - python3 -m venv .venv
+    - .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
+    - |
+      installed="$(.venv/bin/python -m pip --version | cut -d' ' -f2)"
+      [ "$installed" = "${PIP_VERSION}" ] || {
+        echo "ERROR: pinned pip ${PIP_VERSION} but the venv has ${installed}" >&2; exit 1; }
+    - .venv/bin/pip install --no-input --no-deps -r requirements.txt
+    - .venv/bin/pip install --no-input --no-deps -e .
+    - (cd src/relay && npm ci --no-audit --no-fund)
+    - (cd tests/e2e/browser && npm ci --no-audit --no-fund)
+
+    - |
+      # Derive PYTEST_WORKERS as max(FLOOR, min(nproc, cgroup quota)); print the cores and memory
+      # the runner supplied. An explicitly supplied PYTEST_WORKERS is honoured unchanged.
+      if [ -z "${PYTEST_WORKERS_FLOOR:-}" ]; then
+        echo "ERROR: PYTEST_WORKERS_FLOOR is unset; the floor belongs in this job's variables: block" >&2
+        exit 1
+      fi
+      cores="$(nproc)"
+      echo "runner cores (nproc): ${cores}"
+      if [ -r /proc/meminfo ]; then
+        while read -r mi_key mi_value _mi_rest; do
+          if [ "${mi_key}" = "MemTotal:" ]; then
+            echo "runner MemTotal: ${mi_value} kB ($(( mi_value / 1048576 )) GiB)"
+            break
+          fi
+        done < /proc/meminfo
+      fi
+      if [ -r /sys/fs/cgroup/memory.max ]; then
+        echo "cgroup v2 memory.max: $(cat /sys/fs/cgroup/memory.max)"
+      elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+        echo "cgroup v1 memory.limit_in_bytes: $(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+      else
+        echo "no readable cgroup memory limit"
+      fi
+      quota_cores=""
+      if [ -r /sys/fs/cgroup/cpu.max ]; then
+        read -r cg_quota cg_period < /sys/fs/cgroup/cpu.max || true
+        echo "cgroup v2 cpu.max: ${cg_quota:-?} ${cg_period:-?}"
+        if [ "${cg_quota:-max}" != "max" ] && [ "${cg_period:-0}" -gt 0 ]; then
+          quota_cores=$(( (cg_quota + cg_period - 1) / cg_period ))
+        fi
+      elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ] && [ -r /sys/fs/cgroup/cpu/cpu.cfs_period_us ]; then
+        cg_quota="$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)"
+        cg_period="$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
+        echo "cgroup v1 cfs quota/period: ${cg_quota} ${cg_period}"
+        if [ "${cg_quota}" -gt 0 ] && [ "${cg_period}" -gt 0 ]; then
+          quota_cores=$(( (cg_quota + cg_period - 1) / cg_period ))
+        fi
+      else
+        echo "no readable cgroup CPU quota; using nproc alone"
+      fi
+      available="${cores}"
+      if [ -n "${quota_cores}" ] && [ "${quota_cores}" -lt "${available}" ]; then
+        echo "cgroup quota (${quota_cores}) is below nproc (${cores}); it governs"
+        available="${quota_cores}"
+      fi
+      [ "${available}" -ge 1 ] || available=1
+      echo "available CPU: ${available}"
+      workers="${available}"
+      if [ "${workers}" -lt "${PYTEST_WORKERS_FLOOR}" ]; then
+        echo "flooring workers at ${PYTEST_WORKERS_FLOOR}; this suite blocks on child processes, so oversubscribing ${available} CPU is deliberate"
+        workers="${PYTEST_WORKERS_FLOOR}"
+      fi
+      if [ -n "${PYTEST_WORKERS:-}" ]; then
+        echo "PYTEST_WORKERS=${PYTEST_WORKERS} was supplied explicitly; honouring it (the derivation would have chosen ${workers})"
+      else
+        export PYTEST_WORKERS="${workers}"
+        echo "derived PYTEST_WORKERS=${workers}"
+      fi
+  script:
+    - echo "PYTEST_WORKERS=${PYTEST_WORKERS:-unset (the Makefile default applies)}"
+    # Build the zips so check_lambda_zip_imports and check_relay_zip have a subject to verify.
+    # package_lambdas.sh needs rsync and package_relay.sh needs perl's shasum; neither is in the image.
+    - apt-get install -y -qq --no-install-recommends rsync perl
+    - scripts/package_lambdas.sh
+    - scripts/package_relay.sh
+    - .venv/bin/python3 scripts/check_relay_zip.py --require-zip
+    - make verify
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
+# Frontend lint, typecheck, unit tests and build, plus the emitted-CSS gate.
+frontend:
+  stage: verify
+  image: node:26.13.0-slim
+  variables:
+    NPM_CONFIG_FUND: "false"
+    NPM_CONFIG_AUDIT: "false"
+    CRM_REQUIRE_EMITTED_CSS: "1"
+    CRM_REQUIRE_TS_CONTRACTS: "1"
+  cache:
+    key:
+      files:
+        - frontend/package-lock.json
+    paths:
+      - frontend/.npm
+  before_script:
+    - set -euo pipefail
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends python3 python3-venv make git
+    - |
+      # Fail unless the image's Node matches frontend/.nvmrc.
+      pinned="$(cat frontend/.nvmrc)"
+      installed="$(node --version | sed 's/^v//')"
+      [ "$installed" = "$pinned" ] || {
+        echo "ERROR: frontend/.nvmrc pins ${pinned} but the image ships ${installed}" >&2; exit 1; }
+      echo "frontend Node ${installed} matches frontend/.nvmrc"
+    - python3 -m venv .venv
+    - .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
+    - |
+      installed="$(.venv/bin/python -m pip --version | cut -d' ' -f2)"
+      [ "$installed" = "${PIP_VERSION}" ] || {
+        echo "ERROR: pinned pip ${PIP_VERSION} but the venv has ${installed}" >&2; exit 1; }
+    - .venv/bin/pip install --no-input --no-deps -r requirements.txt
+    - .venv/bin/pip install --no-input --no-deps -e .
+    - (cd frontend && npm ci --cache "$CI_PROJECT_DIR/frontend/.npm")
+  script:
+    - .venv/bin/python -m pytest tests/unit/test_check_emitted_css.py
+    - .venv/bin/python -m pytest tests/integration/test_envelope_groups_contract.py tests/integration/test_eval_envelopes_contract.py
+    - cd frontend
+    - npm run gen:types
+    # The full gate, including the frontend consumer byte-diff the verify job defers.
+    - (cd .. && .venv/bin/python3 scripts/check_toolspec_parity.py)
+    - npm run lint
+    - npm run typecheck
+    - npm run test
+    - (cd .. && git diff --exit-code tests/integration/fixtures/wire_tuning.json)
+    - npm run build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'

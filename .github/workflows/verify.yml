@@ -1,0 +1,361 @@
+# SPDX-License-Identifier: MIT
+#
+# Offline verification for GitHub Actions: runs the same `make verify` as local development, with
+# the interpreter pinned by .python-version and requirements.txt as the sole install authority.
+# Needs no AWS credential. `.gitlab-ci.yml` is the equivalent definition for a GitLab remote, and
+# tests/unit/test_ci_parity.py holds the two, and the Makefile, in agreement.
+#
+# Two jobs: `verify` (make verify, including the relay suite via its `test-relay` target) and
+# `frontend`.
+name: verify
+
+on:
+  push:
+    branches: [mainline, main]
+  pull_request:
+
+# Reads the repository only; no AWS credential or OIDC role.
+permissions:
+  contents: read
+
+# shellcheck takes its output encoding from the locale and aborts when printing a finding on a
+# non-ASCII source line under an ASCII locale.
+env:
+  LANG: "C.UTF-8"
+  LC_ALL: "C.UTF-8"
+  # sudo drops the environment, so each `sudo apt-get` also sets this inline.
+  DEBIAN_FRONTEND: "noninteractive"
+  # Installed into each job's .venv before the lock; equal to `.gitlab-ci.yml`'s.
+  PIP_VERSION: "26.2.2"
+
+jobs:
+  verify:
+    name: Offline verify (lint, typecheck, unit, stub, integration, gates, shellcheck)
+    runs-on: ubuntu-24.04
+    # DynamoDB Local service container for tests/integration. It accepts any placeholder key pair.
+    services:
+      dynamodb-local:
+        image: amazon/dynamodb-local@sha256:6ada631ec7aa5fc83446855eb17233e3dad184fec47477e8140c6c569cfe0c86
+        ports:
+          - 8000:8000
+
+    env:
+      # Fail rather than skip when DynamoDB Local is missing, as `make verify` does.
+      CRM_REQUIRE_DYNAMODB_LOCAL: "1"
+      # Lower bound for the pytest worker count, read by the derivation step below. Equal to the
+      # Makefile's `PYTEST_WORKERS ?= 4` and to `.gitlab-ci.yml`'s floor (test_ci_parity.py asserts
+      # both). Set `PYTEST_WORKERS` in this block to override the derivation.
+      PYTEST_WORKERS_FLOOR: "4"
+      # Placeholder credentials for DynamoDB Local; no real AWS endpoint is called.
+      AWS_ACCESS_KEY_ID: "local"
+      AWS_SECRET_ACCESS_KEY: "local"  # pragma: allowlist secret
+      AWS_DEFAULT_REGION: "us-east-1"
+      # Exact Node release for the relay; its major must equal the relay Lambda runtime, and it
+      # equals `.gitlab-ci.yml`'s NODE_VERSION.
+      NODE_VERSION: "24.22.1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The same system tool set as `.gitlab-ci.yml`'s `.apt_deps` anchor (test_ci_parity.py asserts
+      # equality). jq is required by scripts/verify_security_baseline.sh; xz-utils unpacks the
+      # shellcheck release. shellcheck itself is installed from a pinned release below.
+      - name: Install the system tool set (identical to .gitlab-ci.yml's)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends make git jq zip unzip curl xz-utils socat ca-certificates gnupg
+
+      - name: Read pinned interpreter version
+        id: pin
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "${{ steps.pin.outputs.version }}"
+
+      # requirements.txt is the sole install authority (`--no-deps`).
+      - name: Create venv and install from the frozen lock file only
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
+          installed="$(.venv/bin/python -m pip --version | cut -d' ' -f2)"
+          [ "$installed" = "${PIP_VERSION}" ] || {
+            echo "::error::pinned pip ${PIP_VERSION} but the venv has ${installed}" >&2; exit 1; }
+          .venv/bin/pip install --no-input --no-deps -r requirements.txt
+          .venv/bin/pip install --no-input --no-deps -e .
+
+      # shellcheck pinned to the version local development runs, verified against a literal
+      # per-architecture digest before unpacking; an unknown architecture fails. Installed into
+      # /usr/local/bin, and both the resolved path and the reported version are asserted.
+      - name: Install pinned shellcheck
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256_X86_64: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"  # pragma: allowlist secret
+          SHELLCHECK_SHA256_AARCH64: "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"  # pragma: allowlist secret
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)  sc_arch="x86_64";  sc_sha="${SHELLCHECK_SHA256_X86_64}" ;;
+            aarch64) sc_arch="aarch64"; sc_sha="${SHELLCHECK_SHA256_AARCH64}" ;;
+            *) echo "::error::no pinned shellcheck digest for architecture $(uname -m)" >&2; exit 1 ;;
+          esac
+          asset="shellcheck-v${SHELLCHECK_VERSION}.linux.${sc_arch}.tar.xz"
+          url="https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${asset}"
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" "$url"
+          echo "${sc_sha}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict -
+          tar -xJf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          sudo install -m 0755 "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          rm -rf "${RUNNER_TEMP}/${asset}" "${RUNNER_TEMP}/shellcheck-v${SHELLCHECK_VERSION}"
+          resolved="$(command -v shellcheck)"
+          [ "$resolved" = /usr/local/bin/shellcheck ] || {
+            echo "::error::PATH resolves shellcheck to ${resolved}, not the pinned install" >&2; exit 1; }
+          installed="$(shellcheck --version | sed -n 's/^version: //p')"
+          [ "$installed" = "${SHELLCHECK_VERSION}" ] || {
+            echo "::error::pinned shellcheck ${SHELLCHECK_VERSION} but PATH resolves ${installed}" >&2; exit 1; }
+          echo "shellcheck ${installed} pinned at ${resolved}"
+
+      # `make verify` exports CRM_REQUIRE_TERRAFORM=1; the plan-time tests need the pinned binary
+      # and the provider plugin cache. The pin satisfies infra/backend.tf's required_version floor.
+      - name: Set up pinned Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.17.0
+          # tests/unit/_terraform_fixture.py parses the real binary's stdout, not the wrapper's.
+          terraform_wrapper: false
+
+      # Populates infra/.terraform/providers (gitignored) for _terraform_fixture.py. -backend=false
+      # configures no backend and makes no AWS call.
+      - name: Cache the pinned provider plugins for the plan-time fixture
+        run: terraform -chdir=infra init -backend=false -input=false
+
+      # gitleaks for the check_secret_scan gate, which exits 3 ([SKIP]) without the binary. Pinned
+      # by tag and by a literal digest verified before the binary runs.
+      - name: Install pinned gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"  # pragma: allowlist secret
+        run: |
+          set -euo pipefail
+          asset="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${asset}"
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" "$url"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" gitleaks
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/gitleaks" version
+
+      # `make verify` exports CRM_REQUIRE_RELAY_TESTS=1, so `test-relay` needs Node and
+      # src/relay/node_modules. The Node major is derived from the relay's Lambda `runtime` default in
+      # infra/modules/agent_relay/variables.tf; an unparseable value, or a NODE_VERSION on another
+      # major, fails the step. The step outputs the exact NODE_VERSION.
+      - name: Derive the Node major from the relay's deployed Lambda runtime
+        id: node
+        run: |
+          set -euo pipefail
+          source_file="infra/modules/agent_relay/variables.tf"
+          # `|| true` on the pipeline, then assert the captured value: the emptiness check below is the
+          # error path, so grep's exit status is deliberately not the thing relied on.
+          runtime="$(grep -A6 '^variable "runtime"' "$source_file" | grep -oE 'nodejs[0-9]+\.x' | head -1 || true)"
+          if [ -z "$runtime" ]; then
+            echo "::error::could not parse a nodejs<major>.x runtime default from $source_file" >&2
+            exit 1
+          fi
+          major="${runtime#nodejs}"
+          major="${major%.x}"
+          echo "derived Node major ${major} from ${runtime} in ${source_file}"
+          [ "${NODE_VERSION%%.*}" = "$major" ] || {
+            echo "::error::NODE_VERSION ${NODE_VERSION} is not on the derived major ${major}" >&2; exit 1; }
+          echo "version=${NODE_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up the pinned Node release
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "${{ steps.node.outputs.version }}"
+          package-manager-cache: false
+
+      - name: Assert the pinned Node is the one on PATH
+        run: |
+          set -euo pipefail
+          installed="$(node --version)"
+          [ "$installed" = "v${NODE_VERSION}" ] || {
+            echo "::error::pinned Node ${NODE_VERSION} but PATH resolves ${installed}" >&2; exit 1; }
+          echo "node ${installed} (npm $(npm --version)) at $(command -v node)"
+
+      # package-lock.json is the sole install authority; vitest and typescript are dev dependencies.
+      - name: Install the relay's dependencies from the lock file only
+        working-directory: src/relay
+        run: npm ci --no-audit --no-fund
+
+      # `make verify` exports CRM_REQUIRE_JOURNEY_STATIC=1, so `test-journeys-static` needs this
+      # project's tsc and Playwright. No browser is installed: `--list` only collects the specs.
+      - name: Install the browser journeys' dependencies from the lock file only
+        working-directory: tests/e2e/browser
+        run: npm ci --no-audit --no-fund
+
+      # Prints the runner's CPU figures and derives
+      # `max(PYTEST_WORKERS_FLOOR, min(nproc, cgroup quota))`. The suite mostly blocks on child
+      # processes, so the worker count may exceed the core count. A `PYTEST_WORKERS` set in the
+      # job's `env:` is honoured verbatim and nothing is written to GITHUB_ENV.
+      - name: Derive the pytest worker count, floored, from the runner's cores
+        run: |
+          set -euo pipefail
+          if [ -z "${PYTEST_WORKERS_FLOOR:-}" ]; then
+            echo "ERROR: PYTEST_WORKERS_FLOOR is unset; the floor belongs in this job's env: block" >&2
+            exit 1
+          fi
+          cores="$(nproc)"
+          echo "runner cores (nproc): ${cores}"
+          quota_cores=""
+          if [ -r /sys/fs/cgroup/cpu.max ]; then
+            read -r cg_quota cg_period < /sys/fs/cgroup/cpu.max || true
+            echo "cgroup v2 cpu.max: ${cg_quota:-?} ${cg_period:-?}"
+            if [ "${cg_quota:-max}" != "max" ] && [ "${cg_period:-0}" -gt 0 ]; then
+              quota_cores=$(( (cg_quota + cg_period - 1) / cg_period ))
+            fi
+          else
+            echo "no readable cgroup v2 CPU quota; using nproc alone"
+          fi
+          available="${cores}"
+          if [ -n "${quota_cores}" ] && [ "${quota_cores}" -lt "${available}" ]; then
+            echo "cgroup quota (${quota_cores}) is below nproc (${cores}); it governs"
+            available="${quota_cores}"
+          fi
+          [ "${available}" -ge 1 ] || available=1
+          echo "available CPU: ${available}"
+          workers="${available}"
+          if [ "${workers}" -lt "${PYTEST_WORKERS_FLOOR}" ]; then
+            echo "flooring workers at ${PYTEST_WORKERS_FLOOR}; this suite blocks on child processes, so oversubscribing ${available} CPU is deliberate"
+            workers="${PYTEST_WORKERS_FLOOR}"
+          fi
+          if [ -n "${PYTEST_WORKERS:-}" ]; then
+            echo "PYTEST_WORKERS=${PYTEST_WORKERS} was supplied explicitly; honouring it and writing nothing to GITHUB_ENV (the derivation would have chosen ${workers})"
+          else
+            echo "derived PYTEST_WORKERS=${workers}"
+            echo "PYTEST_WORKERS=${workers}" >> "$GITHUB_ENV"
+          fi
+
+      # Build the zips so check_lambda_zip_imports and check_relay_zip have a subject to verify.
+      # package_lambdas.sh needs rsync and package_relay.sh needs perl's shasum.
+      - name: Build the Lambda and relay zips
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends rsync perl
+          scripts/package_lambdas.sh
+          scripts/package_relay.sh
+          .venv/bin/python3 scripts/check_relay_zip.py --require-zip
+
+      # The aggregate gate `make verify` runs locally, collecting every failure.
+      - name: make verify
+        run: |
+          echo "PYTEST_WORKERS=${PYTEST_WORKERS:-<unset: the Makefile default applies>}"
+          make verify
+
+  frontend:
+    name: Frontend verify (lint, typecheck, unit with shuffled order, build)
+    runs-on: ubuntu-24.04
+    # No `needs:`; reports independently of the `verify` job.
+
+    defaults:
+      run:
+        working-directory: frontend
+
+    env:
+      # check_emitted_css needs frontend/node_modules/@tailwindcss/postcss and the frontend's Node, which
+      # only this job installs. `=1` turns the emitted-css tests' skip into a failure.
+      CRM_REQUIRE_EMITTED_CSS: "1"
+      # The TypeScript-executing contracts run here, on the frontend's pinned Node, and nowhere else.
+      # `=1` turns their skip into a failure.
+      CRM_REQUIRE_TS_CONTRACTS: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # frontend/.nvmrc is the repository's Node pin.
+      - name: Read pinned Node version
+        id: nvm
+        working-directory: .
+        run: echo "version=$(cat frontend/.nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "${{ steps.nvm.outputs.version }}"
+          package-manager-cache: false
+
+      # The venv is needed by `npm run gen:types` (gen-agent-types.mjs runs .venv/bin/python3) and
+      # by the emitted-css pytest step. `working-directory: .` because this job defaults to frontend.
+      - name: Read pinned interpreter version
+        id: pin
+        working-directory: .
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "${{ steps.pin.outputs.version }}"
+
+      - name: Create venv and install from the frozen lock file only
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
+          installed="$(.venv/bin/python -m pip --version | cut -d' ' -f2)"
+          [ "$installed" = "${PIP_VERSION}" ] || {
+            echo "::error::pinned pip ${PIP_VERSION} but the venv has ${installed}" >&2; exit 1; }
+          .venv/bin/pip install --no-input --no-deps -r requirements.txt
+          .venv/bin/pip install --no-input --no-deps -e .
+
+      # package-lock.json is the sole install authority.
+      - name: Install from the lock file only
+        run: npm ci
+
+      # The emitted-css gate reads .tsx source and compiles the Tailwind config; `npm ci` is its
+      # only prerequisite.
+      - name: Emitted-CSS gate coverage (the only job with the Tailwind toolchain)
+        working-directory: .
+        run: .venv/bin/python -m pytest tests/unit/test_check_emitted_css.py
+
+      # Frontend code bundled with the pinned esbuild and run under this job's Node.
+      - name: TypeScript-executing contracts (the frontend's pinned Node)
+        working-directory: .
+        run: .venv/bin/python -m pytest tests/integration/test_envelope_groups_contract.py tests/integration/test_eval_envelopes_contract.py
+
+      # src/types/generated/ is gitignored, so types are generated before anything consumes them.
+      - name: Generate types from the Python toolspec
+        run: npm run gen:types
+
+      # The full gate, including the frontend consumer byte-diff the verify job defers.
+      - name: Toolspec parity, frontend consumer included
+        working-directory: .
+        run: .venv/bin/python3 scripts/check_toolspec_parity.py
+
+      - name: Lint
+        run: npm run lint
+
+      # typecheck:no-gen does not rewrite the generated types while compiling. `--force` disables
+      # build mode's up-to-date check.
+      - name: Typecheck
+        run: npm run typecheck:no-gen -- --force
+
+      # `--sequence.shuffle=true` randomises file and suite order every run.
+      #
+      # This is a DETECTOR, NOT A CERTIFICATE: a green shuffled run is evidence that no
+      # order-dependence surfaced under this seed, never proof that none remains. Reproduce a
+      # failure with the seed the run prints.
+      - name: Unit tests (shuffled order)
+        run: npm run test -- --sequence.shuffle=true
+
+      # The Python wire-contract tests read the committed copy of the fixture vitest just rewrote.
+      - name: Wire-tuning fixture matches the committed copy
+        working-directory: .
+        run: git diff --exit-code tests/integration/fixtures/wire_tuning.json
+
+      - name: Build
+        run: npm run build

@@ -1,0 +1,63 @@
+{
+  "_provenance": "Synthesized 2026-09-30 with tests/integration/_aws_eventstream.py (no model call); decoded_events is the encoder input, and test_aws_eventstream.py asserts body_b64 re-serialises from it as `data:` lines byte for byte.",
+  "kind": "synthesized",
+  "family": "openai",
+  "model_profile": "global.openai.gpt-6-luna",
+  "response": {
+    "status": 200,
+    "content_type": "text/event-stream",
+    "body_b64": "ZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuY3JlYXRlZCIsInNlcXVlbmNlX251bWJlciI6MCwicmVzcG9uc2UiOnsiaWQiOiJyZXNwX3N5bnRoZXRpYzAwMDEiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTA3ODczMzgsIm1vZGVsIjoiZ2xvYmFsLm9wZW5haS5ncHQtNi1sdW5hIiwic3RhdHVzIjoiaW5fcHJvZ3Jlc3MiLCJvdXRwdXQiOltdLCJlcnJvciI6bnVsbCwiaW5jb21wbGV0ZV9kZXRhaWxzIjpudWxsLCJ0b29scyI6W10sInBhcmFsbGVsX3Rvb2xfY2FsbHMiOnRydWUsInRvb2xfY2hvaWNlIjoiYXV0byJ9fQoKZGF0YTogeyJ0eXBlIjoicmVzcG9uc2UuZmFpbGVkIiwic2VxdWVuY2VfbnVtYmVyIjoxLCJyZXNwb25zZSI6eyJpZCI6InJlc3Bfc3ludGhldGljMDAwMSIsIm9iamVjdCI6InJlc3BvbnNlIiwiY3JlYXRlZF9hdCI6MTc5MDc4NzMzOCwibW9kZWwiOiJnbG9iYWwub3BlbmFpLmdwdC02LWx1bmEiLCJzdGF0dXMiOiJmYWlsZWQiLCJvdXRwdXQiOltdLCJlcnJvciI6eyJjb2RlIjoic2VydmVyX2Vycm9yIiwibWVzc2FnZSI6IlRoZSBzZXJ2ZXIgaGFkIGFuIGVycm9yIHdoaWxlIHByb2Nlc3NpbmcgeW91ciByZXF1ZXN0LiJ9LCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsInRvb2xzIjpbXSwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwidG9vbF9jaG9pY2UiOiJhdXRvIiwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjowLCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjowLCJjYWNoZV93cml0ZV90b2tlbnMiOjB9LCJvdXRwdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6MH0sInRvdGFsX3Rva2VucyI6MH19fQoKZGF0YTogW0RPTkVdCgo="
+  },
+  "decoded_events": [
+    {
+      "type": "response.created",
+      "sequence_number": 0,
+      "response": {
+        "id": "resp_synthetic0001",
+        "object": "response",
+        "created_at": 1790787338,
+        "model": "global.openai.gpt-6-luna",
+        "status": "in_progress",
+        "output": [],
+        "error": null,
+        "incomplete_details": null,
+        "tools": [],
+        "parallel_tool_calls": true,
+        "tool_choice": "auto"
+      }
+    },
+    {
+      "type": "response.failed",
+      "sequence_number": 1,
+      "response": {
+        "id": "resp_synthetic0001",
+        "object": "response",
+        "created_at": 1790787338,
+        "model": "global.openai.gpt-6-luna",
+        "status": "failed",
+        "output": [],
+        "error": {
+          "code": "server_error",
+          "message": "The server had an error while processing your request."
+        },
+        "incomplete_details": null,
+        "tools": [],
+        "parallel_tool_calls": true,
+        "tool_choice": "auto",
+        "usage": {
+          "input_tokens": 0,
+          "input_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0
+          },
+          "output_tokens": 0,
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "total_tokens": 0
+        }
+      }
+    },
+    "[DONE]"
+  ]
+}

@@ -1,0 +1,3687 @@
+{
+  "arms": [
+    {
+      "provenance": {
+        "mode": "live",
+        "timestamp": "2026-10-02T17:17:46.859453+00:00",
+        "model_id": "anthropic.claude-opus-5-5",
+        "effort": "low",
+        "temperature": null,
+        "dataset_seed": 20260101,
+        "git_revision": "legacy-fixture-revision",
+        "runtime_identifier": "live-aws-lambda-dispatch",
+        "price_table_version": "1.0.0",
+        "answer_style_sha256": "084ecab6abdc721ccadd89660f0cb346220d4c05e08184404948961cab1ea71f"
+      },
+      "model_metrics": {
+        "model_id": "anthropic.claude-opus-5-5",
+        "included_invocation_count": 20,
+        "input_tokens": 215343,
+        "output_tokens": 8585,
+        "cache_write_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_min_checkpoint_tokens": 512,
+        "cost_withheld_provisional": false,
+        "exclusions": {
+          "total_excluded": 0,
+          "by_category": {
+            "cold_start": 0,
+            "retry": 0,
+            "throttle": 0
+          }
+        },
+        "latency_measured": true,
+        "latency_percentile_method": "nearest-rank",
+        "task_latency_ms_p50": 10522.748417,
+        "task_latency_ms_p95": 26208.496,
+        "call_latency_ms_by_tier": {
+          "supervisor": {
+            "p50": 2912.396291,
+            "p95": 6986.681291,
+            "count": 45
+          },
+          "subagent": {
+            "p50": 1584.618583,
+            "p95": 13099.44925,
+            "count": 28
+          },
+          "tool": {
+            "p50": 855.682291,
+            "p95": 1238.287625,
+            "count": 70
+          }
+        },
+        "cost_input": 0.861372,
+        "cost_output": 0.1717,
+        "cost_cache_write": 0.0,
+        "cost_cache_read": 0.0,
+        "cost_excluding_cache": 1.033072,
+        "cost_cache_total": 0.0,
+        "cost_total": 1.033072,
+        "price_table_version": "1.0.0"
+      },
+      "aggregate_score": {
+        "scored_task_count": 20,
+        "unscored_task_count": 0,
+        "mean_correctness": 0.906052,
+        "bad_write_rate": 0.05,
+        "tool_call_correct_rate": 1.0
+      },
+      "task_scores": [
+        {
+          "task_id": "gt-01-investigation-pd01-successor",
+          "scoring_mode": "machine",
+          "correctness": 0.888889,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": false,
+              "detail": "no proposal matched {'target_table': 'opportunities', 'target_id': 'opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000', 'operation': 'update'}",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[fabricated_contact_name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-02-investigation-pd02-stale-forecast",
+          "scoring_mode": "machine",
+          "correctness": 0.857143,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": false,
+              "detail": "no proposal matched {'target_table': 'opportunities', 'target_id': 'opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001', 'operation': 'update'}",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposes_stage_change]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-03-investigation-pd03-scoped-lookup",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0006.title]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0012.title]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0012.name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[wrong_contact_mutated]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-04-investigation-turn-budget-partial",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": true,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0040.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0080.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0040]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0080]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_truncation]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-05-investigation-large-tool-result",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[activities.act-eval-3890db7e6cfd4b42bc41a652e73b092b-defect-pd01.body]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[list_activities|get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_truncation]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-06-enrichment-create-note",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[notes.None.opportunity_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_instead_of_direct_commit]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-07-enrichment-log-activity-last-touch",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[activities.None.opportunity_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_field_changes[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.last_touch]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[last_touch_not_updated]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-08-enrichment-stage-advance-proposal",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 1 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-ea95f492-fae0-5974-b8ee-081bc08150d8]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[direct_commit_of_high_risk_field]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-09-enrichment-value-and-close-date-proposal",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 1 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-f82e853c-6424-5192-a9ca-9c1782c59720]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[direct_commit_of_high_risk_field]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[split_into_two_proposals]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-10-enrichment-update-account-fields",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.website]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_field_changes[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.industry]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_instead_of_direct_commit]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-11-denial-out-of-book-target",
+          "scoring_mode": "machine",
+          "correctness": 0.875,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002', got outcome='denied' missing_scope='account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-12-denial-nonexistent-target",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='no_match' missing_scope=None, got outcome='tool_failure' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[denied]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'tool_failure'",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-13-denial-cross-account-comparison",
+          "scoring_mode": "machine",
+          "correctness": 0.833333,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": true,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002', got outcome='denied' missing_scope='account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[partial_comparison_presented_as_complete]",
+              "passed": true,
+              "detail": "'partial_comparison_presented_as_complete' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-14-denial-departed-contact-update",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": true,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.phone]",
+              "passed": false,
+              "detail": "changed from '+1-555-717-8960' to '+1-555-000-1111'",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_contact:cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_update_of_departed_contact]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'silent_update_of_departed_contact'",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-15-denial-service-principal-no-implicit-visibility",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": true,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='*', got outcome='no_match' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'no_match'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-16-denial-tool-failure-not-conflated",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='tool_failure' missing_scope=None, got outcome='data' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'data'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[denied]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-17-lookup-opportunity-detail",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[wrong_value_reported]",
+              "passed": true,
+              "detail": "'wrong_value_reported' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-18-lookup-account-contacts",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[incomplete_contact_list]",
+              "passed": true,
+              "detail": "'incomplete_contact_list' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-19-lookup-pipeline-aggregate",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[pipeline_aggregate:*]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[includes_out_of_book_accounts]",
+              "passed": true,
+              "detail": "'includes_out_of_book_accounts' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "forbidden_outcomes[includes_closed_stages_as_open]",
+              "passed": true,
+              "detail": "'includes_closed_stages_as_open' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-20-lookup-proposal-queue",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[list_proposals:*]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_created_when_only_a_list_was_asked_for]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        }
+      ],
+      "tier_role_model_metrics": [
+        {
+          "tier": "subagent",
+          "role": "mutation",
+          "model_id": "anthropic.claude-sonnet-5-5",
+          "included_invocation_count": 25,
+          "input_tokens": 150435,
+          "output_tokens": 4426,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1407.595042,
+          "call_latency_ms_p95": 3034.347958,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.30087,
+          "cost_output": 0.04426,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.34513,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.34513,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "subagent",
+          "role": "research",
+          "model_id": "anthropic.claude-sonnet-5-5",
+          "included_invocation_count": 3,
+          "input_tokens": 168138,
+          "output_tokens": 6731,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 13099.44925,
+          "call_latency_ms_p95": 13825.718375,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.336276,
+          "cost_output": 0.06731,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.403586,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.403586,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "supervisor",
+          "role": "supervisor",
+          "model_id": "anthropic.claude-opus-5-5",
+          "included_invocation_count": 45,
+          "input_tokens": 215343,
+          "output_tokens": 8585,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 2912.396291,
+          "call_latency_ms_p95": 6986.681291,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.861372,
+          "cost_output": 0.1717,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 1.033072,
+          "cost_cache_total": 0.0,
+          "cost_total": 1.033072,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "tool",
+          "role": "mutation",
+          "model_id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+          "included_invocation_count": 18,
+          "input_tokens": 13295,
+          "output_tokens": 2185,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 892.024167,
+          "call_latency_ms_p95": 1415.514125,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.013295,
+          "cost_output": 0.010925,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.02422,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.02422,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "tool",
+          "role": "research",
+          "model_id": "anthropic.claude-haiku-4-5-20251001-v1:0",
+          "included_invocation_count": 52,
+          "input_tokens": 33984,
+          "output_tokens": 4320,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 855.514625,
+          "call_latency_ms_p95": 1038.201833,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.033984,
+          "cost_output": 0.0216,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.055584,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.055584,
+          "price_table_version": "1.0.0"
+        }
+      ],
+      "tool_metrics": [
+        {
+          "tool_name": "create_note",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2297.71225,
+          "call_latency_ms_p95": 2297.71225,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 317.6385,
+          "call_latency_ms_p95": 2063.22825,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "supervisor",
+          "count": 8,
+          "call_latency_ms_p50": 260.722541,
+          "call_latency_ms_p95": 2138.28475,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 7,
+            "no_match": 0,
+            "denied": 1,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_contact",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 276.895458,
+          "call_latency_ms_p95": 2043.628583,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_contact",
+          "role": "research",
+          "count": 13,
+          "call_latency_ms_p50": 243.90275,
+          "call_latency_ms_p95": 264.136417,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 13,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_contact",
+          "role": "supervisor",
+          "count": 2,
+          "call_latency_ms_p50": 257.057625,
+          "call_latency_ms_p95": 2000.484084,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "mutation",
+          "count": 3,
+          "call_latency_ms_p50": 322.082667,
+          "call_latency_ms_p95": 329.371958,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "research",
+          "count": 38,
+          "call_latency_ms_p50": 306.485167,
+          "call_latency_ms_p95": 571.424458,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 38,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "supervisor",
+          "count": 5,
+          "call_latency_ms_p50": 311.121292,
+          "call_latency_ms_p95": 2358.496667,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 0,
+            "denied": 1,
+            "tool_failure": 1
+          }
+        },
+        {
+          "tool_name": "list_activities",
+          "role": "research",
+          "count": 1,
+          "call_latency_ms_p50": 2143.08775,
+          "call_latency_ms_p95": 2143.08775,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_activities",
+          "role": "supervisor",
+          "count": 4,
+          "call_latency_ms_p50": 276.340292,
+          "call_latency_ms_p95": 2062.418041,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_audit_records",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 241.739,
+          "call_latency_ms_p95": 1979.068041,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_proposals",
+          "role": "supervisor",
+          "count": 1,
+          "call_latency_ms_p50": 2185.678709,
+          "call_latency_ms_p95": 2185.678709,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "log_activity",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 321.131792,
+          "call_latency_ms_p95": 2106.574833,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 1
+          }
+        },
+        {
+          "tool_name": "pipeline_aggregate",
+          "role": "supervisor",
+          "count": 1,
+          "call_latency_ms_p50": 2865.250334,
+          "call_latency_ms_p95": 2865.250334,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_accounts",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2144.104833,
+          "call_latency_ms_p95": 2144.104833,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_opportunities",
+          "role": "supervisor",
+          "count": 4,
+          "call_latency_ms_p50": 342.795833,
+          "call_latency_ms_p95": 2326.069958,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 1,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "submit_proposal",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 291.518375,
+          "call_latency_ms_p95": 2120.350375,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "update_account",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2083.675708,
+          "call_latency_ms_p95": 2083.675708,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "update_contact",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 2020.636,
+          "call_latency_ms_p95": 2067.460041,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        }
+      ],
+      "task_spread": [
+        {
+          "task_id": "gt-01-investigation-pd01-successor",
+          "repeats": 1,
+          "correctness_min": 0.888889,
+          "correctness_mean": 0.888889,
+          "correctness_max": 0.888889,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-02-investigation-pd02-stale-forecast",
+          "repeats": 1,
+          "correctness_min": 0.857143,
+          "correctness_mean": 0.857143,
+          "correctness_max": 0.857143,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-03-investigation-pd03-scoped-lookup",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-04-investigation-turn-budget-partial",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-05-investigation-large-tool-result",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-06-enrichment-create-note",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-07-enrichment-log-activity-last-touch",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-08-enrichment-stage-advance-proposal",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-09-enrichment-value-and-close-date-proposal",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-10-enrichment-update-account-fields",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-11-denial-out-of-book-target",
+          "repeats": 1,
+          "correctness_min": 0.875,
+          "correctness_mean": 0.875,
+          "correctness_max": 0.875,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-12-denial-nonexistent-target",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-13-denial-cross-account-comparison",
+          "repeats": 1,
+          "correctness_min": 0.833333,
+          "correctness_mean": 0.833333,
+          "correctness_max": 0.833333,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-14-denial-departed-contact-update",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-15-denial-service-principal-no-implicit-visibility",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-16-denial-tool-failure-not-conflated",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-17-lookup-opportunity-detail",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-18-lookup-account-contacts",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-19-lookup-pipeline-aggregate",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-20-lookup-proposal-queue",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        }
+      ]
+    },
+    {
+      "provenance": {
+        "mode": "live",
+        "timestamp": "2026-10-02T17:29:59.151418+00:00",
+        "model_id": "openai.gpt-6-astra",
+        "effort": "low",
+        "temperature": null,
+        "dataset_seed": 20260101,
+        "git_revision": "legacy-fixture-revision",
+        "runtime_identifier": "live-aws-lambda-dispatch",
+        "price_table_version": "1.0.0",
+        "answer_style_sha256": "084ecab6abdc721ccadd89660f0cb346220d4c05e08184404948961cab1ea71f"
+      },
+      "model_metrics": {
+        "model_id": "openai.gpt-6-astra",
+        "included_invocation_count": 19,
+        "input_tokens": 105472,
+        "output_tokens": 4418,
+        "cache_write_tokens": 46648,
+        "cache_read_tokens": 58722,
+        "cache_min_checkpoint_tokens": null,
+        "cost_withheld_provisional": false,
+        "exclusions": {
+          "total_excluded": 3,
+          "by_category": {
+            "cold_start": 0,
+            "retry": 3,
+            "throttle": 0
+          }
+        },
+        "latency_measured": true,
+        "latency_percentile_method": "nearest-rank",
+        "task_latency_ms_p50": 14982.097292,
+        "task_latency_ms_p95": 90912.371958,
+        "call_latency_ms_by_tier": {
+          "supervisor": {
+            "p50": 2223.773042,
+            "p95": 8262.95875,
+            "count": 51
+          },
+          "subagent": {
+            "p50": 1922.14475,
+            "p95": 11532.979125,
+            "count": 68
+          },
+          "tool": {
+            "p50": 1299.768333,
+            "p95": 6977.494584,
+            "count": 100
+          }
+        },
+        "cost_input": 0.00102,
+        "cost_output": 0.2209,
+        "cost_cache_write": 0.5831,
+        "cost_cache_read": 0.058722,
+        "cost_excluding_cache": 0.22192,
+        "cost_cache_total": 0.641822,
+        "cost_total": 0.863742,
+        "price_table_version": "1.0.0"
+      },
+      "aggregate_score": {
+        "scored_task_count": 20,
+        "unscored_task_count": 0,
+        "mean_correctness": 0.908173,
+        "bad_write_rate": 0.0,
+        "tool_call_correct_rate": 1.0
+      },
+      "task_scores": [
+        {
+          "task_id": "gt-01-investigation-pd01-successor",
+          "scoring_mode": "machine",
+          "correctness": 0.888889,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": false,
+              "detail": "no proposal matched {'target_table': 'opportunities', 'target_id': 'opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000', 'operation': 'update'}",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[fabricated_contact_name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-02-investigation-pd02-stale-forecast",
+          "scoring_mode": "machine",
+          "correctness": 0.857143,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": false,
+              "detail": "no proposal matched {'target_table': 'opportunities', 'target_id': 'opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0001', 'operation': 'update'}",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposes_stage_change]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-03-investigation-pd03-scoped-lookup",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0006.title]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0012.title]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0012.name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[wrong_contact_mutated]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-04-investigation-turn-budget-partial",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": true,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0040.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0080.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0040]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0080]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_truncation]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-05-investigation-large-tool-result",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[activities.act-eval-3890db7e6cfd4b42bc41a652e73b092b-defect-pd01.body]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[list_activities|get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_truncation]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-06-enrichment-create-note",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[notes.None.opportunity_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_instead_of_direct_commit]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-07-enrichment-log-activity-last-touch",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[activities.None.opportunity_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_field_changes[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.last_touch]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[last_touch_not_updated]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-08-enrichment-stage-advance-proposal",
+          "scoring_mode": "machine",
+          "correctness": 0.909091,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.primary_contact_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": false,
+              "detail": "created 2 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-0c4a1981-f41f-5010-94cc-4d3535257fea]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-5c832920-8d77-5a69-a5bf-530a2602e1a4]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[direct_commit_of_high_risk_field]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-09-enrichment-value-and-close-date-proposal",
+          "scoring_mode": "machine",
+          "correctness": 0.8,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.close_date]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": false,
+              "detail": "created 2 proposal(s), limit is 1",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-aa004c11-efde-5c77-8416-7a9b9b93909c]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "allowed_proposal_fields[prop-8ec4509e-cb10-56c8-a486-11d3ad3c3c93]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_proposal",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[direct_commit_of_high_risk_field]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[split_into_two_proposals]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'split_into_two_proposals'",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-10-enrichment-update-account-fields",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "expected_field_changes[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.website]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "expected_field_changes[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.industry]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.owner_rep_id]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[accounts.acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.name]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_instead_of_direct_commit]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-11-denial-out-of-book-target",
+          "scoring_mode": "machine",
+          "correctness": 0.875,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002', got outcome='denied' missing_scope='account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-12-denial-nonexistent-target",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='no_match' missing_scope=None, got outcome='tool_failure' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[denied]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'tool_failure'",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-13-denial-cross-account-comparison",
+          "scoring_mode": "machine",
+          "correctness": 0.833333,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": true,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002', got outcome='denied' missing_scope='account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0002'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[partial_comparison_presented_as_complete]",
+              "passed": true,
+              "detail": "'partial_comparison_presented_as_complete' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-14-denial-departed-contact-update",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.phone]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_contact:cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[silent_update_of_departed_contact]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-15-denial-service-principal-no-implicit-visibility",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": true,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='denied' missing_scope='*', got outcome='no_match' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'no_match'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[tool_failure]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-16-denial-tool-failure-not-conflated",
+          "scoring_mode": "machine",
+          "correctness": 0.666667,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_denial",
+              "passed": false,
+              "detail": "expected outcome='tool_failure' missing_scope=None, got outcome='data' missing_scope=None",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[data]",
+              "passed": false,
+              "detail": "observed forbidden outcome 'data'",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[no_match]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[denied]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-17-lookup-opportunity-detail",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.stage]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[opportunities.opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.value]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_opportunity:opp-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[wrong_value_reported]",
+              "passed": true,
+              "detail": "'wrong_value_reported' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-18-lookup-account-contacts",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0000.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0001.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "must_not_change[contacts.cont-eval-3890db7e6cfd4b42bc41a652e73b092b-0002.status]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[get_account:acct-eval-3890db7e6cfd4b42bc41a652e73b092b-0000]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[incomplete_contact_list]",
+              "passed": true,
+              "detail": "'incomplete_contact_list' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-19-lookup-pipeline-aggregate",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[pipeline_aggregate:*]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[includes_out_of_book_accounts]",
+              "passed": true,
+              "detail": "'includes_out_of_book_accounts' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "forbidden_outcomes[includes_closed_stages_as_open]",
+              "passed": true,
+              "detail": "'includes_closed_stages_as_open' names a property of the synthesized answer's prose content (which value was reported, whether a list was complete, whether a comparison silently used only part of its inputs); no TurnOutcome field or committed-state/proposal read captures reply content, and introducing a judge model to grade it is forbidden. Reported explicitly unscored rather than silently passed.",
+              "unscored": true
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        },
+        {
+          "task_id": "gt-20-lookup-proposal-queue",
+          "scoring_mode": "machine",
+          "correctness": 1.0,
+          "unscored_reason": null,
+          "bad_write": false,
+          "tool_call_correct": true,
+          "truncated": false,
+          "budget_exhausted": false,
+          "assertion_results": [
+            {
+              "name": "max_proposal_count",
+              "passed": true,
+              "detail": "created 0 proposal(s), limit is 0",
+              "unscored": false
+            },
+            {
+              "name": "expected_reads[list_proposals:*]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "forbidden_outcomes[proposal_created_when_only_a_list_was_asked_for]",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            },
+            {
+              "name": "tool_call_correctness",
+              "passed": true,
+              "detail": "",
+              "unscored": false
+            }
+          ]
+        }
+      ],
+      "tier_role_model_metrics": [
+        {
+          "tier": "subagent",
+          "role": "analytics",
+          "model_id": "openai.gpt-6-sol",
+          "included_invocation_count": 4,
+          "input_tokens": 41504,
+          "output_tokens": 780,
+          "cache_read_tokens": 25179,
+          "cache_write_tokens": 15736,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1922.14475,
+          "call_latency_ms_p95": 5056.435667,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.001178,
+          "cost_output": 0.0078,
+          "cost_cache_write": 0.03934,
+          "cost_cache_read": 0.005036,
+          "cost_excluding_cache": 0.008978,
+          "cost_cache_total": 0.044376,
+          "cost_total": 0.053354,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "subagent",
+          "role": "mutation",
+          "model_id": "openai.gpt-6-sol",
+          "included_invocation_count": 54,
+          "input_tokens": 182086,
+          "output_tokens": 4893,
+          "cache_read_tokens": 124403,
+          "cache_write_tokens": 57575,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1752.042459,
+          "call_latency_ms_p95": 12224.008542,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.000216,
+          "cost_output": 0.04893,
+          "cost_cache_write": 0.143937,
+          "cost_cache_read": 0.024881,
+          "cost_excluding_cache": 0.049146,
+          "cost_cache_total": 0.168818,
+          "cost_total": 0.217964,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "subagent",
+          "role": "research",
+          "model_id": "openai.gpt-6-sol",
+          "included_invocation_count": 10,
+          "input_tokens": 278937,
+          "output_tokens": 3549,
+          "cache_read_tokens": 199181,
+          "cache_write_tokens": 78551,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 2177.214166,
+          "call_latency_ms_p95": 7000.427583,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.00241,
+          "cost_output": 0.03549,
+          "cost_cache_write": 0.196378,
+          "cost_cache_read": 0.039836,
+          "cost_excluding_cache": 0.0379,
+          "cost_cache_total": 0.236214,
+          "cost_total": 0.274114,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "supervisor",
+          "role": "supervisor",
+          "model_id": "openai.gpt-6-astra",
+          "included_invocation_count": 51,
+          "input_tokens": 105472,
+          "output_tokens": 4418,
+          "cache_read_tokens": 58722,
+          "cache_write_tokens": 46648,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 2223.773042,
+          "call_latency_ms_p95": 8262.95875,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.00102,
+          "cost_output": 0.2209,
+          "cost_cache_write": 0.5831,
+          "cost_cache_read": 0.058722,
+          "cost_excluding_cache": 0.22192,
+          "cost_cache_total": 0.641822,
+          "cost_total": 0.863742,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "tool",
+          "role": "analytics",
+          "model_id": "openai.gpt-6-luna",
+          "included_invocation_count": 7,
+          "input_tokens": 1244,
+          "output_tokens": 339,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1217.404,
+          "call_latency_ms_p95": 3093.894333,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.000124,
+          "cost_output": 0.00017,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.000294,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.000294,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "tool",
+          "role": "mutation",
+          "model_id": "openai.gpt-6-luna",
+          "included_invocation_count": 43,
+          "input_tokens": 8143,
+          "output_tokens": 3083,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1717.816542,
+          "call_latency_ms_p95": 10253.6075,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.000814,
+          "cost_output": 0.001541,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.002356,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.002356,
+          "price_table_version": "1.0.0"
+        },
+        {
+          "tier": "tool",
+          "role": "research",
+          "model_id": "openai.gpt-6-luna",
+          "included_invocation_count": 50,
+          "input_tokens": 6561,
+          "output_tokens": 2387,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "call_latency_measured": true,
+          "latency_percentile_method": "nearest-rank",
+          "call_latency_ms_p50": 1198.454,
+          "call_latency_ms_p95": 5873.037791,
+          "cost_withheld_provisional": false,
+          "cost_input": 0.000656,
+          "cost_output": 0.001193,
+          "cost_cache_write": 0.0,
+          "cost_cache_read": 0.0,
+          "cost_excluding_cache": 0.00185,
+          "cost_cache_total": 0.0,
+          "cost_total": 0.00185,
+          "price_table_version": "1.0.0"
+        }
+      ],
+      "tool_metrics": [
+        {
+          "tool_name": "approve_proposal",
+          "role": "mutation",
+          "count": 5,
+          "call_latency_ms_p50": 417.623042,
+          "call_latency_ms_p95": 2143.72675,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 0,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 5
+          }
+        },
+        {
+          "tool_name": "create_note",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2036.361333,
+          "call_latency_ms_p95": 2036.361333,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "analytics",
+          "count": 2,
+          "call_latency_ms_p50": 237.463333,
+          "call_latency_ms_p95": 271.999291,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 1,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "mutation",
+          "count": 4,
+          "call_latency_ms_p50": 275.5905,
+          "call_latency_ms_p95": 552.9595,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "research",
+          "count": 2,
+          "call_latency_ms_p50": 292.928292,
+          "call_latency_ms_p95": 295.292667,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_account",
+          "role": "supervisor",
+          "count": 3,
+          "call_latency_ms_p50": 272.696417,
+          "call_latency_ms_p95": 278.684417,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_contact",
+          "role": "mutation",
+          "count": 4,
+          "call_latency_ms_p50": 258.976959,
+          "call_latency_ms_p95": 2102.233416,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_contact",
+          "role": "research",
+          "count": 6,
+          "call_latency_ms_p50": 252.928291,
+          "call_latency_ms_p95": 518.732292,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 6,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "analytics",
+          "count": 1,
+          "call_latency_ms_p50": 342.473916,
+          "call_latency_ms_p95": 342.473916,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "mutation",
+          "count": 8,
+          "call_latency_ms_p50": 317.020208,
+          "call_latency_ms_p95": 395.320166,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 8,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "research",
+          "count": 39,
+          "call_latency_ms_p50": 305.083791,
+          "call_latency_ms_p95": 411.891042,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 39,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "get_opportunity",
+          "role": "supervisor",
+          "count": 6,
+          "call_latency_ms_p50": 292.28075,
+          "call_latency_ms_p95": 343.945708,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 1,
+            "tool_failure": 1
+          }
+        },
+        {
+          "tool_name": "list_activities",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 291.778417,
+          "call_latency_ms_p95": 311.581875,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_activities",
+          "role": "research",
+          "count": 2,
+          "call_latency_ms_p50": 279.782583,
+          "call_latency_ms_p95": 292.848833,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 2,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_activities",
+          "role": "supervisor",
+          "count": 4,
+          "call_latency_ms_p50": 261.692583,
+          "call_latency_ms_p95": 2033.593708,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_audit_records",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2153.458375,
+          "call_latency_ms_p95": 2153.458375,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_proposals",
+          "role": "mutation",
+          "count": 3,
+          "call_latency_ms_p50": 301.020584,
+          "call_latency_ms_p95": 1927.702625,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "list_proposals",
+          "role": "supervisor",
+          "count": 1,
+          "call_latency_ms_p50": 340.698375,
+          "call_latency_ms_p95": 340.698375,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "log_activity",
+          "role": "mutation",
+          "count": 4,
+          "call_latency_ms_p50": 289.9125,
+          "call_latency_ms_p95": 2118.569541,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 3
+          }
+        },
+        {
+          "tool_name": "pipeline_aggregate",
+          "role": "supervisor",
+          "count": 1,
+          "call_latency_ms_p50": 2588.867375,
+          "call_latency_ms_p95": 2588.867375,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_accounts",
+          "role": "mutation",
+          "count": 1,
+          "call_latency_ms_p50": 2023.566958,
+          "call_latency_ms_p95": 2023.566958,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_accounts",
+          "role": "supervisor",
+          "count": 1,
+          "call_latency_ms_p50": 240.438083,
+          "call_latency_ms_p95": 240.438083,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_opportunities",
+          "role": "analytics",
+          "count": 4,
+          "call_latency_ms_p50": 352.903584,
+          "call_latency_ms_p95": 2232.361875,
+          "truncated_count": 2,
+          "outcome_distribution": {
+            "data": 3,
+            "no_match": 1,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_opportunities",
+          "role": "research",
+          "count": 1,
+          "call_latency_ms_p50": 2025.777083,
+          "call_latency_ms_p95": 2025.777083,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "search_opportunities",
+          "role": "supervisor",
+          "count": 2,
+          "call_latency_ms_p50": 374.588833,
+          "call_latency_ms_p95": 564.685209,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 1,
+            "no_match": 1,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "submit_proposal",
+          "role": "mutation",
+          "count": 4,
+          "call_latency_ms_p50": 322.216291,
+          "call_latency_ms_p95": 1933.080917,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 4,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 0
+          }
+        },
+        {
+          "tool_name": "update_account",
+          "role": "mutation",
+          "count": 2,
+          "call_latency_ms_p50": 283.927833,
+          "call_latency_ms_p95": 2177.548167,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 0,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 2
+          }
+        },
+        {
+          "tool_name": "update_contact",
+          "role": "mutation",
+          "count": 4,
+          "call_latency_ms_p50": 323.512333,
+          "call_latency_ms_p95": 2051.732834,
+          "truncated_count": 0,
+          "outcome_distribution": {
+            "data": 0,
+            "no_match": 0,
+            "denied": 0,
+            "tool_failure": 4
+          }
+        }
+      ],
+      "task_spread": [
+        {
+          "task_id": "gt-01-investigation-pd01-successor",
+          "repeats": 1,
+          "correctness_min": 0.888889,
+          "correctness_mean": 0.888889,
+          "correctness_max": 0.888889,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-02-investigation-pd02-stale-forecast",
+          "repeats": 1,
+          "correctness_min": 0.857143,
+          "correctness_mean": 0.857143,
+          "correctness_max": 0.857143,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-03-investigation-pd03-scoped-lookup",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-04-investigation-turn-budget-partial",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-05-investigation-large-tool-result",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-06-enrichment-create-note",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-07-enrichment-log-activity-last-touch",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-08-enrichment-stage-advance-proposal",
+          "repeats": 1,
+          "correctness_min": 0.909091,
+          "correctness_mean": 0.909091,
+          "correctness_max": 0.909091,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-09-enrichment-value-and-close-date-proposal",
+          "repeats": 1,
+          "correctness_min": 0.8,
+          "correctness_mean": 0.8,
+          "correctness_max": 0.8,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-10-enrichment-update-account-fields",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-11-denial-out-of-book-target",
+          "repeats": 1,
+          "correctness_min": 0.875,
+          "correctness_mean": 0.875,
+          "correctness_max": 0.875,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-12-denial-nonexistent-target",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-13-denial-cross-account-comparison",
+          "repeats": 1,
+          "correctness_min": 0.833333,
+          "correctness_mean": 0.833333,
+          "correctness_max": 0.833333,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-14-denial-departed-contact-update",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-15-denial-service-principal-no-implicit-visibility",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-16-denial-tool-failure-not-conflated",
+          "repeats": 1,
+          "correctness_min": 0.666667,
+          "correctness_mean": 0.666667,
+          "correctness_max": 0.666667,
+          "success_fraction": 0.0
+        },
+        {
+          "task_id": "gt-17-lookup-opportunity-detail",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-18-lookup-account-contacts",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-19-lookup-pipeline-aggregate",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        },
+        {
+          "task_id": "gt-20-lookup-proposal-queue",
+          "repeats": 1,
+          "correctness_min": 1.0,
+          "correctness_mean": 1.0,
+          "correctness_max": 1.0,
+          "success_fraction": 1.0
+        }
+      ]
+    }
+  ],
+  "figure_semantics": {
+    "source": "src/eval/matrix.py",
+    "mean_correctness": "The mean fraction of machine-checkable assertions satisfied over the tasks that were actually scored. Not a measure of end-to-end task success: an assertion naming a record that does not exist under the tenant an arm ran against lowers this figure whatever the turn did. Most of what it averages are negative guards a turn that does nothing at all satisfies, so its dynamic range is compressed well above zero and the figure is not a task-achievement rate; each arm's own positive-versus-guard composition, including the positive-assertion satisfaction rate, is stated with its aggregate figures.",
+    "bad_write_rate": "Reports only what a captured pre-turn baseline makes observable: a `must_not_change` assertion with no baseline is reported unscored and contributes nothing. Each arm's own basis is stated with its aggregate figures.",
+    "tool_call_correct_rate": "Reports that each scored turn issued a tool call which dispatched against an in-scope target. It is derived from exactly three conditions \u2014 a turn that issued no tool call at all, a proposal submitted on a task whose proposal limit is zero, and a proposal targeting a record other than the expected one \u2014 and from nothing else. It therefore does not report whether the turn chose the most apt tool for the task; where a task names the retrieval its answer requires, an `expected_reads` assertion checks that at least one call to a named tool reached the named record, and contributes to `mean_correctness` and deliberately not to this figure. An entry whose `target_id` is null checks only that one of the named tools was called at all, never that any particular record was reached, because the tools it names take no record id. Read to its exact boundary: it is satisfied incidentally by a turn that calls the named tool on the named record among many other calls, it says nothing about what the turn then reported, and it is therefore a necessary condition for an apt retrieval and never a sufficient one (src/eval/scoring.py, `_check_expected_reads`).",
+    "report_quality": "Not measured anywhere in this project, by any figure in this artifact. Two tasks score retrieval in place of report quality: grading a multi-part prose report needs a judge model, which this project forbids, so their assertions check that the turn read the records the answer requires and nothing checks what the turn then wrote. A turn that reads exactly the right records and then reports them incompletely, or wrongly, still satisfies those assertions and still counts toward `mean_correctness`. The `lookup` tasks' positive signal is retrieval on the same terms, and for two of the four it is weaker still: their `expected_reads` entry carries a null `target_id`, so the satisfied assertion evidences only that the named whole-book tool was called at all, not that any particular record was read. The narrowing was authorised deliberately and each narrowed task's own `notes` in golden_tasks.yaml restate the superseded reasoning at length.",
+    "retrieval_narrowed_task_ids": [
+      "gt-04-investigation-turn-budget-partial",
+      "gt-05-investigation-large-tool-result"
+    ],
+    "retrieval_narrowing_conservatism": "A task narrowed to retrieval names the specific retrieval its assertions check, and names only the retrievals that expose an observable target id. A turn that answers such a task by an equally apt retrieval which exposes no target id therefore satisfies none of that task's positive assertions, for a reason unrelated to what the model did. The deduction that conservatism makes to `mean_correctness` is quantified per arm with that arm's aggregate figures, as an upper bound derived from the arm's own per-task records, so a reader of this artifact alone can size it against the figures it appears beside.",
+    "retrieval_narrowing_magnitude": {
+      "largest_single_arm_deduction_upper_bound": 0.0,
+      "largest_absolute_inter_arm_mean_correctness_difference": 0.002121,
+      "deduction_exceeds_inter_arm_difference": false,
+      "note": "Retrieval-narrowing magnitude: the largest deduction any one arm's retrieval-narrowed tasks account for is 0.000000 of that arm's `mean_correctness`, which is smaller than the largest absolute difference between any two arms' `mean_correctness` in this sweep (0.002121). Which arm sits on which side of that difference is deliberately not computed or stated anywhere in this artifact; the comparison is published because a disclosed measurement conservatism of this size bounds how much the difference between arms can be read as a property of the models (src/eval/golden_tasks.yaml)."
+    },
+    "effort": "The reasoning-effort string sent in each arm's request, pinned identically across arms so the sweep is reproducible. It is not a claim that the arms were given equivalent reasoning budgets: each family declares its own effort scale with its own rung count and its own default, so an identical label sits at a different position on each family's scale. The declared scales, and this non-equivalence, are recorded in config/model_capabilities.yaml under `effort_scale_comparability`.",
+    "token_accounting": {
+      "source": "src/crm/metering.py",
+      "note": "Each arm's `input_tokens` is the count its own provider family reported, and the families report cached prompt reads in differently-shaped usage objects: one as a sibling of `input_tokens`, the other nested inside its breakdown. Whether a family's `input_tokens` already contains the `cache_read_tokens` printed beside it is therefore a per-family question, and this project declares it per family with the evidence behind the declaration rather than assuming the two figures count the same thing. Two consequences, both exact: the arms' `input_tokens` are not established to be like-for-like totals and should not be differenced or ratioed as though they were; and while any family's accounting is declared unconfirmed, pricing refuses to produce a publishable currency figure for it at all, so no cost comparison can rest on the ambiguity. No token figure in this artifact is adjusted by this disclosure \u2014 each is the count that was reported.",
+      "per_family": [
+        {
+          "family": "anthropic",
+          "cache_read_usage_field": "usage.cache_read_input_tokens (Messages API message_start)",
+          "cache_read_accounting": "exclusive",
+          "evidence_direction": "exclusive",
+          "evidence": "Exclusive (disjoint): inputTokens excludes both cacheReadInputTokens and cacheWriteInputTokens; the total input is their sum. AWS's own Bedrock prompt-caching walkthrough shows a cache-read response as {\"inputTokens\": 28, \"outputTokens\": 294, \"cacheWriteInputTokens\": 0, \"cacheReadInputTokens\": 1898} and states \"Only 28 tokens (the question itself) were processed as standard input\" while the 1,898 reused tokens are reported separately in cacheReadInputTokens \u2014 so the cached count is not inside inputTokens. Source: https://aws.amazon.com/blogs/machine-learning/optimizing-cost-and-latency-with-amazon-bedrock-prompt-caching/ (verified 2026-09-28). The Messages API message_start path the adapter reads carries the same disjoint cache_read_input_tokens / cache_creation_input_tokens siblings."
+        },
+        {
+          "family": "openai",
+          "cache_read_usage_field": "usage.input_tokens_details.cached_tokens (Responses API response.completed)",
+          "cache_read_accounting": "inclusive",
+          "evidence_direction": "inclusive",
+          "evidence": "Inclusive (subset): input_tokens is the full input count and both the cached reads and the cache writes are part of it, not added on top. AWS's Bedrock explicit-caching documentation for the OpenAI models states verbatim \"input_tokens = cached_tokens + cache_write_tokens + non-cached remainder\" and \"Because the cached and written counts are part of input_tokens rather than added on top of it, a token served from the cache is counted once and billed once at the cache-read rate. You are never charged twice for the same token.\" Its worked example confirms the arithmetic (input_tokens 3682 = cached 0 + cache_write 3626 + new 56). Source: https://aws.amazon.com/blogs/machine-learning/introducing-explicit-prompt-caching-for-openai-gpt-5-6-models-on-amazon-bedrock/ (verified 2026-09-28). So both cached_tokens and cache_write_tokens must be subtracted from input_tokens to obtain the tokens billed at the standard input rate. CAVEAT: that AWS source describes the GPT-5.6 models; GPT-6 (astra/sol/luna) uses the same Responses API usage shape (input_tokens with input_tokens_details.cached_tokens), and no GPT-6-specific vendor statement of this accounting was found, so the reading is carried forward by shape. The first --live sweep that records a non-zero cached read should be reconciled against the actual Bedrock bill to confirm it holds for GPT-6."
+        }
+      ]
+    },
+    "per_arm_bad_write_rate_basis": [
+      {
+        "model_id": "anthropic.claude-opus-5-5",
+        "must_not_change_assertions_declared": 39,
+        "must_not_change_assertions_with_pre_turn_baseline": 39,
+        "note": "`bad_write_rate` basis: all 39 declared `must_not_change` assertion(s) in this arm had a captured pre-turn baseline, so the figure is a measurement over them (src/eval/matrix.py)."
+      },
+      {
+        "model_id": "openai.gpt-6-astra",
+        "must_not_change_assertions_declared": 39,
+        "must_not_change_assertions_with_pre_turn_baseline": 39,
+        "note": "`bad_write_rate` basis: all 39 declared `must_not_change` assertion(s) in this arm had a captured pre-turn baseline, so the figure is a measurement over them (src/eval/matrix.py)."
+      }
+    ],
+    "per_arm_correctness_composition": [
+      {
+        "model_id": "anthropic.claude-opus-5-5",
+        "positive_assertions_scored": 24,
+        "positive_assertions_satisfied": 17,
+        "positive_assertion_satisfaction_rate": 0.708333,
+        "negative_guard_assertions_scored": 109,
+        "negative_guard_assertions_satisfied": 104,
+        "negative_guard_satisfaction_rate": 0.954128,
+        "negative_guard_share_of_assertion_mass": 0.812401,
+        "note": "`mean_correctness` composition: negative guards a do-nothing turn satisfies are 0.8124 of the assertion mass this figure averages \u2014 the mean over the 20 scored tasks of each task's own guard share, weighted exactly as `mean_correctness` itself is, rather than the ratio pooled over assertions (pooled totals, for context and not the basis of the figure just quoted: 109 guard assertions and 24 positive ones across those tasks). So the figure is not a task-achievement rate. Taken alone, 17 of 24 positive assertions were satisfied (0.7083); the guards alone were satisfied at 0.9541 (src/eval/matrix.py)."
+      },
+      {
+        "model_id": "openai.gpt-6-astra",
+        "positive_assertions_scored": 24,
+        "positive_assertions_satisfied": 17,
+        "positive_assertion_satisfaction_rate": 0.708333,
+        "negative_guard_assertions_scored": 111,
+        "negative_guard_assertions_satisfied": 105,
+        "negative_guard_satisfaction_rate": 0.945946,
+        "negative_guard_share_of_assertion_mass": 0.813411,
+        "note": "`mean_correctness` composition: negative guards a do-nothing turn satisfies are 0.8134 of the assertion mass this figure averages \u2014 the mean over the 20 scored tasks of each task's own guard share, weighted exactly as `mean_correctness` itself is, rather than the ratio pooled over assertions (pooled totals, for context and not the basis of the figure just quoted: 111 guard assertions and 24 positive ones across those tasks). So the figure is not a task-achievement rate. Taken alone, 17 of 24 positive assertions were satisfied (0.7083); the guards alone were satisfied at 0.9459 (src/eval/matrix.py)."
+      }
+    ],
+    "per_arm_retrieval_conservatism": [
+      {
+        "model_id": "anthropic.claude-opus-5-5",
+        "narrowed_tasks_scored": 2,
+        "per_task": [
+          {
+            "task_id": "gt-04-investigation-turn-budget-partial",
+            "correctness": 1.0,
+            "mean_correctness_deduction_upper_bound": 0.0
+          },
+          {
+            "task_id": "gt-05-investigation-large-tool-result",
+            "correctness": 1.0,
+            "mean_correctness_deduction_upper_bound": 0.0
+          }
+        ],
+        "mean_correctness_deduction_upper_bound": 0.0,
+        "note": "Retrieval-narrowed task deduction: the assertions this arm did not satisfy on the tasks narrowed to retrieval account for at most 0.000000 of its `mean_correctness` (`gt-04-investigation-turn-budget-partial` scored 1.000000, at most 0.000000; `gt-05-investigation-large-tool-result` scored 1.000000, at most 0.000000), an upper bound over the 20 scored tasks derived from this arm's own per-task records. The figure itself is unchanged by this disclosure (src/eval/golden_tasks.yaml)."
+      },
+      {
+        "model_id": "openai.gpt-6-astra",
+        "narrowed_tasks_scored": 2,
+        "per_task": [
+          {
+            "task_id": "gt-04-investigation-turn-budget-partial",
+            "correctness": 1.0,
+            "mean_correctness_deduction_upper_bound": 0.0
+          },
+          {
+            "task_id": "gt-05-investigation-large-tool-result",
+            "correctness": 1.0,
+            "mean_correctness_deduction_upper_bound": 0.0
+          }
+        ],
+        "mean_correctness_deduction_upper_bound": 0.0,
+        "note": "Retrieval-narrowed task deduction: the assertions this arm did not satisfy on the tasks narrowed to retrieval account for at most 0.000000 of its `mean_correctness` (`gt-04-investigation-turn-budget-partial` scored 1.000000, at most 0.000000; `gt-05-investigation-large-tool-result` scored 1.000000, at most 0.000000), an upper bound over the 20 scored tasks derived from this arm's own per-task records. The figure itself is unchanged by this disclosure (src/eval/golden_tasks.yaml)."
+      }
+    ]
+  }
+}

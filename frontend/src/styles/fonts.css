@@ -1,0 +1,10 @@
+/*
+ * Self-hosted IBM Plex: the sans weights `--weight-*` names, and mono 400/500. Imported from the
+ * app entry beside `tailwind.css`, never from it.
+ */
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource/ibm-plex-sans/700.css";
+@import "@fontsource/ibm-plex-mono/400.css";
+@import "@fontsource/ibm-plex-mono/500.css";

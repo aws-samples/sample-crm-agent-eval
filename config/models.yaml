@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+#
+# Tier-to-model assignment per family. Every model identifier in the system is configuration,
+# never a literal in application code.
+
+schema_version: 1
+
+# OpenAI is the default family.
+default_family: openai
+
+# Each tier below is the default for that tier: `providers.tier_tuning.defaults` returns the
+# default family's model and `tuning` per tier, and a settings reset restores them. A turn's tuning
+# names a family, model and effort per tier (wire schema 3); each tier's model must belong to that
+# tier's family. A field the turn omits resolves as: family -> `default_family`, model -> that
+# family's model for the tier here, effort -> this tier's `tuning.effort` here when the tier runs
+# that model, otherwise the model's `effort.default` in model_capabilities.yaml.
+families:
+  anthropic:
+    tiers:
+      supervisor:
+        model: anthropic.claude-sonnet-5-5
+        tuning: { effort: medium }
+      subagent:
+        model: anthropic.claude-sonnet-5-5
+        tuning: { effort: low }
+      tool:
+        model: anthropic.claude-haiku-5-5
+        tuning: { effort: low }
+
+  openai:
+    tiers:
+      supervisor:
+        model: openai.gpt-6.1-sol
+        tuning: { effort: medium }
+      subagent:
+        model: openai.gpt-6.1-terra
+        tuning: { effort: low }
+      tool:
+        model: openai.gpt-6-luna
+        tuning: { effort: low }
+
+# All inference goes through the bedrock-runtime endpoint, which serves the Messages API and the
+# Responses API. bedrock-mantle is not used.
+endpoint: bedrock-runtime
+# Provenance only: the region the catalogue was recorded in. No code reads this key; the inference
+# region is the deployment's AWS_REGION.
+region: us-east-1

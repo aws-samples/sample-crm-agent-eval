@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FirstCRM</title>
+    <!--
+      Declaring any `rel="icon"` stops the browser's implicit `GET /favicon.ico`, which the origin
+      answers 403 (Block Public Access denies `s3:ListBucket`, so S3 cannot distinguish "absent" from
+      "forbidden" and must not say which). SVG rather than `.ico` to keep the tracked tree text-only.
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!--
+      Applies the persisted theme before first paint, so the document never renders a frame in the
+      wrong one. `AppShell` also applies it in a layout effect, but that runs after the bundle has
+      loaded, which is too late for this element.
+
+      Deliberately inline, tiny, and dependency-free: it must run before anything else. It duplicates
+      the storage key and the fallback order from `src/AppShell.tsx` because a module import here
+      would defeat the purpose — `src/themeBoot.test.ts` executes this script against the same inputs
+      as `resolveInitialTheme()` and fails if the two ever disagree.
+    -->
+    <script>
+      (function () {
+        var theme = null;
+        try {
+          var stored = window.localStorage.getItem("crm.theme");
+          if (stored === "light" || stored === "dark") theme = stored;
+        } catch (error) {
+          // Storage unavailable or denied; fall through to the OS preference.
+        }
+        if (theme === null) {
+          try {
+            theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          } catch (error) {
+            theme = "light";
+          }
+        }
+        document.documentElement.setAttribute("data-theme", theme);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

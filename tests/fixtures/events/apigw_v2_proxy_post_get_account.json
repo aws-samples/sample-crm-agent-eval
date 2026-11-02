@@ -1,0 +1,61 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /get_account",
+  "rawPath": "/get_account",
+  "rawQueryString": "",
+  "headers": {
+    "accept-encoding": "identity",
+    "authorization": "Bearer REDACTED",
+    "content-length": "119",
+    "content-type": "application/json",
+    "host": "api-id.execute-api.us-east-1.amazonaws.com",
+    "user-agent": "Python-urllib/3.13",
+    "x-amzn-trace-id": "Root=1-68b7f2c1-0000000000000000000000",
+    "x-forwarded-for": "192.0.2.1",
+    "x-forwarded-port": "443",
+    "x-forwarded-proto": "https"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "api-id",
+    "authorizer": {
+      "jwt": {
+        "claims": {
+          "auth_time": "1756900000",
+          "client_id": "cognito-app-client-id",
+          "custom:book": "acct-eval-smoke-0000,acct-eval-smoke-0001",
+          "custom:full_visibility": "false",
+          "custom:rep_id": "00000000-0000-0000-0000-000000000000",
+          "custom:tenant": "eval-smoke-0000000000000000000000000000",
+          "event_id": "00000000-0000-0000-0000-000000000000",
+          "exp": "1756903600",
+          "iat": "1756900000",
+          "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX",
+          "jti": "00000000-0000-0000-0000-000000000000",
+          "origin_jti": "00000000-0000-0000-0000-000000000000",
+          "scope": "aws.cognito.signin.user.admin",
+          "sub": "00000000-0000-0000-0000-000000000000",
+          "token_use": "access",
+          "username": "00000000-0000-0000-0000-000000000000"
+        },
+        "scopes": null
+      }
+    },
+    "domainName": "api-id.execute-api.us-east-1.amazonaws.com",
+    "domainPrefix": "api-id",
+    "http": {
+      "method": "POST",
+      "path": "/get_account",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "192.0.2.1",
+      "userAgent": "Python-urllib/3.13"
+    },
+    "requestId": "SsyGxjXTIAMEJhA=",
+    "routeKey": "POST /get_account",
+    "stage": "prod",
+    "time": "03/Sep/2026:18:00:00 +0000",
+    "timeEpoch": 1756900000000
+  },
+  "body": "{\"account_id\": \"acct-eval-smoke-0000\"}",
+  "isBase64Encoded": false
+}

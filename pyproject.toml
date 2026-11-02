@@ -1,0 +1,95 @@
+# SPDX-License-Identifier: MIT
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crm-agent-eval"
+version = "1.0.0"
+description = "Serverless CRM with a Strands multi-agent assistant, an AgentCore Gateway MCP surface, and an Anthropic-vs-OpenAI evaluation framework."
+readme = "README.md"
+license = "MIT"
+requires-python = "==3.13.*"
+
+# Direct dependencies only, exact-version pinned. The full transitive tree is frozen in
+# requirements.txt, which is the sole install authority.
+dependencies = [
+  "boto3==1.43.121",
+  "botocore==1.43.121",
+  "PyYAML==6.0.3",
+  "jsonschema==4.26.0",
+  "PyJWT==2.15.1",
+  "cryptography==50.0.2",
+  "strands-agents==1.62.0",
+  "starlette==1.10.0",
+  "anthropic==2.3.0",
+  "openai==3.41.0",
+  "httpx2==2.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff==0.17.3",
+  "mypy==2.4.1",
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "pytest-xdist==3.8.0",
+  "moto==5.2.5",
+  "types-PyYAML==6.0.12.20260906",
+  "defusedxml==0.7.1",
+  "types-defusedxml==0.7.0.20260504",
+  "mcp==2.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests", "scripts", "fixtures"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "ARG", "PTH", "RET", "TID", "S"]
+ignore = [
+  "E501",   # line length is enforced by the formatter
+  "B008",   # function call in default argument, used for injected clocks
+]
+
+[tool.ruff.lint.per-file-ignores]
+# pytest asserts, fake credentials and subprocess-driven tests are idiomatic in the suite;
+# bandit still reports B108/B310 there.
+"tests/**" = [
+  "ARG001", "ARG002",
+  "S101", "S105", "S106", "S107", "S108", "S310", "S603", "S607",
+]
+# The error taxonomy names have no Error suffix (`raise ScopeDenied(...)`).
+"src/crm/errors.py" = ["N818"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+no_implicit_reexport = true
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["moto.*", "jwt.*", "botocore.*", "boto3.*", "jsonschema.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q --strict-markers"
+filterwarnings = [
+  "error::starlette.exceptions.StarletteDeprecationWarning",
+  "error::jwt.warnings.InsecureKeyLengthWarning",
+]
+markers = [
+  "live: requires AWS credentials and spends money; excluded from the offline gate suite",
+  "xdist_group(name): run every test sharing this group name on one pytest-xdist worker",
+]
