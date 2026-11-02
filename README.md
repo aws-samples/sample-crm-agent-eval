@@ -589,6 +589,11 @@ The `api_origin` and `dynamodb` modules have no README.
 - [`docs/mcp-client-guide.md`](docs/mcp-client-guide.md): connecting an MCP client to the two
   AgentCore Gateways
 
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to report issues and submit changes, and
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for the code of conduct.
+
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [`LICENSE`](LICENSE).
