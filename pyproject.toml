@@ -38,7 +38,7 @@ dev = [
   "types-PyYAML==6.0.12.20260906",
   "defusedxml==0.7.1",
   "types-defusedxml==0.7.0.20260504",
-  "mcp==2.1.1",
+  "mcp==2.2.0",
 ]
 
 [tool.setuptools.packages.find]
