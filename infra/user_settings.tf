@@ -22,11 +22,13 @@ module "lambda_action_user_settings" {
   memory_size_mb  = 256
 
   environment_variables = {
-    CRM_TABLE_PREFIX = local.name_prefix
+    CRM_TABLE_PREFIX                     = local.name_prefix
+    CRM_API_ALLOWED_CLIENT_IDS_PARAMETER = local.api_allowed_client_ids_parameter_name
     # Required for this zip's layout: the first-party packages live under `src/`.
     PYTHONPATH = "/var/task/src"
   }
   environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
 
   reserved_concurrent_executions = local.reserved_concurrency["user_settings"]
 

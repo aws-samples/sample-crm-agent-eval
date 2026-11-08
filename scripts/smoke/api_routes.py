@@ -37,7 +37,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -69,7 +71,7 @@ from scripts.smoke.tenant import (
 from scripts.smoke.verified_claims import USE_ID, ClaimsVerificationError, verified_claims
 
 from crm.authz import ADMIN_GROUP, DEMO_TENANT
-from crm.envelope import CLAIM_GROUPS, split_groups
+from crm.envelope import API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, CLAIM_GROUPS, split_groups
 from crm.errors import AuthenticationFailed
 from crm.handlers.eval_trigger import ACTION_CANCEL
 from crm.store.store import Store
@@ -472,11 +474,16 @@ def checks(  # noqa: C901, PLR0912, PLR0915 - one cohesive per-route inventory p
     token: str | None = None,
     seeder: TenantSeeder | None = None,
     teardown: TenantTeardown | None = None,
+    deployed_identity_checks: bool = False,
+    sleep: Sleeper = time.sleep,
 ) -> Iterable[CheckResult]:
     """Yield one `CheckResult` per (route, check) pair.
 
     Never raises for an individual check failure; every route in the deployed API is
-    still checked even when an earlier route already failed.
+    still checked even when an earlier route already failed. With `deployed_identity_checks`
+    (always set by `main`), the integrated functions' allowlist wiring is asserted
+    (`allowlist_checks`) and the audience probe (`audience_probe_checks`) runs inside the seeded
+    tenant's lifecycle.
     """
     caller = http_caller if http_caller is not None else default_http_caller
     # The CloudFront `/api` base. Every deployed path is a single segment, so `base + "/<name>"`
@@ -626,6 +633,18 @@ def checks(  # noqa: C901, PLR0912, PLR0915 - one cohesive per-route inventory p
                     detail=f"expected {_UNAUTHENTICATED_REFUSAL_STATUS}, got {status_code}",
                 )
 
+    functions: list[IntegratedFunction] = []
+    audience_function: IntegratedFunction | None = None
+    if deployed_identity_checks:
+        lambda_client = ctx.client("lambda")
+        by_route = integrated_function_names(apigw, api_id)
+        functions = [
+            _describe_function(lambda_client, name) for name in sorted(set(by_route.values()))
+        ]
+        audience_name = by_route.get(f"POST /{AUDIENCE_PROBE_TOOL}")
+        audience_function = next((f for f in functions if f.name == audience_name), None)
+        yield from allowlist_checks(ctx, functions)
+
     yield from _authenticated_pass(
         ctx,
         caller=caller,
@@ -634,6 +653,9 @@ def checks(  # noqa: C901, PLR0912, PLR0915 - one cohesive per-route inventory p
         api_base_url=api_base_url,
         seeder=seeder,
         teardown=teardown,
+        audience_function=audience_function,
+        audience_probe=deployed_identity_checks,
+        sleep=sleep,
     )
 
     yield from _private_endpoint_checks(apigw, api_id)
@@ -790,8 +812,14 @@ def _authenticated_pass(
     api_base_url: str,
     seeder: TenantSeeder | None,
     teardown: TenantTeardown | None,
+    audience_function: IntegratedFunction | None = None,
+    audience_probe: bool = False,
+    sleep: Sleeper = time.sleep,
 ) -> Iterable[CheckResult]:
     """Yield the `authenticated_non_error` check for every route, plus its tenant preamble.
+
+    With `audience_probe`, the direct-invoke audience pair runs against `audience_function` while
+    the tenant is seeded; an unresolved function is a failing row.
 
     Refuses to issue a single authenticated call unless the token's own `custom:tenant` claim
     names an ``eval-`` smoke tenant. A refusal is reported as a failing check per route.
@@ -845,6 +873,18 @@ def _authenticated_pass(
             api_base_url=api_base_url,
             tenant=tenant,
         )
+        if audience_probe:
+            if audience_function is None:
+                yield CheckResult(
+                    resource=RESOURCE_CLASS,
+                    check="audience_probe_function_resolved",
+                    status="fail",
+                    detail=f"no integrated function for {AUDIENCE_PROBE_TOOL!r} was resolved",
+                )
+            else:
+                yield from audience_probe_checks(
+                    ctx, function=audience_function, claims=claims, tenant=tenant, sleep=sleep
+                )
     finally:
         if owns_lifecycle:
             yield from _teardown_check(tenant, do_teardown)
@@ -1082,6 +1122,403 @@ def _teardown_check(tenant: str, do_teardown: TenantTeardown) -> Iterable[CheckR
     )
 
 
+# ---------------------------------------------------------------------------
+# The apigw channel's app-client allowlist, as deployed.
+# ---------------------------------------------------------------------------
+
+#: The environment variable an earlier deployment carried the allowlist in directly; read by nothing.
+LEGACY_ALLOWED_CLIENT_IDS_ENV: Final[str] = "CRM_API_ALLOWED_CLIENT_IDS"
+
+#: The tool whose deployed Lambda the direct-invoke audience probe calls.
+AUDIENCE_PROBE_TOOL: Final[str] = "get_account"
+
+#: The tag every data-bearing resource must carry.
+DATA_CLASSIFICATION_TAG: Final[str] = "data-classification"
+
+#: The SSM write actions no project role may hold on the allowlist parameter.
+SSM_WRITE_ACTIONS: Final[tuple[str, ...]] = (
+    "ssm:PutParameter",
+    "ssm:DeleteParameter",
+    "ssm:LabelParameterVersion",
+)
+
+#: The refusal detail `crm.envelope` gives a token from an unlisted app client, which the handler's
+#: `crm_error` log line carries in its `reason`.
+AUDIENCE_REFUSAL_REASON: Final[str] = "is not an admitted app client"
+
+#: Bounded poll for the refusal's log line: attempts and the wait between them, in seconds.
+LOG_POLL_ATTEMPTS: Final[int] = 6
+LOG_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+
+_INTEGRATION_FUNCTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"functions/(arn:aws[a-z-]*:lambda:[^/:]+:[0-9]{12}:function:[^/:]+)"
+)
+
+Sleeper = Callable[[float], None]
+Clock = Callable[[], float]
+
+
+@dataclass(frozen=True)
+class IntegratedFunction:
+    """One Lambda function a REST API method is integrated with, as deployed."""
+
+    name: str
+    arn: str
+    role_arn: str
+    environment: Mapping[str, str]
+    log_group: str
+
+
+def integrated_function_names(apigw: Any, api_id: str) -> dict[str, str]:
+    """Map each deployed `<METHOD> /<path>` route to the Lambda function name it integrates.
+
+    Read from each method's `get_integration` URI; a method without a Lambda integration is omitted.
+    """
+    names: dict[str, str] = {}
+    position: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"restApiId": api_id}
+        if position:
+            kwargs["position"] = position
+        page = apigw.get_resources(**kwargs)
+        for resource in page.get("items", []):
+            path = str(resource.get("path", ""))
+            for http_method in resource.get("resourceMethods") or {}:
+                integration = apigw.get_integration(
+                    restApiId=api_id, resourceId=str(resource["id"]), httpMethod=str(http_method)
+                )
+                match = _INTEGRATION_FUNCTION_RE.search(str(integration.get("uri", "")))
+                if match is not None:
+                    names[f"{http_method} {path}"] = match.group(1).rsplit(":", 1)[-1]
+        position = page.get("position")
+        if not position:
+            return names
+
+
+def _describe_function(lambda_client: Any, name: str) -> IntegratedFunction:
+    configuration = lambda_client.get_function_configuration(FunctionName=name)
+    variables = (configuration.get("Environment") or {}).get("Variables") or {}
+    logging_config = configuration.get("LoggingConfig") or {}
+    return IntegratedFunction(
+        name=name,
+        arn=str(configuration.get("FunctionArn", "")),
+        role_arn=str(configuration.get("Role", "")),
+        environment={str(key): str(value) for key, value in variables.items()},
+        log_group=str(logging_config.get("LogGroup") or f"/aws/lambda/{name}"),
+    )
+
+
+def _parameter_arn(region: str, function_arn: str, name: str) -> str:
+    """The ARN of SSM parameter `name` in the function's own account and `region`."""
+    account = function_arn.split(":")[4] if function_arn.count(":") >= 5 else ""
+    return f"arn:aws:ssm:{region}:{account}:parameter/{name.lstrip('/')}"
+
+
+def _simulated_decisions(
+    iam: Any, role_arn: str, actions: Sequence[str], resource_arn: str
+) -> dict[str, tuple[str, list[str]]]:
+    """`action -> (EvalDecision, MissingContextValues)` for one role, actions and resource."""
+    response = iam.simulate_principal_policy(
+        PolicySourceArn=role_arn, ActionNames=list(actions), ResourceArns=[resource_arn]
+    )
+    decisions: dict[str, tuple[str, list[str]]] = {}
+    for result in response.get("EvaluationResults", []):
+        decisions[str(result.get("EvalActionName"))] = (
+            str(result.get("EvalDecision")),
+            [str(value) for value in result.get("MissingContextValues") or []],
+        )
+    return decisions
+
+
+def _not_allowed_row(
+    iam: Any,
+    *,
+    resource: str,
+    check: str,
+    role_arn: str,
+    probes: Sequence[tuple[str, str]],
+) -> CheckResult:
+    """One row passing only when every `(action, resource_arn)` probe is not `allowed`."""
+    allowed: list[str] = []
+    for action, resource_arn in probes:
+        decision, _ = _simulated_decisions(iam, role_arn, [action], resource_arn).get(
+            action, ("missing", [])
+        )
+        if decision == "missing":
+            allowed.append(f"{action} on {resource_arn}: no evaluation result")
+        elif decision == "allowed":
+            allowed.append(f"{action} on {resource_arn}")
+    return CheckResult(
+        resource=resource,
+        check=check,
+        status="fail" if allowed else "pass",
+        detail=(
+            f"allowed (must not be): {allowed}"
+            if allowed
+            else f"{len(probes)} probe(s) not allowed for {role_arn.rsplit('/', 1)[-1]}"
+        ),
+    )
+
+
+def allowlist_checks(
+    ctx: SmokeContext, functions: Sequence[IntegratedFunction]
+) -> Iterable[CheckResult]:
+    """Assert the deployed allowlist wiring: env on every integrated function, parameter, IAM."""
+    if not functions:
+        yield CheckResult(
+            resource=RESOURCE_CLASS,
+            check="resolve_integrated_functions",
+            status="fail",
+            detail="no REST API method resolved to a Lambda integration, so nothing was checked",
+        )
+        return
+    yield CheckResult(
+        resource=RESOURCE_CLASS,
+        check="resolve_integrated_functions",
+        status="pass",
+        detail=f"{len(functions)} integrated function(s) resolved from the deployed API",
+    )
+    values: set[str] = set()
+    for function in functions:
+        value = function.environment.get(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, "")
+        if value:
+            values.add(value)
+        yield CheckResult(
+            resource=f"function:{function.name}",
+            check="allowlist_parameter_env_set",
+            status="pass" if value else "fail",
+            detail=f"{API_ALLOWED_CLIENT_IDS_PARAMETER_ENV}={value!r}",
+        )
+        legacy = LEGACY_ALLOWED_CLIENT_IDS_ENV in function.environment
+        yield CheckResult(
+            resource=f"function:{function.name}",
+            check="legacy_allowlist_env_absent",
+            status="fail" if legacy else "pass",
+            detail=(
+                f"{LEGACY_ALLOWED_CLIENT_IDS_ENV} is set but read by nothing"
+                if legacy
+                else f"{LEGACY_ALLOWED_CLIENT_IDS_ENV} absent"
+            ),
+        )
+    consistent = len(values) == 1
+    yield CheckResult(
+        resource=RESOURCE_CLASS,
+        check="allowlist_parameter_env_consistent",
+        status="pass" if consistent else "fail",
+        detail=f"distinct non-empty values: {sorted(values)}",
+    )
+    if not consistent:
+        return
+    (name,) = values
+    spa_client_id = ctx.outputs.require_str("cognito_spa_client_id")
+    ssm = ctx.client("ssm")
+    parameter = ssm.get_parameter(Name=name)["Parameter"]
+    raw_value = str(parameter.get("Value", ""))
+    listed = [part.strip() for part in raw_value.split(",") if part.strip()]
+    yield CheckResult(
+        resource=f"parameter:{name}",
+        check="allowlist_parameter_value_is_spa_client",
+        status="pass" if raw_value == spa_client_id and listed == [spa_client_id] else "fail",
+        detail=f"{len(listed)} client id(s) listed; equals cognito_spa_client_id: "
+        f"{raw_value == spa_client_id}",
+    )
+    parameter_type = str(parameter.get("Type", ""))
+    yield CheckResult(
+        resource=f"parameter:{name}",
+        check="allowlist_parameter_type_string",
+        status="pass" if parameter_type == "String" else "fail",
+        detail=f"Type={parameter_type!r}",
+    )
+    tags = ssm.list_tags_for_resource(ResourceType="Parameter", ResourceId=name).get("TagList", [])
+    tagged = any(str(tag.get("Key")) == DATA_CLASSIFICATION_TAG for tag in tags)
+    yield CheckResult(
+        resource=f"parameter:{name}",
+        check="allowlist_parameter_tagged",
+        status="pass" if tagged else "fail",
+        detail=f"tag keys: {sorted(str(tag.get('Key')) for tag in tags)}",
+    )
+
+    iam = ctx.client("iam")
+    parameter_arn = _parameter_arn(ctx.region, functions[0].arn, name)
+    base = parameter_arn.rsplit("/", 1)[0]
+    root = parameter_arn.split(":parameter/", 1)[0] + ":parameter/" + name.strip("/").split("/")[0]
+    api_roles = sorted({function.role_arn for function in functions if function.role_arn})
+    for role_arn in api_roles:
+        role = f"role:{role_arn.rsplit('/', 1)[-1]}"
+        decision, missing = _simulated_decisions(
+            iam, role_arn, ["ssm:GetParameter"], parameter_arn
+        ).get("ssm:GetParameter", ("missing", []))
+        yield CheckResult(
+            resource=role,
+            check="ssm_get_parameter_allowed",
+            status="pass" if decision == "allowed" and not missing else "fail",
+            detail=f"decision={decision} missing_context={missing}",
+        )
+        yield _not_allowed_row(
+            iam,
+            resource=role,
+            check="ssm_read_grant_is_exact_parameter",
+            role_arn=role_arn,
+            probes=[
+                ("ssm:GetParameter", f"{base}/other"),
+                ("ssm:GetParameter", f"{root}/*"),
+                ("ssm:GetParameters", parameter_arn),
+                ("ssm:GetParametersByPath", parameter_arn),
+            ],
+        )
+    non_api_roles = sorted(
+        {
+            ctx.outputs.require_str("agentcore_runtime_role_arn"),
+            ctx.outputs.require_str("agent_relay_role_arn"),
+        }
+    )
+    for role_arn in sorted(set(api_roles) | set(non_api_roles)):
+        yield _not_allowed_row(
+            iam,
+            resource=f"role:{role_arn.rsplit('/', 1)[-1]}",
+            check="ssm_parameter_write_denied",
+            role_arn=role_arn,
+            probes=[(action, parameter_arn) for action in SSM_WRITE_ACTIONS],
+        )
+    for role_arn in non_api_roles:
+        yield _not_allowed_row(
+            iam,
+            resource=f"role:{role_arn.rsplit('/', 1)[-1]}",
+            check="ssm_get_parameter_denied_non_api_role",
+            role_arn=role_arn,
+            probes=[("ssm:GetParameter", parameter_arn)],
+        )
+
+
+def _apigw_event(tool: ToolDefinition, claims: Mapping[str, Any], *, tenant: str) -> dict[str, Any]:
+    """A REST (payload v1) proxy event for `tool`, as the Cognito-authorized route delivers it."""
+    return {
+        "resource": f"/{tool.name}",
+        "path": f"/{tool.name}",
+        "httpMethod": "POST",
+        "headers": {"content-type": "application/json"},
+        "requestContext": {
+            "requestId": f"smoke-audience-{hashlib.sha256(tenant.encode()).hexdigest()[:12]}",
+            "authorizer": {"claims": {key: str(value) for key, value in claims.items()}},
+        },
+        "body": json.dumps(request_body_for(tool, tenant=tenant)),
+        "isBase64Encoded": False,
+    }
+
+
+def _invoke_payload(lambda_client: Any, name: str, event: Mapping[str, Any]) -> tuple[str, Any]:
+    """Invoke `name` synchronously; return `(FunctionError or "None", decoded payload)`."""
+    response = lambda_client.invoke(
+        FunctionName=name, InvocationType="RequestResponse", Payload=json.dumps(event).encode()
+    )
+    raw = response["Payload"].read()
+    try:
+        payload: Any = json.loads(raw)
+    except (TypeError, ValueError):
+        payload = raw
+    return str(response.get("FunctionError") or "None"), payload
+
+
+def _payload_status_and_code(payload: Any) -> tuple[int | None, str | None]:
+    if not isinstance(payload, Mapping):
+        return None, None
+    status = payload.get("statusCode")
+    body = payload.get("body")
+    code = _error_code_of(body) if isinstance(body, str) else None
+    return (int(status) if isinstance(status, int) else None), code
+
+
+def audience_probe_checks(
+    ctx: SmokeContext,
+    *,
+    function: IntegratedFunction,
+    claims: Mapping[str, Any],
+    tenant: str,
+    sleep: Sleeper = time.sleep,
+    clock: Clock = time.time,
+) -> Iterable[CheckResult]:
+    """Invoke the deployed `get_account` Lambda with claims that differ only in their app client.
+
+    A foreign `aud` on an ID token and a foreign `client_id` on an access token must each be
+    answered 401 `authentication_failed`; the SPA client's own `aud` must be admitted. The refusal's
+    `crm_error` log line must name the client check, not a parameter read.
+    """
+    tool = _tool_by_name()[AUDIENCE_PROBE_TOOL]
+    lambda_client = ctx.client("lambda")
+    spa_client_id = ctx.outputs.require_str("cognito_spa_client_id")
+    foreign_client_id = ctx.outputs.require_str("cognito_mcp_oauth_client_id")
+    resource = f"function:{function.name}"
+    base = {key: value for key, value in claims.items() if key not in {"aud", "client_id"}}
+    started_ms = int(clock() * 1000)
+    variants = (
+        ("audience_foreign_id_token_refused", {"token_use": "id", "aud": foreign_client_id}, 401),
+        ("audience_spa_id_token_admitted", {"token_use": "id", "aud": spa_client_id}, None),
+        (
+            "audience_foreign_access_token_refused",
+            {"token_use": "access", "client_id": foreign_client_id},
+            401,
+        ),
+    )
+    for check, override, expected in variants:
+        event = _apigw_event(tool, {**base, **override}, tenant=tenant)
+        function_error, payload = _invoke_payload(lambda_client, function.name, event)
+        status, code = _payload_status_and_code(payload)
+        if expected is None:
+            ok = function_error == "None" and status is not None and status < 400
+        else:
+            ok = function_error == "None" and status == expected and code == "authentication_failed"
+        yield CheckResult(
+            resource=resource,
+            check=check,
+            status="pass" if ok else "fail",
+            detail=f"FunctionError={function_error} statusCode={status} error.code={code}",
+        )
+
+    logs = ctx.client("logs")
+    reasons: list[str] = []
+    named: list[str] = []
+    for attempt in range(LOG_POLL_ATTEMPTS):
+        response = logs.filter_log_events(
+            logGroupName=function.log_group,
+            startTime=started_ms,
+            filterPattern='"crm_error"',
+        )
+        reasons = [
+            str(record.get("reason", ""))
+            for record in (_json_object(e.get("message")) for e in response.get("events", []))
+            if record.get("event") == "crm_error"
+        ]
+        named = [r for r in reasons if AUDIENCE_REFUSAL_REASON in r and "parameter=" not in r]
+        if named:
+            break
+        if attempt + 1 < LOG_POLL_ATTEMPTS:
+            sleep(LOG_POLL_INTERVAL_SECONDS)
+    yield CheckResult(
+        resource=resource,
+        check="audience_refusal_logged_with_reason",
+        status="pass" if named else "fail",
+        detail=(
+            f"crm_error reason names the client check: {named[0][:200]!r}"
+            if named
+            else f"no crm_error line naming the client check within the poll; reasons={reasons}"
+        ),
+    )
+
+
+def _json_object(message: object) -> dict[str, Any]:
+    """The JSON object a log message carries, if any; a Lambda line may prefix it with metadata."""
+    if not isinstance(message, str):
+        return {}
+    start = message.find("{")
+    if start < 0:
+        return {}
+    try:
+        value = json.loads(message[start:])
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point: resolve the token from `--token`/`CRM_SMOKE_TOKEN` and run the checks."""
     token = _token_from_env_or_flag(argv)
@@ -1090,7 +1527,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         layer=LAYER,
         resource_class=RESOURCE_CLASS,
         description=__doc__ or RESOURCE_CLASS,
-        checks=lambda ctx: checks(ctx, token=token),
+        checks=lambda ctx: checks(ctx, token=token, deployed_identity_checks=True),
         extra_arguments=["--token"],
     )
 

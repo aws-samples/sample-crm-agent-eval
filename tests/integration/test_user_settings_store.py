@@ -22,6 +22,7 @@ from crm.user_settings import (
 )
 from providers.capabilities import load_capability_matrix
 from providers.tier_tuning import WIRE_SCHEMA_VERSION, TierRequest, TurnTuning
+from tests.conftest import TEST_API_CLIENT_ID
 
 MATRIX = load_capability_matrix()
 
@@ -37,7 +38,12 @@ def _user(rep_id: str, tenant: str = "demo") -> Identity:
             "requestContext": {
                 "requestId": "req-1",
                 "authorizer": {
-                    "claims": {"custom:rep_id": rep_id, "custom:tenant": tenant},
+                    "claims": {
+                        "custom:rep_id": rep_id,
+                        "custom:tenant": tenant,
+                        "token_use": "id",
+                        "aud": TEST_API_CLIENT_ID,
+                    },
                 },
             }
         }

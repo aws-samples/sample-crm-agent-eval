@@ -144,6 +144,18 @@ def _tenant_belongs_to_run(tenant: str, run_id: str) -> bool:
         return False
 
 
+def download_disposition(run_id: str, key: str) -> str:
+    """The attachment ``Content-Disposition`` of artefact ``key``: ``matrix-<run_id>.<ext>``.
+
+    ``ext`` is the suffix of ``key``'s last segment; a segment with no suffix names
+    ``matrix-<run_id>``.
+    """
+    name = key.rsplit("/", 1)[-1]
+    suffix = name.rsplit(".", 1)[1] if "." in name else ""
+    filename = f"matrix-{run_id}.{suffix}" if suffix else f"matrix-{run_id}"
+    return f'attachment; filename="{filename}"'
+
+
 def artefact_url(
     store: Store,
     s3: Presigner,
@@ -152,12 +164,14 @@ def artefact_url(
     run_id: str,
     key: object,
     config: ArtefactsConfig,
+    download: bool = False,
 ) -> dict[str, Any]:
     """Authorize and presign one run artefact GET.
 
     Order: the caller's scope, the key's shape, the run's record and tenant, the key's membership in
     the run's recorded artefacts, then the presign. The signed S3 key is built from the record's own
-    run id and recorded path, not from the request strings.
+    run id and recorded path, not from the request strings. With ``download`` the URL carries
+    ``ResponseContentDisposition`` from :func:`download_disposition`.
 
     Returns:
         ``{"run_id", "key", "url", "expires_in"}``.
@@ -184,10 +198,11 @@ def artefact_url(
     )
     if recorded is None:
         raise NotFound(f"Run {run_id!r} has no artefact {valid_key!r}.")
+    params = {"Bucket": config.bucket, "Key": config.object_key(record.run_id, recorded)}
+    if download:
+        params["ResponseContentDisposition"] = download_disposition(record.run_id, recorded)
     url = s3.generate_presigned_url(
-        ClientMethod="get_object",
-        Params={"Bucket": config.bucket, "Key": config.object_key(record.run_id, recorded)},
-        ExpiresIn=ARTEFACT_URL_EXPIRES_SECONDS,
+        ClientMethod="get_object", Params=params, ExpiresIn=ARTEFACT_URL_EXPIRES_SECONDS
     )
     return {
         "run_id": record.run_id,
@@ -207,6 +222,7 @@ __all__ = [
     "artefact_object_key",
     "Presigner",
     "artefact_url",
+    "download_disposition",
     "recorded_artefact_keys",
     "require_artefact_reader",
     "validate_artefact_key",

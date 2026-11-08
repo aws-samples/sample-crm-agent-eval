@@ -443,6 +443,8 @@ class Analysis:
     visited_sites: set[str]
     #: Findings that the harness-only exemption no longer matches the analysis.
     stale_exemptions: list[str] = field(default_factory=list)
+    #: Every first-party function (`<module>.<function>`) each entry point's walk reached.
+    reached: dict[str, set[str]] = field(default_factory=dict)
 
 
 class Analyser:
@@ -453,6 +455,7 @@ class Analyser:
         self.derived: GrantMap = {}
         self.unresolved: set[str] = set()
         self.visited_sites: set[str] = set()
+        self.reached: dict[str, set[str]] = {}
         self._function: str = ""
         self._seen: set[tuple[str, str, frozenset[tuple[str, Resolution]]]] = set()
 
@@ -478,6 +481,7 @@ class Analyser:
         if memo_key in self._seen:
             return
         self._seen.add(memo_key)
+        self.reached.setdefault(self._function, set()).add(f"{module.name}.{func.name}")
 
         locals_env = dict(env)
         locals_env.update(self._local_bindings(module, func, env))
@@ -782,6 +786,7 @@ def derive_grants(src_root: Path | None = None) -> Analysis:
         unresolved=analyser.unresolved,
         visited_sites=analyser.visited_sites,
         stale_exemptions=_check_harness_exemption(reached_by, site_functions),
+        reached=analyser.reached,
     )
 
 
@@ -942,6 +947,15 @@ def load_terraform_grants(path: Path) -> GrantMap:
 # cannot collide with a logical table name.
 # ---------------------------------------------------------------------------
 KMS_RESOURCE_KEY: Final[str] = "@kms:dynamodb-cmk"
+CURSOR_KMS_RESOURCE_KEY: Final[str] = "@kms:cursor-cmk"
+
+#: The cursor codec functions and the KMS action each calls on the pagination-cursor key.
+CURSOR_CODEC_ACTIONS: Final[dict[str, str]] = {
+    "crm.cursor.encode_cursor": "kms:Encrypt",
+    "crm.cursor.decode_cursor": "kms:Decrypt",
+}
+#: The `dynamodb_kms` document's statement that grants the cursor key, by sid.
+CURSOR_GRANT_SID: Final[str] = "SealPaginationCursors"
 LOGS_RESOURCE_KEY: Final[str] = "@logs:own-log-group"
 
 #: KMS actions the caller needs on the customer-managed key of an SSE-KMS table, implied for every
@@ -971,11 +985,17 @@ DECLARED_SURPLUS_RESOURCE_ACTIONS: Final[dict[str, str]] = {
 }
 
 
-def derive_resource_grants(derived: GrantMap, kms_enabled: frozenset[str]) -> GrantMap:
+def derive_resource_grants(
+    derived: GrantMap,
+    kms_enabled: frozenset[str],
+    reached: dict[str, set[str]] | None = None,
+) -> GrantMap:
     """Implied non-DynamoDB grants per function, keyed by namespaced resource rather than by table.
 
     `kms_enabled` is the set of functions whose call site sets `dynamodb_kms_grant_enabled = true`; a
-    function outside it implies no KMS action.
+    function outside it implies no DynamoDB-key action. `reached` maps each function to the
+    first-party functions its walk reached; reaching a cursor codec function implies its KMS action
+    on the cursor key.
     """
     implied: GrantMap = {}
     functions = {function for function, _resource in derived}
@@ -983,6 +1003,13 @@ def derive_resource_grants(derived: GrantMap, kms_enabled: frozenset[str]) -> Gr
         implied[(function, LOGS_RESOURCE_KEY)] = set(LOGS_IMPLIED_ACTIONS)
         if function in kms_enabled:
             implied[(function, KMS_RESOURCE_KEY)] = set(KMS_IMPLIED_ACTIONS)
+        codec = {
+            action
+            for name, action in CURSOR_CODEC_ACTIONS.items()
+            if name in (reached or {}).get(function, set())
+        }
+        if codec:
+            implied[(function, CURSOR_KMS_RESOURCE_KEY)] = codec
     return implied
 
 
@@ -1065,21 +1092,97 @@ def load_kms_enabled_functions(main_tf: Path, known_functions: frozenset[str]) -
     return frozenset(enabled)
 
 
+def load_cursor_enabled_functions(main_tf: Path, known_functions: frozenset[str]) -> frozenset[str]:
+    """Functions whose module call sets `cursor_kms_grant_enabled`, as an exact set.
+
+    The `for_each` call must write `contains(local.cursor_tools, each.key)`, whose list is read from
+    the root locals; a singleton call must write `true`. Any other expression raises `ValueError`,
+    as does a listed tool that is not a known function.
+    """
+    text = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(main_tf.parent.glob("*.tf"))
+    )
+    enabled: set[str] = set()
+    for call in _LAMBDA_ACTION_CALL_RE.finditer(text):
+        body = call.group("body")
+        flag = re.search(r"^\s*cursor_kms_grant_enabled\s*=\s*(.+?)\s*$", body, re.MULTILINE)
+        if flag is None:
+            continue
+        expression = flag.group(1)
+        if re.search(r"^\s*for_each\s*=", body, re.MULTILINE):
+            if expression != "contains(local.cursor_tools, each.key)":
+                raise ValueError(
+                    f"{main_tf}: the for_each call sets cursor_kms_grant_enabled = {expression!r}; "
+                    "this gate reads only `contains(local.cursor_tools, each.key)`"
+                )
+            listed = re.search(r"^\s*cursor_tools\s*=\s*\[([^\]]*)\]", text, re.MULTILINE)
+            if listed is None:
+                raise ValueError(f"{main_tf}: no `cursor_tools = [...]` local")
+            tools = set(re.findall(r'"([a-z_]+)"', listed.group(1)))
+            unknown = sorted(tools - known_functions)
+            if not tools or unknown:
+                raise ValueError(
+                    f"{main_tf}: local.cursor_tools is empty or names unknown functions: {unknown}"
+                )
+            enabled |= tools
+            continue
+        suffix = call.group("name").removeprefix("lambda_action_")
+        if expression != "true" or suffix not in SINGLETON_CALL_FUNCTIONS:
+            raise ValueError(
+                f'{main_tf}: `module "{call.group("name")}"` sets cursor_kms_grant_enabled = '
+                f"{expression!r}; a singleton must write `true` and be in SINGLETON_CALL_FUNCTIONS"
+            )
+        enabled.add(SINGLETON_CALL_FUNCTIONS[suffix])
+    return frozenset(enabled)
+
+
+def _split_cursor_statement(body: str, module_tf: Path) -> tuple[str, str]:
+    """`(body without the cursor statement, the cursor statement)` of the `dynamodb_kms` document."""
+    sid = body.find(f'"{CURSOR_GRANT_SID}"')
+    if sid < 0:
+        raise ValueError(
+            f"{module_tf}: data.aws_iam_policy_document.dynamodb_kms has no {CURSOR_GRANT_SID} "
+            "statement, so the cursor-key grant cannot be compared"
+        )
+    start = body.rfind('dynamic "statement"', 0, sid)
+    if start < 0:
+        raise ValueError(f"{module_tf}: the {CURSOR_GRANT_SID} statement is not a dynamic block")
+    depth = 0
+    for index in range(body.index("{", start), len(body)):
+        if body[index] == "{":
+            depth += 1
+        elif body[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return body[:start] + body[index + 1 :], body[start : index + 1]
+    raise ValueError(f"{module_tf}: unbalanced {CURSOR_GRANT_SID} statement")
+
+
 def load_module_resource_grants(
-    module_tf: Path, functions: frozenset[str], kms_enabled: frozenset[str]
+    module_tf: Path,
+    functions: frozenset[str],
+    kms_enabled: frozenset[str],
+    cursor_enabled: frozenset[str] = frozenset(),
 ) -> GrantMap:
     """Granted non-DynamoDB actions, read from the `lambda_action` module's policy documents.
 
     The module declares one `logs` policy for every instance and one `dynamodb_kms` policy gated by
     `dynamodb_kms_grant_enabled`, so the granted set is the module's action list projected across the
-    instances that receive it.
+    instances that receive it. The `dynamodb_kms` document's cursor statement is a separate resource
+    key, granted to the `cursor_enabled` functions only.
     """
     text = module_tf.read_text(encoding="utf-8")
     per_document: dict[str, set[str]] = {}
+    cursor_actions: set[str] = set()
     for document in _MODULE_ACTIONS_RE.finditer(text):
-        per_document[document.group("name")] = set(
-            _QUOTED_ACTION_RE.findall(document.group("body"))
-        )
+        body = document.group("body")
+        if document.group("name") == "dynamodb_kms":
+            body, cursor_statement = _split_cursor_statement(body, module_tf)
+            listed = re.search(r"\bactions\s*=\s*\[([^\]]*)\]", cursor_statement)
+            cursor_actions = set(_QUOTED_ACTION_RE.findall(listed.group(1) if listed else ""))
+            if not cursor_actions:
+                raise ValueError(f"{module_tf}: parsed no actions from {CURSOR_GRANT_SID}")
+        per_document[document.group("name")] = set(_QUOTED_ACTION_RE.findall(body))
     for required in ("logs", "dynamodb_kms"):
         if not per_document.get(required):
             raise ValueError(
@@ -1092,6 +1195,8 @@ def load_module_resource_grants(
         granted[(function, LOGS_RESOURCE_KEY)] = set(per_document["logs"])
         if function in kms_enabled:
             granted[(function, KMS_RESOURCE_KEY)] = set(per_document["dynamodb_kms"])
+        if function in cursor_enabled:
+            granted[(function, CURSOR_KMS_RESOURCE_KEY)] = set(cursor_actions)
     return granted
 
 
@@ -1278,13 +1383,19 @@ def main(argv: list[str] | None = None) -> int:
     # Non-DynamoDB grants: KMS and log-group actions, compared per `@`-namespaced resource key.
     try:
         kms_enabled = load_kms_enabled_functions(args.main_tf, frozenset({f for f, _t in matrix}))
+        cursor_enabled = load_cursor_enabled_functions(
+            args.main_tf, frozenset({f for f, _t in matrix})
+        )
         module_granted = load_module_resource_grants(
-            args.module_tf, frozenset({f for f, _t in analysis.derived}), kms_enabled
+            args.module_tf,
+            frozenset({f for f, _t in analysis.derived}),
+            kms_enabled,
+            cursor_enabled,
         )
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
-    resource_implied = derive_resource_grants(analysis.derived, kms_enabled)
+    resource_implied = derive_resource_grants(analysis.derived, kms_enabled, analysis.reached)
     findings.extend(compare(resource_implied, module_granted, "lambda_action module"))
 
     if findings:
@@ -1297,7 +1408,8 @@ def main(argv: list[str] | None = None) -> int:
         f"OK: {len(analysis.derived)} (function, table) grant pairs derived from "
         f"{len(analysis.visited_sites)} store call sites; both declared sources cover them exactly. "
         f"Plus {len(resource_implied)} (function, resource) pairs over the roles' non-DynamoDB "
-        f"policies -- kms:Decrypt on the DynamoDB CMK and the own-log-group writes"
+        f"policies -- kms:Decrypt on the DynamoDB CMK, the cursor CMK's Encrypt/Decrypt, and the "
+        "own-log-group writes"
     )
     return 0
 

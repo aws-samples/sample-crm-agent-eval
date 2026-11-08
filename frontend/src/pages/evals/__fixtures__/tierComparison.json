@@ -1,0 +1,489 @@
+{
+  "multi_arm": {
+    "tier_comparison_table": {
+      "headers": [
+        "Metric",
+        "anthropic",
+        "openai"
+      ],
+      "sections": [
+        {
+          "tier": "supervisor",
+          "heading": "Supervisor",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-sonnet-5-5",
+              "openai.gpt-6-1-sol"
+            ],
+            [
+              "Effort",
+              "medium",
+              "medium"
+            ],
+            [
+              "Task completion rate",
+              "0.750000 (3/4)",
+              "0.500000 (2/4)"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "0.750000",
+              "0.500000"
+            ],
+            [
+              "Cost per completed task",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "100",
+              "100"
+            ],
+            [
+              "Output tokens",
+              "10",
+              "10"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "0",
+              "—"
+            ],
+            [
+              "Budget-exhausted tasks",
+              "0",
+              "0"
+            ]
+          ]
+        },
+        {
+          "tier": "subagent",
+          "heading": "Subagent",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-haiku-5-5",
+              "openai.gpt-6-1-luna"
+            ],
+            [
+              "Effort",
+              "low",
+              "low"
+            ],
+            [
+              "Task completion rate",
+              "0.666667 (2/3)",
+              "not applicable"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "0.666667",
+              "not applicable"
+            ],
+            [
+              "Cost per completed task",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "200",
+              "200"
+            ],
+            [
+              "Output tokens",
+              "20",
+              "20"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "0",
+              "—"
+            ],
+            [
+              "Delegation outcome: data",
+              "2",
+              "0"
+            ],
+            [
+              "Delegation outcome: no_match",
+              "0",
+              "0"
+            ],
+            [
+              "Delegation outcome: denied",
+              "1",
+              "0"
+            ],
+            [
+              "Delegation outcome: tool_failure",
+              "0",
+              "0"
+            ],
+            [
+              "Delegation outcome: none",
+              "1",
+              "4"
+            ]
+          ]
+        },
+        {
+          "tier": "tool",
+          "heading": "ToolCall",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-haiku-5-5",
+              "openai.gpt-6-1-luna"
+            ],
+            [
+              "Effort",
+              "low",
+              "low"
+            ],
+            [
+              "Task completion rate",
+              "0.500000 (1/2)",
+              "1.000000 (2/2)"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "0.500000",
+              "1.000000"
+            ],
+            [
+              "Cost per completed task",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "300",
+              "300"
+            ],
+            [
+              "Output tokens",
+              "30",
+              "30"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "not applicable",
+              "not applicable"
+            ],
+            [
+              "Truncated tasks",
+              "0",
+              "0"
+            ]
+          ]
+        }
+      ],
+      "notes": [
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per task, all tasks divides the same total by every task the arm ran. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there.",
+        "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
+        "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
+        "Input tokens are each family's own reported count and are not like-for-like across families (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
+        "Stub-mode columns ran the deterministic stub provider: no live model was invoked, so latency is not measured there.",
+        "Cost cells read withheld where the price table is marked provisional."
+      ]
+    }
+  },
+  "single_arm": {
+    "tier_comparison_table": {
+      "headers": [
+        "Metric",
+        "anthropic"
+      ],
+      "sections": [
+        {
+          "tier": "supervisor",
+          "heading": "Supervisor",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-opus-5-5"
+            ],
+            [
+              "Effort",
+              "medium"
+            ],
+            [
+              "Task completion rate",
+              "1.000000 (1/1)"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "1.000000"
+            ],
+            [
+              "Cost per completed task",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "100"
+            ],
+            [
+              "Output tokens",
+              "10"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "0"
+            ],
+            [
+              "Budget-exhausted tasks",
+              "0"
+            ]
+          ]
+        },
+        {
+          "tier": "subagent",
+          "heading": "Subagent",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-sonnet-5-5"
+            ],
+            [
+              "Effort",
+              "low"
+            ],
+            [
+              "Task completion rate",
+              "1.000000 (1/1)"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "1.000000"
+            ],
+            [
+              "Cost per completed task",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "200"
+            ],
+            [
+              "Output tokens",
+              "20"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "0"
+            ],
+            [
+              "Delegation outcome: data",
+              "1"
+            ],
+            [
+              "Delegation outcome: no_match",
+              "0"
+            ],
+            [
+              "Delegation outcome: denied",
+              "0"
+            ],
+            [
+              "Delegation outcome: tool_failure",
+              "0"
+            ],
+            [
+              "Delegation outcome: none",
+              "0"
+            ]
+          ]
+        },
+        {
+          "tier": "tool",
+          "heading": "ToolCall",
+          "rows": [
+            [
+              "Model",
+              "anthropic.claude-haiku-5-5"
+            ],
+            [
+              "Effort",
+              "low"
+            ],
+            [
+              "Task completion rate",
+              "0.000000 (0/1)"
+            ],
+            [
+              "Task completion over repeats",
+              "n/a"
+            ],
+            [
+              "Task accuracy",
+              "0.000000"
+            ],
+            [
+              "Cost per completed task",
+              "withheld"
+            ],
+            [
+              "P95 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "P50 latency per completed task (ms)",
+              "not measured"
+            ],
+            [
+              "Model invocations",
+              "2"
+            ],
+            [
+              "Input tokens",
+              "300"
+            ],
+            [
+              "Output tokens",
+              "30"
+            ],
+            [
+              "Cost per task, all tasks",
+              "withheld"
+            ],
+            [
+              "Self-corrected retries",
+              "not applicable"
+            ],
+            [
+              "Truncated tasks",
+              "0"
+            ]
+          ]
+        }
+      ],
+      "notes": [
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per task, all tasks divides the same total by every task the arm ran. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there.",
+        "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
+        "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
+        "Input tokens are each family's own reported count and are not like-for-like across families (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
+        "Stub-mode columns ran the deterministic stub provider: no live model was invoked, so latency is not measured there.",
+        "Cost cells read withheld where the price table is marked provisional."
+      ]
+    }
+  }
+}

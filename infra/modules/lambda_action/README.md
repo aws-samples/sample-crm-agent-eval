@@ -18,10 +18,11 @@ baseline](../../../docs/security-baseline.md#h-7). Modules named here: [`api`](.
 
 ## Resources
 
-- `aws_iam_role.this` with inline policies: write to its own log group; manage its own Hyperplane
-  ENIs and write X-Ray segments (`vpc_access`, the two action sets that take `Resource = "*"`);
-  DynamoDB grants and denies (when any are configured and `dynamodb_policy_managed = false`);
-  DynamoDB KMS grant (when enabled).
+- `aws_iam_role.this` with inline policies: write to its own log group, plus `ssm:GetParameter` on
+  `config_parameter_arns` when set (`logs`); manage its own Hyperplane ENIs and write X-Ray segments
+  (`vpc_access`, the two action sets that take `Resource = "*"`); DynamoDB grants and denies (when
+  any are configured and `dynamodb_policy_managed = false`); DynamoDB KMS grant, plus the
+  context-bound cursor-key grant when `cursor_kms_grant_enabled` (`dynamodb_kms`, when enabled).
 - `aws_iam_policy.dynamodb` (keyed `allow`/`deny`, plus `allow-2`, ... when
   `dynamodb_allow_statements_per_policy` splits the Allows) and
   `aws_iam_role_policy_attachment.dynamodb_deny` / `.dynamodb_allow[*]`, when
@@ -59,6 +60,9 @@ baseline](../../../docs/security-baseline.md#h-7). Modules named here: [`api`](.
 | `dynamodb_allow_statements_per_policy` | no (`null`) | With `dynamodb_policy_managed`, the most Allow statements one managed policy holds. The Allows are split in lexical order of the grant index (0, 1, 10, 11, 2, …) into `-dynamodb-allow`, `-dynamodb-allow-2`, …, each attached after the Deny. `null` keeps one Allow policy. `lambda_action_sweep_control` sets 20, so its Allows stay under the 6,144-char cap. |
 | `dynamodb_kms_key_arn` | no (`null`) | `module.dynamodb.kms_key_arn`. |
 | `dynamodb_kms_grant_enabled` | no (`false`) | Attaches `kms:Decrypt`/`kms:GenerateDataKey` on `dynamodb_kms_key_arn`. Set `true` whenever `dynamodb_grants` is non-empty. A separate `bool` because a `count` derived from the key ARN is unknown at plan time once the key is pending destruction, which blocks planning the destroy. A call that sets it must also add its `role_arn` to `local.dynamodb_data_plane_role_arns` in `infra/main.tf`: the tables' resource policies and the CMK key policy deny every role not on that list. |
+| `cursor_kms_key_arn` | no (`null`) | The pagination-cursor CMK (`aws_kms_key.cursor` in `infra/main.tf`). Required when `cursor_kms_grant_enabled` is true (validation). |
+| `cursor_kms_grant_enabled` | no (`false`) | Adds a `SealPaginationCursors` statement to the `<function_name>-dynamodb-kms` policy: `kms:Encrypt` and `kms:Decrypt` on `cursor_kms_key_arn`, only with `kms:EncryptionContext:purpose = crm-cursor`. Requires `dynamodb_kms_grant_enabled` (validation). The root sets it for the tools in `local.cursor_tools`, which also get `CRM_CURSOR_KMS_KEY_ARN`. Their roles are listed in `local.cursor_key_principal_arns`, because the key policy denies key use to every other role. |
+| `config_parameter_arns` | no (`[]`) | SSM parameter ARNs the function reads at runtime. Non-empty adds a `ReadConfigParameters` statement (`ssm:GetParameter` on exactly these ARNs) to the `<function_name>-logs` policy. Wildcards are rejected by validation. The root passes `local.api_allowed_client_ids_parameter_arn` to every API-Gateway-integrated function, beside `CRM_API_ALLOWED_CLIENT_IDS_PARAMETER`. |
 | `gateway_target_role_arn` | no (`null`) | The Gateway target execution role admitted to invoke this function. |
 | `attach_gateway_target_grant` | no (`false`) | Drives the Gateway permission's `count`. Must agree with `gateway_target_role_arn` being non-null (enforced by a precondition). A flag rather than a null check on the ARN so an empty-state plan has a known `count`. |
 | `table_action_role_matrix_entries` | no (`[]`) | This instantiation's rows of the isolation matrix (below). Not read at plan time; echoed by `table_action_role_matrix_rows`. |

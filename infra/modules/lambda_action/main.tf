@@ -35,6 +35,18 @@ data "aws_iam_policy_document" "logs" {
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["${aws_cloudwatch_log_group.this.arn}:*"]
   }
+
+  # Runtime configuration read at cold start, scoped to the named parameters.
+  dynamic "statement" {
+    for_each = length(var.config_parameter_arns) > 0 ? [var.config_parameter_arns] : []
+
+    content {
+      sid       = "ReadConfigParameters"
+      effect    = "Allow"
+      actions   = ["ssm:GetParameter"]
+      resources = statement.value
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "logs" {
@@ -223,8 +235,9 @@ resource "aws_iam_role_policy_attachment" "dynamodb_allow" {
 }
 
 # ---------------------------------------------------------------------------
-# KMS grant for the DynamoDB CMK: DynamoDB calls kms:Decrypt/kms:GenerateDataKey
-# on the caller's behalf, so the caller's role needs them. Scoped to the one key.
+# KMS grants: the DynamoDB CMK (DynamoDB calls kms:Decrypt/kms:GenerateDataKey on
+# the caller's behalf, so the caller's role needs them) and, when enabled, the
+# pagination-cursor CMK. Each scoped to its one key.
 # ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "dynamodb_kms" {
@@ -237,6 +250,31 @@ data "aws_iam_policy_document" "dynamodb_kms" {
     effect    = "Allow"
     actions   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
     resources = [var.dynamodb_kms_key_arn]
+  }
+
+  # Pagination-cursor sealing: Encrypt/Decrypt on the one cursor key, only under the
+  # `purpose = crm-cursor` encryption context.
+  dynamic "statement" {
+    for_each = var.cursor_kms_grant_enabled ? [var.cursor_kms_key_arn] : []
+
+    content {
+      sid       = "SealPaginationCursors"
+      effect    = "Allow"
+      actions   = ["kms:Encrypt", "kms:Decrypt"]
+      resources = [statement.value]
+
+      condition {
+        test     = "StringEquals"
+        variable = "kms:EncryptionContext:purpose"
+        values   = ["crm-cursor"]
+      }
+
+      condition {
+        test     = "ForAllValues:StringEquals"
+        variable = "kms:EncryptionContextKeys"
+        values   = ["operation", "purpose", "rep_id", "tenant"]
+      }
+    }
   }
 }
 

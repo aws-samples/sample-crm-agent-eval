@@ -29,12 +29,14 @@ from scripts.smoke.harness import (
 
 from crm.auth import pre_token_generation
 from crm.authz import ADMIN_GROUP
+from crm.envelope import API_ALLOWED_CLIENT_IDS_PARAMETER_ENV
 from crm.handlers import eval_trigger as eval_trigger_handler
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from crm.toolspec.definitions import ALL_TOOLS
 from eval.trigger import EVAL_ADMIN_SCOPE
 from eval.verification import CheckResult
+from tests.conftest import TEST_API_CLIENT_ID
 from tests.unit import _jwks_test_key as test_key
 
 API_ENDPOINT = "https://abc123.execute-api.us-east-1.amazonaws.com"
@@ -672,7 +674,9 @@ def _eval_trigger_v1_event(body: str, claims: Mapping[str, Any]) -> dict[str, An
         "path": "/eval_trigger",
         "httpMethod": "POST",
         "headers": {"content-type": "application/json"},
-        "requestContext": {"authorizer": {"claims": dict(claims)}},
+        "requestContext": {
+            "authorizer": {"claims": {**claims, "token_use": "id", "aud": TEST_API_CLIENT_ID}}
+        },
         "body": body,
         "isBase64Encoded": False,
     }
@@ -1456,3 +1460,511 @@ def test_update_contact_body_targets_an_active_seeded_contact_in_the_first_accou
     assert target["status"] == "active", target
     assert target["account_id"] == seeded_in_scope_account_id(tenant)
     assert "status" not in body["fields"]
+
+
+# ---------------------------------------------------------------------------
+# The deployed app-client allowlist and the direct-invoke audience probe.
+# ---------------------------------------------------------------------------
+
+ALLOWLIST_PARAMETER = "/crm-x/api/allowed-client-ids"
+FOREIGN_CLIENT_ID = "mcp-oauth-client-test"
+ACCOUNT = "123456789012"
+RUNTIME_ROLE = f"arn:aws:iam::{ACCOUNT}:role/crm-x-runtime"
+RELAY_ROLE = f"arn:aws:iam::{ACCOUNT}:role/crm-x-relay"
+PARAMETER_ARN = f"arn:aws:ssm:us-east-1:{ACCOUNT}:parameter/crm-x/api/allowed-client-ids"
+IDENTITY_TOOLS = ["get_account", "search_accounts", "eval_trigger"]
+
+
+def _function_name(tool: str) -> str:
+    return f"crm-x-{tool}"
+
+
+def _role_of(tool: str) -> str:
+    return f"arn:aws:iam::{ACCOUNT}:role/crm-x-{tool}"
+
+
+class _ApiWithIntegrations(FakeApiGatewayV2Client):
+    """The v1 fake plus `get_integration`, one Lambda proxy integration per route."""
+
+    def get_integration(self, **kwargs: Any) -> dict[str, Any]:
+        index = int(str(kwargs["resourceId"]).removeprefix("res"))
+        tool = self._route_keys[index].split(" ", 1)[1].lstrip("/")
+        function_arn = f"arn:aws:lambda:us-east-1:{ACCOUNT}:function:{_function_name(tool)}"
+        return {
+            "type": "AWS_PROXY",
+            "uri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/"
+            f"{function_arn}/invocations",
+        }
+
+
+class _Payload:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+
+class _FakeLambda:
+    """`get_function_configuration` per tool function, and an `invoke` that applies an allowlist."""
+
+    def __init__(
+        self,
+        *,
+        env_overrides: Mapping[str, Mapping[str, str | None]] | None = None,
+        admitted: frozenset[str] = frozenset({test_key.CLIENT_ID}),
+        function_error_for: frozenset[str] = frozenset(),
+        refusal_code: str = "authentication_failed",
+    ) -> None:
+        self._env_overrides = dict(env_overrides or {})
+        self._admitted = admitted
+        self._function_error_for = function_error_for
+        self._refusal_code = refusal_code
+        self.invoked: list[dict[str, Any]] = []
+
+    def get_function_configuration(self, **kwargs: Any) -> dict[str, Any]:
+        name = str(kwargs["FunctionName"])
+        tool = name.removeprefix("crm-x-")
+        variables: dict[str, str] = {API_ALLOWED_ENV: ALLOWLIST_PARAMETER}
+        for key, value in self._env_overrides.get(tool, {}).items():
+            if value is None:
+                variables.pop(key, None)
+            else:
+                variables[key] = value
+        return {
+            "FunctionName": name,
+            "FunctionArn": f"arn:aws:lambda:us-east-1:{ACCOUNT}:function:{name}",
+            "Role": _role_of(tool),
+            "Environment": {"Variables": variables},
+        }
+
+    def invoke(self, **kwargs: Any) -> dict[str, Any]:
+        event = json.loads(kwargs["Payload"])
+        self.invoked.append(event)
+        claims = event["requestContext"]["authorizer"]["claims"]
+        client = claims.get("aud") if claims.get("token_use") == "id" else claims.get("client_id")
+        response: dict[str, Any] = {}
+        if client in self._admitted:
+            body: dict[str, Any] = {"statusCode": 200, "body": json.dumps({"account": {}})}
+            if client in self._function_error_for:
+                response["FunctionError"] = "Unhandled"
+        else:
+            body = {
+                "statusCode": 401,
+                "body": json.dumps({"error": {"code": self._refusal_code, "message": "x"}}),
+            }
+        response["Payload"] = _Payload(json.dumps(body).encode())
+        return response
+
+
+class _FakeSsm:
+    def __init__(
+        self,
+        *,
+        value: str = test_key.CLIENT_ID,
+        parameter_type: str = "String",
+        tags: list[dict[str, str]] | None = None,
+    ) -> None:
+        self._value = value
+        self._type = parameter_type
+        self._tags = [{"Key": "data-classification", "Value": "internal"}] if tags is None else tags
+
+    def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs["Name"] == ALLOWLIST_PARAMETER, kwargs
+        return {
+            "Parameter": {"Name": ALLOWLIST_PARAMETER, "Value": self._value, "Type": self._type}
+        }
+
+    def list_tags_for_resource(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs == {"ResourceType": "Parameter", "ResourceId": ALLOWLIST_PARAMETER}, kwargs
+        return {"TagList": list(self._tags)}
+
+
+class _FakeIam:
+    """Allows exactly `ssm:GetParameter` on the parameter for the API roles, plus any extra grant."""
+
+    def __init__(
+        self,
+        *,
+        extra_allowed: set[tuple[str, str, str]] | None = None,
+        withheld: set[str] | None = None,
+        missing_context: bool = False,
+    ) -> None:
+        self._extra = set(extra_allowed or set())
+        self._withheld = set(withheld or set())
+        self._missing_context = missing_context
+        self.calls: list[dict[str, Any]] = []
+
+    def simulate_principal_policy(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        role = str(kwargs["PolicySourceArn"])
+        (resource,) = kwargs["ResourceArns"]
+        api_role = role in {_role_of(tool) for tool in IDENTITY_TOOLS}
+        results = []
+        for action in kwargs["ActionNames"]:
+            allowed = (
+                api_role
+                and role not in self._withheld
+                and action == "ssm:GetParameter"
+                and resource == PARAMETER_ARN
+            ) or (role, action, resource) in self._extra
+            results.append(
+                {
+                    "EvalActionName": action,
+                    "EvalDecision": "allowed" if allowed else "implicitDeny",
+                    "MissingContextValues": ["aws:SourceIp"] if self._missing_context else [],
+                }
+            )
+        return {"EvaluationResults": results}
+
+
+class _FakeLogs:
+    def __init__(self, reasons: list[str] | None = None) -> None:
+        self._reasons = (
+            ["authentication_failed: token aud is not an admitted app client"]
+            if reasons is None
+            else reasons
+        )
+        self.calls = 0
+
+    def filter_log_events(self, **_kwargs: Any) -> dict[str, Any]:
+        self.calls += 1
+        return {
+            "events": [
+                {
+                    "message": "2026-11-06T00:00:00Z\tINFO\t"
+                    + json.dumps({"event": "crm_error", "reason": r})
+                }
+                for r in self._reasons
+            ]
+        }
+
+
+API_ALLOWED_ENV = API_ALLOWED_CLIENT_IDS_PARAMETER_ENV
+
+
+def _identity_ctx(
+    *,
+    lambda_client: _FakeLambda | None = None,
+    ssm: _FakeSsm | None = None,
+    iam: _FakeIam | None = None,
+    logs: _FakeLogs | None = None,
+    route_keys: list[str] | None = None,
+) -> Any:
+    return context_for_test(
+        outputs={
+            "api_id": API_ID,
+            "cloudfront_domain_name": CLOUDFRONT_DOMAIN,
+            **COGNITO_OUTPUTS,
+            "cognito_mcp_oauth_client_id": FOREIGN_CLIENT_ID,
+            "agentcore_runtime_role_arn": RUNTIME_ROLE,
+            "agent_relay_role_arn": RELAY_ROLE,
+        },
+        clients={
+            "apigateway": _ApiWithIntegrations(
+                route_keys=route_keys or [f"POST /{tool}" for tool in IDENTITY_TOOLS]
+            ),
+            "lambda": lambda_client or _FakeLambda(),
+            "ssm": ssm or _FakeSsm(),
+            "iam": iam or _FakeIam(),
+            "logs": logs or _FakeLogs(),
+        },
+    )
+
+
+def _allowlist_rows(ctx: Any) -> list[CheckResult]:
+    lambda_client = ctx.client("lambda")
+    names = api_routes.integrated_function_names(ctx.client("apigateway"), API_ID)
+    functions = [
+        api_routes._describe_function(lambda_client, name) for name in sorted(set(names.values()))
+    ]
+    return list(api_routes.allowlist_checks(ctx, functions))
+
+
+def _failing(rows: list[CheckResult]) -> set[tuple[str, str]]:
+    return {(row.resource, row.check) for row in rows if row.status == "fail"}
+
+
+class TestAllowlistChecks:
+    def test_the_deployed_shape_passes_every_row(self) -> None:
+        rows = _allowlist_rows(_identity_ctx())
+        assert _failing(rows) == set()
+        checks_seen = {row.check for row in rows}
+        assert checks_seen == {
+            "resolve_integrated_functions",
+            "allowlist_parameter_env_set",
+            "legacy_allowlist_env_absent",
+            "allowlist_parameter_env_consistent",
+            "allowlist_parameter_value_is_spa_client",
+            "allowlist_parameter_type_string",
+            "allowlist_parameter_tagged",
+            "ssm_get_parameter_allowed",
+            "ssm_read_grant_is_exact_parameter",
+            "ssm_parameter_write_denied",
+            "ssm_get_parameter_denied_non_api_role",
+        }
+
+    def test_the_integrated_set_comes_from_the_deployed_integrations(self) -> None:
+        names = api_routes.integrated_function_names(
+            _ApiWithIntegrations(route_keys=["POST /get_account", "POST /eval_trigger"]), API_ID
+        )
+        assert names == {
+            "POST /get_account": _function_name("get_account"),
+            "POST /eval_trigger": _function_name("eval_trigger"),
+        }
+
+    def test_no_integrated_function_fails_rather_than_passing_over_nothing(self) -> None:
+        rows = list(api_routes.allowlist_checks(_identity_ctx(), []))
+        assert [(r.check, r.status) for r in rows] == [("resolve_integrated_functions", "fail")]
+
+    def test_a_function_without_the_parameter_variable_fails_its_row_only(self) -> None:
+        ctx = _identity_ctx(
+            lambda_client=_FakeLambda(env_overrides={"search_accounts": {API_ALLOWED_ENV: None}})
+        )
+        assert _failing(_allowlist_rows(ctx)) == {
+            (f"function:{_function_name('search_accounts')}", "allowlist_parameter_env_set")
+        }
+
+    def test_the_legacy_direct_variable_fails_its_row_only(self) -> None:
+        legacy = api_routes.LEGACY_ALLOWED_CLIENT_IDS_ENV
+        ctx = _identity_ctx(
+            lambda_client=_FakeLambda(env_overrides={"eval_trigger": {legacy: "x"}})
+        )
+        assert _failing(_allowlist_rows(ctx)) == {
+            (f"function:{_function_name('eval_trigger')}", "legacy_allowlist_env_absent")
+        }
+
+    def test_functions_naming_different_parameters_fail_consistency(self) -> None:
+        ctx = _identity_ctx(
+            lambda_client=_FakeLambda(env_overrides={"get_account": {API_ALLOWED_ENV: "/other"}})
+        )
+        assert _failing(_allowlist_rows(ctx)) == {
+            (api_routes.RESOURCE_CLASS, "allowlist_parameter_env_consistent")
+        }
+
+    @pytest.mark.parametrize(
+        "value",
+        [f"{test_key.CLIENT_ID},{FOREIGN_CLIENT_ID}", FOREIGN_CLIENT_ID, f" {test_key.CLIENT_ID}"],
+    )
+    def test_a_parameter_value_other_than_the_spa_client_fails_its_row_only(
+        self, value: str
+    ) -> None:
+        ctx = _identity_ctx(ssm=_FakeSsm(value=value))
+        assert _failing(_allowlist_rows(ctx)) == {
+            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_value_is_spa_client")
+        }
+
+    def test_a_string_list_parameter_fails_its_row_only(self) -> None:
+        ctx = _identity_ctx(ssm=_FakeSsm(parameter_type="StringList"))
+        assert _failing(_allowlist_rows(ctx)) == {
+            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_type_string")
+        }
+
+    def test_an_untagged_parameter_fails_its_row_only(self) -> None:
+        ctx = _identity_ctx(ssm=_FakeSsm(tags=[{"Key": "service", "Value": "crm"}]))
+        assert _failing(_allowlist_rows(ctx)) == {
+            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_tagged")
+        }
+
+    def test_an_api_role_without_the_read_grant_fails_its_row_only(self) -> None:
+        ctx = _identity_ctx(iam=_FakeIam(withheld={_role_of("get_account")}))
+        assert _failing(_allowlist_rows(ctx)) == {
+            ("role:crm-x-get_account", "ssm_get_parameter_allowed")
+        }
+
+    def test_an_allowed_read_with_missing_context_is_not_a_pass(self) -> None:
+        failing = _failing(_allowlist_rows(_identity_ctx(iam=_FakeIam(missing_context=True))))
+        assert failing == {
+            (f"role:crm-x-{tool}", "ssm_get_parameter_allowed") for tool in IDENTITY_TOOLS
+        }
+
+    @pytest.mark.parametrize(
+        ("action", "resource"),
+        [
+            ("ssm:GetParameter", f"arn:aws:ssm:us-east-1:{ACCOUNT}:parameter/crm-x/api/other"),
+            ("ssm:GetParameter", f"arn:aws:ssm:us-east-1:{ACCOUNT}:parameter/crm-x/*"),
+            ("ssm:GetParameters", PARAMETER_ARN),
+            ("ssm:GetParametersByPath", PARAMETER_ARN),
+        ],
+    )
+    def test_a_wider_read_grant_fails_the_exactness_row_only(
+        self, action: str, resource: str
+    ) -> None:
+        iam = _FakeIam(extra_allowed={(_role_of("search_accounts"), action, resource)})
+        assert _failing(_allowlist_rows(_identity_ctx(iam=iam))) == {
+            ("role:crm-x-search_accounts", "ssm_read_grant_is_exact_parameter")
+        }
+
+    @pytest.mark.parametrize("action", api_routes.SSM_WRITE_ACTIONS)
+    @pytest.mark.parametrize("role", [RUNTIME_ROLE, _role_of("eval_trigger")])
+    def test_a_write_grant_fails_the_write_row_only(self, action: str, role: str) -> None:
+        iam = _FakeIam(extra_allowed={(role, action, PARAMETER_ARN)})
+        assert _failing(_allowlist_rows(_identity_ctx(iam=iam))) == {
+            (f"role:{role.rsplit('/', 1)[-1]}", "ssm_parameter_write_denied")
+        }
+
+    def test_a_non_api_role_that_can_read_fails_its_row_only(self) -> None:
+        iam = _FakeIam(extra_allowed={(RELAY_ROLE, "ssm:GetParameter", PARAMETER_ARN)})
+        assert _failing(_allowlist_rows(_identity_ctx(iam=iam))) == {
+            ("role:crm-x-relay", "ssm_get_parameter_denied_non_api_role")
+        }
+
+    def test_the_parameter_arn_is_built_from_the_functions_account_and_region(self) -> None:
+        iam = _FakeIam()
+        _allowlist_rows(_identity_ctx(iam=iam))
+        resources = {arn for call in iam.calls for arn in call["ResourceArns"]}
+        assert PARAMETER_ARN in resources
+
+
+def _audience_function() -> api_routes.IntegratedFunction:
+    return api_routes._describe_function(_FakeLambda(), _function_name("get_account"))
+
+
+def _audience_rows(ctx: Any, sleeps: list[float] | None = None) -> list[CheckResult]:
+    recorded = sleeps if sleeps is not None else []
+    claims = test_key.id_token_claims(
+        **{"custom:tenant": SMOKE_TENANT, "custom:rep_id": "rep-1", "custom:book": "rep-1"}
+    )
+    return list(
+        api_routes.audience_probe_checks(
+            ctx,
+            function=_audience_function(),
+            claims=claims,
+            tenant=SMOKE_TENANT,
+            sleep=recorded.append,
+            clock=lambda: 1_700_000_000.0,
+        )
+    )
+
+
+AUDIENCE_RESOURCE = f"function:{_function_name('get_account')}"
+
+
+class TestAudienceProbe:
+    def test_the_deployed_shape_passes_every_row(self) -> None:
+        lambda_client = _FakeLambda()
+        rows = _audience_rows(_identity_ctx(lambda_client=lambda_client))
+        assert [(r.check, r.status) for r in rows] == [
+            ("audience_foreign_id_token_refused", "pass"),
+            ("audience_spa_id_token_admitted", "pass"),
+            ("audience_foreign_access_token_refused", "pass"),
+            ("audience_refusal_logged_with_reason", "pass"),
+        ]
+
+    def test_the_variants_differ_only_in_the_app_client_claims(self) -> None:
+        lambda_client = _FakeLambda()
+        _audience_rows(_identity_ctx(lambda_client=lambda_client))
+        stripped = [
+            {
+                k: v
+                for k, v in event["requestContext"]["authorizer"]["claims"].items()
+                if k not in {"aud", "client_id", "token_use"}
+            }
+            for event in lambda_client.invoked
+        ]
+        assert len(stripped) == 3 and stripped[0] == stripped[1] == stripped[2]
+        bodies = {event["body"] for event in lambda_client.invoked}
+        assert len(bodies) == 1
+
+    def test_a_lambda_admitting_any_client_fails_both_refusal_rows(self) -> None:
+        lambda_client = _FakeLambda(admitted=frozenset({test_key.CLIENT_ID, FOREIGN_CLIENT_ID}))
+        assert _failing(_audience_rows(_identity_ctx(lambda_client=lambda_client))) == {
+            (AUDIENCE_RESOURCE, "audience_foreign_id_token_refused"),
+            (AUDIENCE_RESOURCE, "audience_foreign_access_token_refused"),
+        }
+
+    def test_a_lambda_refusing_the_spa_client_fails_the_admitted_row_only(self) -> None:
+        lambda_client = _FakeLambda(admitted=frozenset())
+        assert _failing(_audience_rows(_identity_ctx(lambda_client=lambda_client))) == {
+            (AUDIENCE_RESOURCE, "audience_spa_id_token_admitted")
+        }
+
+    def test_a_function_error_with_a_200_payload_is_not_admitted(self) -> None:
+        lambda_client = _FakeLambda(function_error_for=frozenset({test_key.CLIENT_ID}))
+        assert _failing(_audience_rows(_identity_ctx(lambda_client=lambda_client))) == {
+            (AUDIENCE_RESOURCE, "audience_spa_id_token_admitted")
+        }
+
+    def test_a_401_with_another_error_code_is_not_the_audience_refusal(self) -> None:
+        lambda_client = _FakeLambda(refusal_code="internal_error")
+        assert _failing(_audience_rows(_identity_ctx(lambda_client=lambda_client))) == {
+            (AUDIENCE_RESOURCE, "audience_foreign_id_token_refused"),
+            (AUDIENCE_RESOURCE, "audience_foreign_access_token_refused"),
+        }
+
+    @pytest.mark.parametrize(
+        "reasons",
+        [
+            [],
+            ["internal_error: parameter=/crm-x/api/allowed-client-ids throttled"],
+            ["authentication_failed: parameter=/x token aud is not an admitted app client"],
+        ],
+    )
+    def test_a_refusal_not_logged_as_the_client_check_fails_the_log_row_only(
+        self, reasons: list[str]
+    ) -> None:
+        sleeps: list[float] = []
+        logs = _FakeLogs(reasons)
+        rows = _audience_rows(_identity_ctx(logs=logs), sleeps)
+        assert _failing(rows) == {(AUDIENCE_RESOURCE, "audience_refusal_logged_with_reason")}
+        assert logs.calls == api_routes.LOG_POLL_ATTEMPTS
+        assert len(sleeps) == api_routes.LOG_POLL_ATTEMPTS - 1
+
+
+def test_main_runs_the_deployed_identity_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`main` passes `deployed_identity_checks=True`, so the allowlist rows are never silently off."""
+    seen: dict[str, Any] = {}
+
+    def fake_checks(_ctx: Any, **kwargs: Any) -> list[CheckResult]:
+        seen.update(kwargs)
+        return []
+
+    def fake_run_main(_argv: Any, **kwargs: Any) -> int:
+        list(kwargs["checks"](object()))
+        return 0
+
+    monkeypatch.setattr(api_routes, "checks", fake_checks)
+    monkeypatch.setattr(api_routes, "run_main", fake_run_main)
+    assert api_routes.main([]) == 0
+    assert seen.get("deployed_identity_checks") is True
+
+
+def test_the_audience_probe_runs_inside_the_seeded_tenant_lifecycle() -> None:
+    """With the identity checks on, the probe rows land between seed and teardown."""
+    events: list[str] = []
+
+    class _Lifecycle(_RecordingLifecycle):
+        def seed(self, tenant: str) -> None:
+            events.append("seed")
+            super().seed(tenant)
+
+        def teardown(self, tenant: str) -> dict[str, int]:
+            events.append("teardown")
+            return super().teardown(tenant)
+
+    lifecycle = _Lifecycle()
+
+    def caller(_m: str, _u: str, headers: Mapping[str, str], _b: str) -> HttpResult:
+        return (200, "{}") if headers.get("Authorization") else (401, "")
+
+    rows = []
+    for row in checks(
+        _identity_ctx(),
+        http_caller=caller,
+        token=_fake_token(SMOKE_TENANT),
+        seeder=lifecycle.seed,
+        teardown=lifecycle.teardown,
+        deployed_identity_checks=True,
+        sleep=lambda _s: None,
+    ):
+        if row.check.startswith("audience_"):
+            events.append(row.check)
+        rows.append(row)
+    assert events[0] == "seed" and events[-1] == "teardown"
+    assert [e for e in events if e.startswith("audience_")] == [
+        "audience_foreign_id_token_refused",
+        "audience_spa_id_token_admitted",
+        "audience_foreign_access_token_refused",
+        "audience_refusal_logged_with_reason",
+    ]
+    assert {r.check for r in rows} >= {"allowlist_parameter_value_is_spa_client"}

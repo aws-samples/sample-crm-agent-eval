@@ -23,6 +23,7 @@ from crm.envelope import (
     split_groups,
 )
 from crm.errors import AuthenticationFailed
+from tests.conftest import TEST_API_CLIENT_ID
 
 _REST_V1_EVENT = (
     Path(__file__).resolve().parents[2]
@@ -47,7 +48,16 @@ def _http_v2_event(groups: object) -> dict[str, Any]:
     return {
         "requestContext": {
             "requestId": "req-1",
-            "authorizer": {"jwt": {"claims": {CLAIM_REP_ID: "rep-1", CLAIM_GROUPS: groups}}},
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        CLAIM_REP_ID: "rep-1",
+                        CLAIM_GROUPS: groups,
+                        "token_use": "id",
+                        "aud": TEST_API_CLIENT_ID,
+                    }
+                }
+            },
         }
     }
 

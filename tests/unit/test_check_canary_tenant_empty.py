@@ -15,11 +15,18 @@ from typing import Any
 import boto3
 import pytest
 import scripts.check_canary_tenant_empty as gate
-from botocore.exceptions import ClientError, NoCredentialsError, ProfileNotFound
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    HTTPClientError,
+    NoCredentialsError,
+    ProfileNotFound,
+)
 from moto import mock_aws
 from scripts.run_gates import GATE_SKIP_EXIT_STATUS
 
-from crm.errors import CrmError, wrap_aws_error
+from crm.errors import CrmError, ServiceBusy, wrap_aws_error
 from crm.store.provisioning import create_all_tables
 from crm.store.schema import TENANT_SCOPED_TABLES
 from crm.store.store import Store
@@ -29,13 +36,49 @@ from eval.tenancy import CANARY_TENANT as TENANCY_CANARY_TENANT
 _MANY_PLANTED = 25
 
 
+#: Every environment variable through which the host's AWS identity, profile or region could reach a
+#: session built in these tests.
+_AMBIENT_AWS_ENV: tuple[str, ...] = (
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CREDENTIAL_EXPIRATION",
+    "AWS_VAULT",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_MAX_ATTEMPTS",
+    "AWS_RETRY_MODE",
+)
+
+
+def _hermetic_aws_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Replace the host's AWS configuration with a `default` profile holding fake static credentials
+    and a single attempt per call, so an unreachable endpoint fails at once rather than after retries.
+
+    No session built afterwards reads the host's ``~/.aws`` or its ambient ``AWS_*`` variables.
+    """
+    for name in _AMBIENT_AWS_ENV:
+        monkeypatch.delenv(name, raising=False)
+    config = tmp_path / "aws-config"
+    credentials = tmp_path / "aws-credentials"
+    config.write_text("[default]\nregion = us-east-1\nmax_attempts = 1\n", encoding="utf-8")
+    credentials.write_text(
+        "[default]\naws_access_key_id = testing\naws_secret_access_key = testing\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(config))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
+
+
 @pytest.fixture
-def dynamodb_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+def dynamodb_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Any]:
     """A moto-mocked DynamoDB client built from its own session with fake static credentials."""
-    monkeypatch.delenv("AWS_PROFILE", raising=False)
-    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    _hermetic_aws_env(monkeypatch, tmp_path)
     with mock_aws():
         yield boto3.session.Session(region_name="us-east-1").client("dynamodb")
 
@@ -680,3 +723,64 @@ def test_the_import_bootstrap_covers_both_roots_not_only_src() -> None:
         f"the bootstrap no longer adds BOTH roots, so the deferred scripts.* import needs "
         f"PYTHONPATH=. again: {bootstrap!r}"
     )
+
+
+def _busy_raised_from(cause: BaseException | None) -> ServiceBusy:
+    """A `ServiceBusy` raised the way `Store` raises it, `from` ``cause``."""
+    try:
+        try:
+            if cause is not None:
+                raise cause
+            raise ServiceBusy("The service is busy. Retry shortly.")
+        except ServiceBusy:
+            raise
+        except Exception as exc:
+            raise ServiceBusy("The service is busy. Retry shortly.") from exc
+    except ServiceBusy as busy:
+        return busy
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        EndpointConnectionError(endpoint_url="http://127.0.0.1:1"),
+        ConnectTimeoutError(endpoint_url="http://127.0.0.1:1"),
+        HTTPClientError(error="connection reset"),
+    ],
+    ids=["endpoint_connection", "connect_timeout", "http_client"],
+)
+def test_a_service_busy_raised_from_a_connection_failure_is_unreachable(cause: Exception) -> None:
+    import scripts.seed_demo_tenant as cli
+
+    busy = _busy_raised_from(cause)
+    assert gate.is_unreachable_failure(busy) is True
+    assert cli.is_unreachable_failure(busy) is True
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [None, ClientError({"Error": {"Code": "ThrottlingException", "Message": "x"}}, "Query")],
+    ids=["no_cause", "throttle_answer"],
+)
+def test_a_service_busy_without_a_connection_cause_is_an_answer(cause: Exception | None) -> None:
+    import scripts.seed_demo_tenant as cli
+
+    busy = _busy_raised_from(cause)
+    assert gate.is_unreachable_failure(busy) is False
+    assert cli.is_unreachable_failure(busy) is False
+
+
+def test_a_real_store_against_a_closed_port_raises_service_busy_and_the_gate_skips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The real `Store` maps the connection error to `ServiceBusy`; the gate still exits 3."""
+    _hermetic_aws_env(monkeypatch, tmp_path)
+    store = gate.build_store(table_prefix="crm-agent-eval", endpoint_url="http://127.0.0.1:1")
+    with pytest.raises(ServiceBusy) as raised:
+        store.query_tenant_scan(
+            sorted(TENANT_SCOPED_TABLES)[0], tenant=gate.CANARY_TENANT, exclusive_start_key=None
+        )
+    assert isinstance(raised.value.__cause__, EndpointConnectionError)
+    assert gate.main(
+        ["--table-prefix", "crm-agent-eval", "--endpoint-url", "http://127.0.0.1:1"]
+    ) == (GATE_SKIP_EXIT_STATUS)

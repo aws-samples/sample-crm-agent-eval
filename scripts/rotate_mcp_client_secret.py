@@ -288,6 +288,44 @@ def list_secret_ids(idp: Any, target: RotationTarget) -> list[tuple[str, str]]:
         kwargs["NextToken"] = token
 
 
+def _roll_back_unreadable_add(
+    idp: Any, target: RotationTarget, old_id: str, reason: str
+) -> RotationError:
+    """Delete every active secret other than ``old_id`` after an unreadable Add response.
+
+    Returns the error to raise; it names what was deleted, or what remains active when the lookup or
+    a delete fails. No secret value is read or reported.
+    """
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    detail = f"step add: the AddUserPoolClientSecret response was unreadable ({reason})."
+    try:
+        extra = [secret_id for secret_id, _ in list_secret_ids(idp, target) if secret_id != old_id]
+    except (BotoCoreError, ClientError) as exc:
+        return RotationError(
+            f"{detail} Listing secrets to roll back ALSO failed ({type(exc).__name__}); a new "
+            f"secret may remain active beside {old_id}. Check the client's secrets."
+        )
+    failed: list[str] = []
+    for secret_id in extra:
+        try:
+            idp.delete_user_pool_client_secret(
+                UserPoolId=target.user_pool_id, ClientId=target.client_id, ClientSecretId=secret_id
+            )
+        except (BotoCoreError, ClientError):
+            failed.append(secret_id)
+    if failed:
+        return RotationError(
+            f"{detail} Deleting {', '.join(failed)} ALSO failed; they remain active beside "
+            f"{old_id}. No secret file was written."
+        )
+    deleted = ", ".join(extra) or "(none found)"
+    return RotationError(
+        f"{detail} Rolled back: deleted {deleted}; old secret {old_id} intact. No secret file "
+        "was written."
+    )
+
+
 def rotate(
     idp: Any,
     target: RotationTarget,
@@ -320,16 +358,20 @@ def rotate(
     log(f"active secret: {old_id} (created {old_created})")
 
     try:
-        added = idp.add_user_pool_client_secret(
+        response = idp.add_user_pool_client_secret(
             UserPoolId=target.user_pool_id, ClientId=target.client_id
-        )["ClientSecretDescriptor"]
-        new_id = str(added["ClientSecretId"])
-        new_value = str(added["ClientSecretValue"])
-    except (BotoCoreError, ClientError, KeyError) as exc:
+        )
+    except (BotoCoreError, ClientError) as exc:
         raise RotationError(
             f"step add: AddUserPoolClientSecret failed ({type(exc).__name__}); "
             f"check the client's secrets before re-running. Old secret {old_id} untouched."
         ) from None
+    try:
+        added = response["ClientSecretDescriptor"]
+        new_id = str(added["ClientSecretId"])
+        new_value = str(added["ClientSecretValue"])
+    except (KeyError, TypeError) as exc:
+        raise _roll_back_unreadable_add(idp, target, old_id, type(exc).__name__) from None
     log(f"added secret: {new_id} (created {added.get('ClientSecretCreateDate', '')})")
 
     def roll_back_new(step: str, reason: str, *, remove_file: bool = True) -> RotationError:

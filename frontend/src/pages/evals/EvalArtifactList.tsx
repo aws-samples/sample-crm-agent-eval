@@ -7,7 +7,8 @@
  * The artefacts bucket is private, so each control asks the run API for a short-lived presigned
  * URL (`EvalRunClient.getArtefactUrl`) when clicked and opens it in a new tab. A refused or failed
  * request is shown as an alert naming the artifact. An unavailable artifact keeps its row and is
- * labelled unavailable.
+ * labelled unavailable. "Download matrix.md" asks for the same file as an attachment and navigates to
+ * that URL, which saves it rather than leaving the page.
  */
 import { useState } from "react";
 import type { JSX } from "react";
@@ -33,6 +34,7 @@ export function EvalArtifactList({ artifacts, runId, client }: EvalArtifactListP
   const rawCount = raw.length;
   const [opening, setOpening] = useState<string | undefined>(undefined);
   const [failure, setFailure] = useState<string | undefined>(undefined);
+  const matrixMd = artifacts.matrixMd;
 
   async function open(key: string): Promise<void> {
     // Opened before the request so the browser treats the new tab as the click's own.
@@ -51,6 +53,20 @@ export function EvalArtifactList({ artifacts, runId, client }: EvalArtifactListP
       tab?.close();
       const reason = err instanceof Error && err.message ? err.message : "the request failed";
       setFailure(`Could not open ${key}: ${reason}`);
+    } finally {
+      setOpening(undefined);
+    }
+  }
+
+  async function download(key: string): Promise<void> {
+    setOpening(`download:${key}`);
+    setFailure(undefined);
+    try {
+      const { url } = await client.getArtefactUrl(runId, key, { download: true });
+      window.location.assign(url);
+    } catch (err) {
+      const reason = err instanceof Error && err.message ? err.message : "the request failed";
+      setFailure(`Could not download ${key}: ${reason}`);
     } finally {
       setOpening(undefined);
     }
@@ -95,8 +111,20 @@ export function EvalArtifactList({ artifacts, runId, client }: EvalArtifactListP
           )}
         </li>
         <li className={ROW}>
-          {artifacts.matrixMd ? (
-            control(artifacts.matrixMd, "matrix.md (human-readable, referenced by the README)")
+          {matrixMd ? (
+            <>
+              {control(matrixMd, "matrix.md (human-readable, referenced by the README)")}
+              <button
+                type="button"
+                data-testid="download-matrix-md"
+                className={LINK}
+                onClick={() => void download(matrixMd)}
+                disabled={opening !== undefined}
+                aria-busy={opening === `download:${matrixMd}`}
+              >
+                Download matrix.md
+              </button>
+            </>
           ) : (
             <span className={UNAVAILABLE}>matrix.md — not available</span>
           )}

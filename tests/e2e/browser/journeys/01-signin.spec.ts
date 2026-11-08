@@ -4,8 +4,7 @@
  * on a scoped application; before sign-in a protected route renders no CRM data, and sign-out leaves
  * no session behind.
  */
-import { expect, test } from "@playwright/test";
-import { signInAsDemo } from "../fixtures/auth";
+import { cspViolationsOf, expect, signInAsDemo, test } from "../fixtures/auth";
 
 test("a protected route renders no CRM data before sign-in", async ({ page }) => {
   await page.goto("/pipeline");
@@ -39,7 +38,15 @@ test("signing in through the sign-in form lands on a scoped, operable applicatio
 test("signing out leaves no session behind", async ({ page }) => {
   await signInAsDemo(page);
 
+  const revoke = page.waitForResponse(
+    async (response) =>
+      new URL(response.url()).hostname.startsWith("cognito-idp.") &&
+      ((await response.request().headerValue("x-amz-target")) ?? "").endsWith("RevokeToken"),
+    { timeout: 15_000 },
+  );
   await page.getByRole("button", { name: /sign out/i }).click();
+  expect((await revoke).status(), "sign-out revokes the refresh token at Cognito").toBe(200);
+  expect(cspViolationsOf(page), "the revoke call ran without a CSP violation").toEqual([]);
   await expect(page.getByRole("button", { name: /sign in/i })).toBeVisible();
 
   // A reload does not restore the session.

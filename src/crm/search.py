@@ -2,23 +2,25 @@
 """Scope-constrained opportunity and account search: a GSI query plus in-process token filtering.
 
 A tenant-scoped GSI query retrieves candidates in bounded pages and free-text matching runs in
-this process. At most :data:`EXAMINATION_BUDGET` items are examined per call; a cut-off result is
-marked ``truncated=True`` and carries a ``next_cursor`` to resume from. Every returned record is
-scope-filtered by :func:`crm.authz.filter_to_scope`.
+this process. At most :data:`EXAMINATION_BUDGET` index items are read per call, out-of-book items
+included; a cut-off result is marked ``truncated=True`` and carries a ``next_cursor`` to resume
+from. Items outside the caller's book (:func:`crm.authz.filter_to_scope`) are dropped before they
+are counted or matched. The cursor is opaque and bound to the caller, the operation, the index and
+its partition value (:mod:`crm.cursor`).
 """
 
 from __future__ import annotations
 
-import base64
-import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
 from crm.authz import Identity, filter_to_scope, require_listing_scope, require_scope
-from crm.errors import ValidationFailed, bounded_detail_value
+from crm.cursor import bound_operation, decode_cursor, encode_cursor
+from crm.errors import CrmError, ValidationFailed, bounded_detail_value
 from crm.store.keys import tenant_prefixed
+from crm.store.schema import table_schema
 from crm.store.store import Store
 
 #: Maximum number of index items examined per call before search stops and reports truncation.
@@ -45,15 +47,17 @@ _ACCOUNT_GSI_TENANT: Final[str] = "gsi_tenant"
 
 @dataclass(frozen=True, slots=True)
 class SearchResult:
-    """The outcome of one :func:`search_opportunities` call.
+    """The outcome of one :func:`search_opportunities` or :func:`search_accounts` call.
 
     Attributes:
-        items: In-scope opportunities matching the query, up to the point examination stopped.
-        truncated: ``True`` when :data:`EXAMINATION_BUDGET` items were examined, or more than
-            ``limit`` raw matches were found, so ``items`` may not be the complete match set.
-        examined_count: Total items read from the index across every page this call issued.
-        next_cursor: An opaque token resuming examination where this call stopped, passed back as
-            ``cursor`` with the same filters; ``None`` when not truncated or nothing remains.
+        items: In-scope records matching the query, up to the point examination stopped.
+        truncated: ``True`` when :data:`EXAMINATION_BUDGET` index items were read, or more than
+            ``limit`` in-scope matches were found, so ``items`` may not be the complete match set.
+        examined_count: In-scope items examined across every page this call issued; items outside
+            the caller's book are never counted.
+        next_cursor: An opaque token resuming examination where this call stopped, valid only for
+            the same caller and the same index-selecting filters; ``None`` when not truncated or
+            nothing remains.
     """
 
     items: list[dict[str, object]]
@@ -123,53 +127,35 @@ def _matches_stage(item: dict[str, object], stage: str | None) -> bool:
     return stage is None or item.get("stage") == stage
 
 
-def encode_cursor(page_key: dict[str, object]) -> str:
-    """Serialise a raw DynamoDB page key into the opaque ``next_cursor`` string."""
-    raw = json.dumps(page_key, sort_keys=True, default=str)
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
-
-
-def decode_cursor(token: str) -> dict[str, object]:
-    """Parse an opaque cursor string back into the raw DynamoDB page key it encodes.
-
-    Raises:
-        ValidationFailed: If ``token`` is not a cursor produced by :func:`encode_cursor`; the
-            error's source is ``cursor``.
-    """
-    try:
-        raw = base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8")
-        decoded = json.loads(raw)
-    except Exception as exc:  # noqa: BLE001 - any decode failure means a malformed cursor
-        raise ValidationFailed("The search cursor is not valid.", source="cursor") from exc
-    if not isinstance(decoded, dict):
-        raise ValidationFailed("The search cursor is not valid.", source="cursor")
-    return decoded
-
-
 def _examine(
     store: Store,
+    identity: Identity,
     table: str,
     index_name: str,
     *,
+    operation: str,
     partition_value: str,
     cursor: str | None,
     limit: int | None,
     matches: Callable[[dict[str, object]], bool],
-) -> tuple[list[dict[str, object]], int, bool, dict[str, object] | None]:
+) -> SearchResult:
     """Run the bounded, cursor-resumable GSI examination loop shared by both search entry points.
 
-    Pages the chosen index, applying ``matches`` in this process, until the index is exhausted, the
-    :data:`EXAMINATION_BUDGET` is exhausted, or more raw matches than ``limit`` have been collected.
-    Returns the raw (pre-scope-filter) matches, the number of items examined, whether examination
-    stopped early, and the page key to resume from.
+    Pages the chosen index, scope-filters each page to ``identity``'s book, then applies
+    ``matches``, until the index is exhausted, :data:`EXAMINATION_BUDGET` index items have been
+    read, or more in-scope matches than ``limit`` have been collected. ``next_cursor`` is present
+    only when examination truncated with something left to resume from; after a ``limit`` cut it
+    resumes immediately after the last returned item, so no match is skipped.
     """
-    page_key = decode_cursor(cursor) if cursor is not None else None
+    binding = bound_operation(operation, index_name, partition_value)
+    page_key = decode_cursor(cursor, identity=identity, operation=binding)
     matched: list[dict[str, object]] = []
+    read_count = 0
     examined_count = 0
     truncated = False
 
     while True:
-        remaining_budget = EXAMINATION_BUDGET - examined_count
+        remaining_budget = EXAMINATION_BUDGET - read_count
         if remaining_budget <= 0:
             truncated = True
             break
@@ -182,12 +168,13 @@ def _examine(
             limit=page_limit,
             exclusive_start_key=page_key,
         )
-        examined_count += len(raw_items)
-        matched.extend(item for item in raw_items if matches(item))
+        read_count += len(raw_items)
+        in_scope = filter_to_scope(identity, raw_items)
+        examined_count += len(in_scope)
+        matched.extend(item for item in in_scope if matches(item))
 
         index_exhausted = page_key is None
-        budget_exhausted = examined_count >= EXAMINATION_BUDGET
-        # Matches beyond the limit are withheld, so this truncates even on an exhausted index.
+        budget_exhausted = read_count >= EXAMINATION_BUDGET
         limit_exceeded = limit is not None and len(matched) > limit
 
         if limit_exceeded or budget_exhausted:
@@ -196,31 +183,43 @@ def _examine(
         if index_exhausted:
             break
 
-    return matched, examined_count, truncated, page_key
-
-
-def _build_result(
-    identity: Identity,
-    matched: list[dict[str, object]],
-    examined_count: int,
-    truncated: bool,
-    page_key: dict[str, object] | None,
-    limit: int | None,
-) -> SearchResult:
-    """Scope-filter the raw matches, apply the ``limit`` slice, and assemble the :class:`SearchResult`.
-
-    ``next_cursor`` is present only when examination truncated with a page left to resume from.
-    """
-    in_scope = filter_to_scope(identity, matched)
-    if limit is not None:
-        in_scope = in_scope[:limit]
-
+    items = matched
+    if limit is not None and len(matched) > limit:
+        items = matched[:limit]
+        page_key = _resume_key(table, index_name, items[-1])
     return SearchResult(
-        items=in_scope,
+        items=items,
         truncated=truncated,
         examined_count=examined_count,
-        next_cursor=encode_cursor(page_key) if truncated and page_key is not None else None,
+        next_cursor=(
+            encode_cursor(page_key, identity=identity, operation=binding) if truncated else None
+        ),
     )
+
+
+def _resume_key(table: str, index_name: str, item: dict[str, object]) -> dict[str, object]:
+    """Build the ``ExclusiveStartKey`` that resumes ``index_name`` immediately after ``item``.
+
+    Raises:
+        CrmError: If ``item`` lacks one of the table or index key attributes.
+    """
+    schema = table_schema(table)
+    gsi = schema.gsi(index_name)
+    names = {schema.partition_key, gsi.partition_key}
+    names.update(name for name in (schema.sort_key, gsi.sort_key) if name is not None)
+    key: dict[str, object] = {}
+    for name in sorted(names):
+        value = item.get(name)
+        if isinstance(value, str):
+            key[name] = {"S": value}
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            key[name] = {"N": str(value)}
+        else:
+            raise CrmError(
+                "The request could not be completed.",
+                detail=f"search resume key: {table}.{index_name} item lacks {name}",
+            )
+    return key
 
 
 def _require_well_formed_account_id(account_id: str) -> None:
@@ -276,9 +275,9 @@ def search_opportunities(
     Raises:
         ScopeDenied: If the caller has an empty book and no full visibility (``account:*``), or
             ``account_id`` is outside its book (``account:<id>``).
-        ValidationFailed: If ``cursor`` is not a validly encoded token, ``account_id`` or
-            ``owner_rep_id`` is the empty string, or ``account_id`` is malformed or longer than
-            :data:`ACCOUNT_ID_MAX_LENGTH`.
+        ValidationFailed: If ``cursor`` is not one this operation issued to ``identity``,
+            ``account_id`` or ``owner_rep_id`` is the empty string, or ``account_id`` is malformed
+            or longer than :data:`ACCOUNT_ID_MAX_LENGTH`.
     """
     require_listing_scope(identity, operation="search_opportunities")
     for source, value in (("account_id", account_id), ("owner_rep_id", owner_rep_id)):
@@ -300,16 +299,17 @@ def search_opportunities(
             and _matches_query(item, tokens)
         )
 
-    matched, examined_count, truncated, page_key = _examine(
+    return _examine(
         store,
+        identity,
         _TABLE,
         index_name,
+        operation="search_opportunities",
         partition_value=partition_value,
         cursor=cursor,
         limit=limit,
         matches=matches,
     )
-    return _build_result(identity, matched, examined_count, truncated, page_key, limit)
 
 
 def _account_index_for(*, owner_rep_id: str | None) -> str:
@@ -371,8 +371,8 @@ def search_accounts(
 
     Raises:
         ScopeDenied: If the caller has an empty book and no full visibility (``account:*``).
-        ValidationFailed: If ``cursor`` is not a validly encoded token, or ``owner_rep_id`` is
-            the empty string.
+        ValidationFailed: If ``cursor`` is not one this operation issued to ``identity``, or
+            ``owner_rep_id`` is the empty string.
     """
     require_listing_scope(identity, operation="search_accounts")
     if owner_rep_id == "":
@@ -384,13 +384,14 @@ def search_accounts(
     def matches(item: dict[str, object]) -> bool:
         return _matches_owner(item, owner_rep_id) and _matches_account_query(item, tokens)
 
-    matched, examined_count, truncated, page_key = _examine(
+    return _examine(
         store,
+        identity,
         _ACCOUNTS_TABLE,
         index_name,
+        operation="search_accounts",
         partition_value=partition_value,
         cursor=cursor,
         limit=limit,
         matches=matches,
     )
-    return _build_result(identity, matched, examined_count, truncated, page_key, limit)

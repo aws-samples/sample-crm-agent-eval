@@ -902,7 +902,8 @@ FIXTURE_STALE_GRANTS: dict[str, str] = {}
 
 #: `<function>:<table>:<action>` grants source and the matrix carry that the committed fixture
 #: predates, as `(reason, root local holding the grant)`. Excused from the matrix-union equality
-#: while absent from the plan; the local must still name the action.
+#: while absent from the plan; the local must still name the action. For
+#: `tool_dynamodb_grants` the action must be in that function's row for the table.
 FIXTURE_PENDING_GRANTS: dict[str, tuple[str, str]] = {}
 
 
@@ -929,7 +930,8 @@ def _root_local_entries(local_name: str) -> list[str] | None:
 
 
 def _source_tool_grant_actions(function: str, table: str) -> list[str] | None:
-    """The actions `infra/main.tf`'s `tool_dynamodb_grants` gives `function` on `table`, or None."""
+    """The actions `infra/main.tf`'s `tool_dynamodb_grants` gives `function` on `table`, across every
+    row for that table, or None."""
     source = (INFRA_DIR / "main.tf").read_text(encoding="utf-8")
     grants = re.search(r"(?ms)^  tool_dynamodb_grants = \{\n(.*?)^  \}$", source)
     if grants is None:
@@ -937,10 +939,10 @@ def _source_tool_grant_actions(function: str, table: str) -> list[str] | None:
     block = re.search(rf"(?ms)^    {re.escape(function)} = \[\n(.*?)^    \]$", grants.group(1))
     if block is None:
         return None
-    row = re.search(
+    rows = re.findall(
         rf'\{{\s*table\s*=\s*"{re.escape(table)}",\s*actions\s*=\s*\[([^\]]*)\]', block.group(1)
     )
-    return re.findall(r'"([^"]+)"', row.group(1)) if row else None
+    return [a for row in rows for a in re.findall(r'"([^"]+)"', row)] if rows else None
 
 
 def check_dynamodb_leading_keys_isolation(plan: Plan) -> list[Finding]:
@@ -1205,7 +1207,11 @@ def check_dynamodb_leading_keys_isolation(plan: Plan) -> list[Finding]:
     for entry, (reason, local_name) in sorted(FIXTURE_PENDING_GRANTS.items()):
         fn, tbl, action = entry.split(":", 2)
         documented = {a for row in rows_by_pair.get((fn, tbl), []) for a in row.get("actions", [])}
-        block = _root_local_block(local_name)
+        if local_name == "tool_dynamodb_grants":
+            tool_actions = _source_tool_grant_actions(fn, tbl)
+            block = None if tool_actions is None else "".join(f'"{a}"' for a in tool_actions)
+        else:
+            block = _root_local_block(local_name)
         if block is None or action not in documented or f'"{action}"' not in block:
             status, detail = (
                 "fail",
@@ -3098,10 +3104,10 @@ DECLARED_INFRA_BLOCK_COUNTS: dict[str, tuple[int, str]] = {
         "plan re-capture is invisible to EXPECTED_RESOURCE_COUNTS, which is why this count exists.",
     ),
     'resource "aws_kms_key_policy"': (
-        3,
-        "`aws_kms_key_policy.eval_artifacts` at the root, beside "
+        4,
+        "`aws_kms_key_policy.eval_artifacts` and `aws_kms_key_policy.cursor` at the root, beside "
         "`dynamodb` and the frontend module's `frontend`; `EXPECTED_RESOURCE_COUNTS` expects the "
-        "same three in the plan.",
+        "same four in the plan.",
     ),
     'data "aws_iam_policy_document"': (
         43,
@@ -4458,6 +4464,47 @@ STORE_POLICIES: tuple[StorePolicy, ...] = (
 )
 
 
+#: Root locals naming the cursor tools and the roles admitted to the cursor CMK besides the operators.
+CURSOR_TOOLS_LOCAL = "cursor_tools"
+CURSOR_KEY_PRINCIPALS_LOCAL = "cursor_key_principal_arns"
+CURSOR_PURPOSE_SID = "DenyCursorKeyUseOutsidePurpose"
+CURSOR_CONTEXT_KEY = "kms:EncryptionContext:purpose"
+CURSOR_PURPOSE = "crm-cursor"
+#: Every key-use action that carries an encryption context; the cursor CMK refuses each outside it.
+CURSOR_CONTEXT_BOUND_ACTIONS: tuple[str, ...] = (
+    "kms:Decrypt",
+    "kms:Encrypt",
+    "kms:GenerateDataKey*",
+    "kms:ReEncrypt*",
+)
+CURSOR_GRANT_ACTIONS: tuple[str, ...] = ("kms:Encrypt", "kms:Decrypt")
+CURSOR_UNUSED_SID = "DenyCursorKeyUnusedOperations"
+#: Key operations the cursor codec never calls; the cursor CMK refuses them to every principal.
+CURSOR_UNUSED_ACTIONS: tuple[str, ...] = (
+    "kms:GenerateDataKey*",
+    "kms:ReEncrypt*",
+    "kms:CreateGrant",
+)
+#: The encryption-context keys `crm.cursor.encryption_context` writes, in the grant's sorted order.
+CURSOR_CONTEXT_KEYS: tuple[str, ...] = ("operation", "purpose", "rep_id", "tenant")
+
+#: The pagination-cursor CMK's policy, read like `STORE_POLICIES` plus its context-binding Deny.
+CURSOR_KEY_POLICY = StorePolicy(
+    "cursor_key",
+    "aws_kms_key_policy",
+    ".",
+    "cursor",
+    ("EnableIAMUserPermissions", CURSOR_PURPOSE_SID, CURSOR_UNUSED_SID, *_KEY_DENY_SIDS),
+    _key_denies(
+        f"concat(local.{CURSOR_KEY_PRINCIPALS_LOCAL}, {CRM_OPERATOR_PRINCIPALS_VAR})",
+        _STORE_ADMIN_ROOT,
+    ),
+    root_sid="EnableIAMUserPermissions",
+    root_wired=True,
+    lockout_flag=True,
+)
+
+
 def _store_root_problems(statement: RenderedStatement) -> list[str]:
     problems: list[str] = []
     if statement.effect != "Allow":
@@ -4821,9 +4868,151 @@ def _store_wiring_findings() -> list[Finding]:
     return findings
 
 
+def _key_rotation_findings() -> list[Finding]:
+    """Every `aws_kms_key` under `infra/` sets `enable_key_rotation = true`."""
+    blocks = tf_resource_blocks("aws_kms_key")
+    findings = [
+        Finding(
+            _STORE_CONTROL,
+            "(coverage) aws_kms_key blocks",
+            "pass" if blocks else "fail",
+            f"{len(blocks)} key block(s) read; zero would make every rotation row vacuous",
+        )
+    ]
+    for module_dir, name, body in blocks:
+        written = _hcl_expression(body, "enable_key_rotation")
+        findings.append(
+            Finding(
+                _STORE_CONTROL,
+                f"{module_dir}/aws_kms_key.{name} (rotation)",
+                "pass" if written == "true" else "fail",
+                f"enable_key_rotation={written or None!r}, expected true",
+            )
+        )
+    return findings
+
+
+def _cursor_purpose_finding() -> Finding:
+    address = f"./aws_kms_key_policy.{CURSOR_KEY_POLICY.name}#{CURSOR_PURPOSE_SID}"
+    blocks = [
+        b for d, n, b in tf_resource_blocks("aws_kms_key_policy") if d == "." and n == "cursor"
+    ]
+    if len(blocks) != 1:
+        return Finding(_STORE_CONTROL, address, "fail", f"found {len(blocks)} policy blocks")
+    try:
+        statements = {s.sid: s for s in rendered_policy_statements(".", blocks[0])}
+    except ValueError as exc:
+        return Finding(_STORE_CONTROL, address, "fail", f"policy unreadable: {exc}")
+    statement = statements.get(CURSOR_PURPOSE_SID)
+    if statement is None:
+        return Finding(_STORE_CONTROL, address, "fail", "statement absent")
+    problems = _deny_statement_problems(
+        statement,
+        CURSOR_CONTEXT_BOUND_ACTIONS,
+        {"StringNotEquals": {CURSOR_CONTEXT_KEY: (CURSOR_PURPOSE,)}},
+    )
+    if statement.resources != ("*",):
+        problems.append(f"resources={list(statement.resources)!r}, expected exactly ['*']")
+    unused = statements.get(CURSOR_UNUSED_SID)
+    if unused is None:
+        problems.append(f"{CURSOR_UNUSED_SID} absent")
+    else:
+        problems += [
+            f"{CURSOR_UNUSED_SID}: {problem}"
+            for problem in _deny_statement_problems(unused, CURSOR_UNUSED_ACTIONS, {})
+        ]
+        if unused.resources != ("*",):
+            problems.append(f"{CURSOR_UNUSED_SID}: resources={list(unused.resources)!r}")
+    return Finding(
+        _STORE_CONTROL,
+        address,
+        "fail" if problems else "pass",
+        "; ".join(problems)
+        or "refuses every context-bound use outside the crm-cursor encryption context, and every "
+        "operation the codec does not call",
+    )
+
+
+def _cursor_grant_finding() -> Finding:
+    """The `dynamodb_kms` document's cursor statement: Encrypt/Decrypt, one key, the context."""
+    address = (
+        "modules/lambda_action/data.aws_iam_policy_document.dynamodb_kms#SealPaginationCursors"
+    )
+    blocks = [
+        b
+        for d, n, b in tf_resource_blocks("aws_iam_policy_document", kind="data")
+        if d == "modules/lambda_action" and n == "dynamodb_kms"
+    ]
+    if len(blocks) != 1:
+        return Finding(_STORE_CONTROL, address, "fail", f"found {len(blocks)}, expected 1")
+    actions = ", ".join(f'"{action}"' for action in CURSOR_GRANT_ACTIONS)
+    expected = (
+        'dynamic "statement" { '
+        "for_each = var.cursor_kms_grant_enabled ? [var.cursor_kms_key_arn] : [] "
+        "content { "
+        'sid = "SealPaginationCursors" effect = "Allow" '
+        f"actions = [{actions}] "
+        "resources = [statement.value] "
+        f'condition {{ test = "StringEquals" variable = "{CURSOR_CONTEXT_KEY}" '
+        f'values = ["{CURSOR_PURPOSE}"] }} '
+        'condition { test = "ForAllValues:StringEquals" variable = "kms:EncryptionContextKeys" '
+        f"values = [{', '.join(f'"{key}"' for key in CURSOR_CONTEXT_KEYS)}] }} }} }}"
+    )
+    source = re.sub(r"\s*=\s*", " = ", _normalised_expression(blank_comments(blocks[0])))
+    found = expected in source
+    return Finding(
+        _STORE_CONTROL,
+        address,
+        "pass" if found else "fail",
+        "Encrypt/Decrypt on the one cursor key, under the crm-cursor context, only when enabled"
+        if found
+        else "the cursor statement is absent or differs from Encrypt/Decrypt on "
+        "var.cursor_kms_key_arn under StringEquals kms:EncryptionContext:purpose = crm-cursor and "
+        "ForAllValues:StringEquals kms:EncryptionContextKeys = the codec's four keys",
+    )
+
+
+def _cursor_principals_findings() -> list[Finding]:
+    """The key's role list and the module call's grant flag both follow `local.cursor_tools`."""
+    try:
+        tools = _root_local_value(CURSOR_TOOLS_LOCAL)
+        roles = _root_local_value(CURSOR_KEY_PRINCIPALS_LOCAL)
+    except ValueError as exc:
+        return [Finding(_STORE_CONTROL, f"local.{CURSOR_KEY_PRINCIPALS_LOCAL}", "fail", str(exc))]
+    problems: list[str] = []
+    names = tools if isinstance(tools, list) and all(isinstance(v, str) for v in tools) else None
+    if not names:
+        problems.append(f"local.{CURSOR_TOOLS_LOCAL}={tools!r} is not a non-empty string list")
+    entries = (
+        [v.text if isinstance(v, HclExpr) else repr(v) for v in roles]
+        if isinstance(roles, list)
+        else [repr(roles)]
+    )
+    expected = [f'module.lambda_action["{n}"].role_arn' for n in names or []]
+    if sorted(entries) != sorted(expected):
+        problems.append(f"entries={entries!r}, expected exactly {expected!r}")
+    call = _root_module_calls().get("lambda_action", "")
+    flag = _normalised_expression(_hcl_expression(call, "cursor_kms_grant_enabled"))
+    wanted = f"contains(local.{CURSOR_TOOLS_LOCAL}, each.key)"
+    if flag != wanted:
+        problems.append(
+            f"module.lambda_action cursor_kms_grant_enabled={flag!r}, expected {wanted!r}"
+        )
+    return [
+        Finding(
+            _STORE_CONTROL,
+            f"local.{CURSOR_KEY_PRINCIPALS_LOCAL}",
+            "fail" if problems else "pass",
+            "; ".join(problems)
+            or "names exactly the role of each cursor tool, and exactly those tools hold the grant",
+        )
+    ]
+
+
 def check_store_principal_deny(_plan: Plan) -> list[Finding]:
-    """The logs, CloudTrail, frontend and eval-artefacts key and bucket policies deny the data
-    plane, key use and administration outside each store's allowlist and the operators. Read from
+    """The logs, CloudTrail, frontend, eval-artefacts and cursor key and bucket policies deny the
+    data plane, key use and administration outside each store's allowlist and the operators, the
+    cursor key refuses use outside its encryption context, and every key rotates. Read from
     source."""
     findings: list[Finding] = []
     for policy in STORE_POLICIES:
@@ -4831,6 +5020,11 @@ def check_store_principal_deny(_plan: Plan) -> list[Finding]:
     findings.append(_logs_key_users_finding())
     findings += _eval_artifacts_principals_findings()
     findings += _store_wiring_findings()
+    findings += _store_policy_findings(CURSOR_KEY_POLICY)
+    findings.append(_cursor_purpose_finding())
+    findings.append(_cursor_grant_finding())
+    findings += _cursor_principals_findings()
+    findings += _key_rotation_findings()
     return findings
 
 
@@ -6452,13 +6646,14 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "uploads so the current SPA build is never expired",
     ),
     "aws_kms_key": ExpectedCount(
-        fixed=5,
-        basis="one CMK each for DynamoDB, the frontend, CloudTrail, CloudWatch Logs, and the "
-        "eval-artifacts bucket. The last is declared at the ROOT (aws_kms_key.eval_artifacts) rather "
-        "than inside its module, so the module's policies render at plan time",
+        fixed=6,
+        basis="one CMK each for DynamoDB, the frontend, CloudTrail, CloudWatch Logs, the "
+        "eval-artifacts bucket and the pagination cursors. The last two are declared at the ROOT "
+        "(aws_kms_key.eval_artifacts, aws_kms_key.cursor) rather than inside a module, so their "
+        "policies render at plan time",
     ),
     "aws_kms_alias": ExpectedCount(
-        fixed=5, basis="one alias per CMK above, so each key is addressable by a stable name"
+        fixed=6, basis="one alias per CMK above, so each key is addressable by a stable name"
     ),
     # --- relay, runtime, frontend and supporting resources ---
     "aws_bedrockagentcore_resource_policy": ExpectedCount(
@@ -6474,14 +6669,15 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "secret and a JWT check of its own",
     ),
     "aws_kms_key_policy": ExpectedCount(
-        fixed=3,
-        basis="three, each carrying the account-root statement and the Denies on key use and key "
+        fixed=4,
+        basis="four, each carrying the account-root statement and the Denies on key use and key "
         "administration outside its principal lists: the frontend CMK's, which also grants "
         "CloudFront's service principal decrypt against this distribution only; the DynamoDB table "
-        "CMK's; and the eval-artefacts CMK's, separate from its key because an inline policy would "
-        "cycle through the CodeBuild role. The logs and CloudTrail CMKs carry their policy inline on "
-        "the key resource, which is why this is 3 rather than 5 -- a discrepancy worth keeping "
-        "visible in the basis",
+        "CMK's; the eval-artefacts CMK's, separate from its key because an inline policy would "
+        "cycle through the CodeBuild role; and the cursor CMK's, which also refuses every use "
+        "outside the `crm-cursor` encryption context. The logs and CloudTrail CMKs carry their "
+        "policy inline on the key resource, which is why this is 4 rather than 6 -- a discrepancy "
+        "worth keeping visible in the basis",
     ),
     "aws_cloudfront_function": ExpectedCount(
         fixed=2,
@@ -6501,10 +6697,10 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "tokens every plane accepts",
     ),
     "aws_ssm_parameter": ExpectedCount(
-        fixed=1,
-        basis="one: the relay's expected Cognito audience. The origin-verification secret is "
-        "NOT a second one -- it is created outside terraform so its value never enters state, which "
-        "is why this is 1 and not 2",
+        fixed=2,
+        basis="two: the relay's expected Cognito audience and the API Gateway channel's allowed app "
+        "client ids. The origin-verification secret is NOT a third one -- it is created outside "
+        "terraform so its value never enters state, which is why this is 2 and not 3",
     ),
     "aws_s3_object": ExpectedCount(
         fixed=1,
@@ -6532,6 +6728,11 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
     ),
     "aws_cognito_user_pool_client": ExpectedCount(
         fixed=3, basis="the SPA client, the MCP client and the MCP OAuth client"
+    ),
+    "aws_cloudfront_response_headers_policy": ExpectedCount(
+        fixed=1,
+        basis="one, attached to every cache behaviour: the managed security headers plus the "
+        "enforced Content-Security-Policy",
     ),
     "aws_cloudfront_distribution": ExpectedCount(
         fixed=1, basis="one distribution fronting the SPA, the API and the agent relay"

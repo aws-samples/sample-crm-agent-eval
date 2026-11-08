@@ -32,6 +32,7 @@ _REST_V1 = json.loads((_FIXTURE / "apigw_v1_proxy_post_get_account.json").read_t
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=UTC)
 MACHINE = "arn:aws:states:us-east-1:123456789012:stateMachine:eval_sweep"
 ARN = "arn:aws:states:us-east-1:123456789012:execution:eval_sweep:r1"
+_ADMIN = Identity(rep_id="rep-admin", full_visibility=True)
 
 
 def identity() -> Identity:
@@ -305,18 +306,18 @@ class TestReconcileLockAndUnlock:
     def test_unlock_refuses_a_running_execution(self, store: Store) -> None:
         _started(store)
         with pytest.raises(Conflict, match="still running"):
-            runs.unlock(store, Sfn("RUNNING"), now=NOW)
+            runs.unlock(store, Sfn("RUNNING"), identity=_ADMIN, now=NOW)
         assert runs.read_lock(store) is not None
 
     def test_unlock_refuses_a_fresh_queued_holder(self, store: Store) -> None:
         _started(store, arn=None)
         with pytest.raises(Conflict, match="starting"):
-            runs.unlock(store, Sfn(), now=NOW + timedelta(seconds=5))
+            runs.unlock(store, Sfn(), identity=_ADMIN, now=NOW + timedelta(seconds=5))
         assert runs.read_lock(store) is not None
 
     def test_unlock_releases_after_an_aborted_execution(self, store: Store) -> None:
         _started(store)
-        assert runs.unlock(store, Sfn("ABORTED"), now=NOW) == {
+        assert runs.unlock(store, Sfn("ABORTED"), identity=_ADMIN, now=NOW) == {
             "released": True,
             "holder_run_id": "r1",
         }
@@ -330,7 +331,7 @@ class TestReconcileLockAndUnlock:
         _started(store)
         monkeypatch.setattr(runs, "reconcile_lock", lambda *_a, **_k: runs.read_lock(store))
         monkeypatch.setattr(runs, "release_lock", lambda *_a, **_k: False)
-        assert runs.unlock(store, Sfn("ABORTED"), now=NOW) == {
+        assert runs.unlock(store, Sfn("ABORTED"), identity=_ADMIN, now=NOW) == {
             "released": False,
             "holder_run_id": "r1",
         }
@@ -338,12 +339,15 @@ class TestReconcileLockAndUnlock:
 
     def test_unlock_releases_a_succeeded_execution_that_never_finalized(self, store: Store) -> None:
         _started(store)
-        assert runs.unlock(store, Sfn("SUCCEEDED"), now=NOW)["released"] is True
+        assert runs.unlock(store, Sfn("SUCCEEDED"), identity=_ADMIN, now=NOW)["released"] is True
         assert runs.read_lock(store) is None
         assert runs.require_run(store, "r1").status == "failed"
 
     def test_unlock_with_no_lock_is_a_no_op(self, store: Store) -> None:
-        assert runs.unlock(store, Sfn(), now=NOW) == {"released": False, "holder_run_id": None}
+        assert runs.unlock(store, Sfn(), identity=_ADMIN, now=NOW) == {
+            "released": False,
+            "holder_run_id": None,
+        }
 
 
 class TestDailyLiveCap:

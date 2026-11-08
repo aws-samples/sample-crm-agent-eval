@@ -52,7 +52,7 @@ const EXPECTED_ENVELOPES: Readonly<Record<string, readonly string[]>> = {
   list_audit_records: ["audit_records", "next_cursor"],
   list_proposals: ["next_cursor", "proposals"],
   log_activity: ["activity", "opportunity"],
-  pipeline_aggregate: ["forecast_by_close_date", "stage_funnel", "value_rollup"],
+  pipeline_aggregate: ["forecast_by_close_date", "stage_funnel", "truncated", "value_rollup"],
   rebase_proposal: ["proposal"],
   reject_proposal: ["proposal"],
   revert_audit_record: ["audit_record"],
@@ -138,10 +138,11 @@ describe("wire response shapes (derived from crm.handlers, not restated)", () =>
     expect(shapes.get_contact).toEqual(["contact"]);
   });
 
-  it("pipeline_aggregate: the rollups are the three keys the handler returns", () => {
+  it("pipeline_aggregate: the three rollups plus the truncation flag the handler returns", () => {
     expect(shapes.pipeline_aggregate).toEqual([
       "forecast_by_close_date",
       "stage_funnel",
+      "truncated",
       "value_rollup",
     ]);
   });

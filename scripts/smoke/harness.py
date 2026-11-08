@@ -307,9 +307,40 @@ def error_code(exc: BaseException) -> str:
     return code if isinstance(code, str) else ""
 
 
+def key_policy_for_simulation(policy_text: str, key_arn: str) -> str:
+    """Return a KMS key policy with every `Resource` of `"*"` rewritten to `key_arn`.
+
+    A key policy must name its resource `"*"`, which `iam:SimulatePrincipalPolicy` rejects as a
+    `ResourcePolicy` resource. A string `"*"` and each `"*"` element of a list become `key_arn`;
+    every other resource, and `NotResource`, is left as written.
+    """
+    document = json.loads(policy_text)
+    statements = document.get("Statement")
+    for statement in statements if isinstance(statements, list) else [statements]:
+        if not isinstance(statement, dict):
+            continue
+        resource = statement.get("Resource")
+        if resource == "*":
+            statement["Resource"] = key_arn
+        elif isinstance(resource, list):
+            statement["Resource"] = [key_arn if item == "*" else item for item in resource]
+    return json.dumps(document)
+
+
 def is_timeout(exc: BaseException) -> bool:
-    """Whether `exc` means no answer came back in time, rather than an answer we did not like."""
-    return type(exc).__name__ in _TIMEOUT_EXCEPTION_NAMES
+    """Whether `exc` means no answer came back in time, rather than an answer we did not like.
+
+    Also true when one of those transport errors is in `exc`'s cause chain, as when the store layer
+    re-raises it as a retryable taxonomy error.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if type(current).__name__ in _TIMEOUT_EXCEPTION_NAMES:
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -122,11 +122,52 @@ class ToolDefinition:
         }
 
 
+#: Longest value a long free-text field (:data:`LONG_TEXT_FIELDS`) accepts, in characters.
+LONG_TEXT_MAX_LENGTH: Final[int] = 4000
+
+#: Longest value any other free-text string accepts, in characters.
+TEXT_MAX_LENGTH: Final[int] = 256
+
+#: Longest pagination cursor accepted, in characters.
+CURSOR_MAX_LENGTH: Final[int] = 4000
+
+#: Longest ``revert_audit_record`` reason accepted; equals the limit :func:`crm.audit.revert` enforces.
+REVERT_REASON_MAX_LENGTH: Final[int] = 1024
+
+#: Field and argument names capped at :data:`LONG_TEXT_MAX_LENGTH`.
+LONG_TEXT_FIELDS: Final[frozenset[str]] = frozenset({"description", "notes", "body", "reason"})
+
+
+def max_length_for(name: str) -> int:
+    """Return the ``maxLength`` a free-text field or argument named ``name`` carries."""
+    if name in LONG_TEXT_FIELDS:
+        return LONG_TEXT_MAX_LENGTH
+    if name == "cursor":
+        return CURSOR_MAX_LENGTH
+    return TEXT_MAX_LENGTH
+
+
+def _length_capped(name: str, prop: Any) -> Any:
+    """Return ``prop`` with ``maxLength`` added when it is a free-text string without one."""
+    if (
+        not isinstance(prop, dict)
+        or prop.get("type") != "string"
+        or "enum" in prop
+        or "maxLength" in prop
+    ):
+        return prop
+    return {**prop, "maxLength": max_length_for(name)}
+
+
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    """Build a closed object schema, the only shape a tool input may take."""
+    """Build a closed object schema, the only shape a tool input may take.
+
+    Every free-text string property without an explicit ``maxLength`` gets
+    :func:`max_length_for` its name.
+    """
     return {
         "type": "object",
-        "properties": properties,
+        "properties": {name: _length_capped(name, prop) for name, prop in properties.items()},
         "required": required,
         "additionalProperties": False,
     }
@@ -701,7 +742,11 @@ _PROPOSAL_AND_APPROVAL: Final[tuple[ToolDefinition, ...]] = (
             "record has already been reverted."
         ),
         input_schema=_schema(
-            {"audit_id": _STR, "reason": _OPT_STR, "transaction_key": _TXN},
+            {
+                "audit_id": _STR,
+                "reason": {**_OPT_STR, "maxLength": REVERT_REASON_MAX_LENGTH},
+                "transaction_key": _TXN,
+            },
             ["audit_id", "transaction_key"],
         ),
         risk="approval",

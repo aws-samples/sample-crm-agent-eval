@@ -313,6 +313,12 @@ _AWS_CODE_MAP: Final[dict[str, tuple[_ErrorFactory, str]]] = {
         "The service is not configured to perform this operation.",
     ),
     "ExpiredTokenException": (AuthenticationFailed, "The session has expired. Sign in again."),
+    "ThrottlingException": (ServiceBusy, "The service is busy. Retry shortly."),
+    "KMSInternalException": (ServiceBusy, "The service is busy. Retry shortly."),
+    "DependencyTimeoutException": (ServiceBusy, "The service is busy. Retry shortly."),
+    "DisabledException": (CrmError, "The request could not be completed."),
+    "KMSInvalidStateException": (CrmError, "The request could not be completed."),
+    "NotFoundException": (CrmError, "The request could not be completed."),
 }
 
 

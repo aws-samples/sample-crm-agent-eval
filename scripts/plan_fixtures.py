@@ -42,7 +42,7 @@ DEFAULT_OUT_DIR: Final[Path] = REPO_ROOT / "results" / "plan-fixtures"
 
 #: Top-level fields kept out of the base so no scanner reads it as a plan; restored by `build`.
 TERRAFORM_VERSION: Final[str] = "1.17.0"
-TIMESTAMP: Final[str] = "2026-10-23T03:32:29Z"
+TIMESTAMP: Final[str] = "2026-11-07T02:10:46Z"
 
 HEADER_KEYS: Final[frozenset[str]] = frozenset(
     {"_fixture_provenance", "format_version", "configuration", "variables"}

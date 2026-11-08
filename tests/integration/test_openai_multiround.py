@@ -21,13 +21,23 @@ from agents.runtime_entrypoint import RuntimeInvocation, decode_invocation
 from providers.capabilities import load_capability_matrix
 from providers.openai_adapter import OpenAIAdapter
 from providers.tier_tuning import WIRE_SCHEMA_VERSION
+from tests.conftest import TEST_API_CLIENT_ID
 
 _CALL_ID = "call_abc123"
 
 _APIGW_PAYLOAD: dict[str, Any] = {
     "requestContext": {
         "requestId": "req-openai-1",
-        "authorizer": {"jwt": {"claims": {"custom:rep_id": "rep-1", "custom:book": "acc-1"}}},
+        "authorizer": {
+            "jwt": {
+                "claims": {
+                    "custom:rep_id": "rep-1",
+                    "custom:book": "acc-1",
+                    "token_use": "id",
+                    "aud": TEST_API_CLIENT_ID,
+                }
+            }
+        },
     },
     "prompt": "Tell me about Acme.",
     "session_id": "sess-openai-multiround",

@@ -41,6 +41,7 @@ from crm.errors import (
 from crm.store import keys
 from crm.store.store import Store
 from eval.harness import EvalMode
+from eval.matrix import tier_comparison_table
 from eval.sweep_units import DEFAULT_ARM_EFFORT
 
 _logger = logging.getLogger(__name__)
@@ -215,7 +216,9 @@ class RunRecord:
     def to_payload(self) -> dict[str, Any]:
         """The wire shape the Evals page reads; absent optional fields are omitted.
 
-        The execution ARN is not emitted.
+        The execution ARN is not emitted. ``tier_comparison_table`` is the
+        :func:`eval.matrix.tier_comparison_table` of the matrix's ``tier_comparison`` block when
+        the block is a mapping; a block that cannot be formatted is omitted and logged.
         """
         payload: dict[str, Any] = {
             "run_id": self.run_id,
@@ -243,10 +246,41 @@ class RunRecord:
             "teardown_status": self.teardown_status,
             "error": self.failure_summary,
             "matrix": self.matrix_report,
+            "tier_comparison_table": _payload_tier_table(self.run_id, self.matrix_report),
             "artifacts": self.artifact_links,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
         return payload
+
+
+#: Longest refusal text an ``eval_tier_table_unavailable`` line carries.
+_MAX_TIER_TABLE_REASON: Final[int] = 300
+
+
+def _payload_tier_table(
+    run_id: str, matrix_report: Mapping[str, Any] | None
+) -> dict[str, object] | None:
+    """The display table of ``matrix_report``'s tier comparison block, or ``None``.
+
+    A block :func:`eval.matrix.tier_comparison_table` refuses as malformed (``ValueError``) is
+    omitted and logged with the refusal's text; any other exception propagates.
+    """
+    summary = matrix_report.get("tier_comparison") if matrix_report is not None else None
+    if not isinstance(summary, Mapping):
+        return None
+    try:
+        return tier_comparison_table(summary)
+    except ValueError as exc:
+        _logger.warning(
+            json.dumps(
+                {
+                    "event": "eval_tier_table_unavailable",
+                    "correlation_id": run_id,
+                    "reason": str(exc)[:_MAX_TIER_TABLE_REASON],
+                }
+            )
+        )
+        return None
 
 
 def _now(now: datetime | None) -> datetime:
@@ -1005,9 +1039,17 @@ def reconcile_lock(
 
 
 def unlock(
-    store: Store, sfn: Any, *, now: datetime | None = None, state_machine_arn: str | None = None
+    store: Store,
+    sfn: Any,
+    *,
+    identity: Identity,
+    now: datetime | None = None,
+    state_machine_arn: str | None = None,
 ) -> dict[str, object]:
     """Release the lock unless its holder's execution is running or about to start (admin action).
+
+    A release by ``identity`` logs one ``eval_run_unlocked`` line naming its ``rep_id``; a holder
+    failed by the release carries a failure summary naming that rep.
 
     Returns:
         ``{"released": bool, "holder_run_id": str | None}``; ``released`` is ``False`` when no lock
@@ -1022,6 +1064,7 @@ def unlock(
         return {"released": False, "holder_run_id": None}
     remaining = reconcile_lock(store, sfn, now=resolved_now, state_machine_arn=state_machine_arn)
     if remaining is None:
+        _log_unlocked(identity, lock.holder_run_id)
         return {"released": True, "holder_run_id": lock.holder_run_id}
     holder = read_run(store, remaining.holder_run_id)
     arn = holder.execution_arn if holder is not None else remaining.execution_arn
@@ -1036,14 +1079,29 @@ def unlock(
             detail=f"execution {arn} is RUNNING",
         )
     released = release_lock(store, run_id=remaining.holder_run_id)
+    if released:
+        _log_unlocked(identity, remaining.holder_run_id)
     if released and holder is not None and not holder.is_terminal:
         mark_failed(
             store,
             run_id=holder.run_id,
-            failure_summary="An administrator released the sweep lock.",
+            failure_summary=f"An administrator (rep {identity.rep_id}) released the sweep lock.",
             now=resolved_now,
         )
     return {"released": released, "holder_run_id": remaining.holder_run_id}
+
+
+def _log_unlocked(identity: Identity, holder_run_id: str) -> None:
+    """Log one structured line attributing a sweep-lock release to the releasing rep."""
+    _logger.warning(
+        json.dumps(
+            {
+                "event": "eval_run_unlocked",
+                "rep_id": identity.rep_id,
+                "correlation_id": holder_run_id,
+            }
+        )
+    )
 
 
 # -- history -------------------------------------------------------------------------------------

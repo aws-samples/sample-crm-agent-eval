@@ -28,6 +28,8 @@ import {
   handler,
   headerValue,
   httpResponseSink,
+  PROMPT_MAX_CHARS,
+  PROMPT_TOO_LONG_MESSAGE,
   SESSION_ID_MAX_LENGTH,
   SESSION_ID_MIN_LENGTH,
   SESSION_ID_RANGE_MESSAGE,
@@ -1168,6 +1170,12 @@ describe("every exit path emits exactly one turn log", () => {
       () => depsFor(streamOf()),
     ],
     [
+      "400 for a prompt over the cap",
+      "prompt_too_long",
+      () => eventFor(turnBody({ prompt: "x".repeat(PROMPT_MAX_CHARS + 1) })),
+      () => depsFor(streamOf()),
+    ],
+    [
       "502 when the Runtime cannot be reached",
       "runtime_unavailable",
       () => eventFor(turnBody()),
@@ -1818,5 +1826,39 @@ describe("the runtimeSessionId bound", () => {
 
     expect(sink.statusCode).toBe(400);
     expect(sink.body).not.toContain(SESSION_ID_RANGE_MESSAGE);
+  });
+});
+
+describe("the prompt cap", () => {
+  it("rejects a prompt one character over the cap with a 400, before any Runtime call", async () => {
+    const sink = new RecordingSink();
+    const deps = depsFor(streamOf());
+
+    await streamTurn(eventFor(turnBody({ prompt: "x".repeat(PROMPT_MAX_CHARS + 1) })), sink, deps);
+
+    expect(sink.statusCode).toBe(400);
+    expect(JSON.parse(sink.body)).toEqual({ message: PROMPT_TOO_LONG_MESSAGE });
+    expect(deps.requests).toHaveLength(0);
+  });
+
+  it("forwards a prompt of exactly the cap, counted in code points", async () => {
+    const sink = new RecordingSink();
+    const deps = depsFor(streamOf(runtimeFrame({ kind: "completed", text: "done" })));
+    const prompt = "\u{1F600}".repeat(PROMPT_MAX_CHARS);
+
+    await streamTurn(eventFor(turnBody({ prompt })), sink, deps);
+
+    expect(sink.statusCode).toBe(200);
+    expect(deps.requests).toHaveLength(1);
+    expect(deps.requests[0]?.prompt).toBe(prompt);
+  });
+
+  it("never echoes the rejected prompt in the response", async () => {
+    const sink = new RecordingSink();
+    const prompt = "secret-" + "x".repeat(PROMPT_MAX_CHARS);
+
+    await streamTurn(eventFor(turnBody({ prompt })), sink, depsFor(streamOf()));
+
+    expect(sink.body).not.toContain("secret-");
   });
 });

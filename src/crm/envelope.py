@@ -6,7 +6,10 @@ The three channels are:
 ``apigw``
     API Gateway with a Cognito authorizer. Claims arrive already validated, either under
     ``requestContext.authorizer.claims`` (REST ``COGNITO_USER_POOLS`` authorizer) or
-    ``requestContext.authorizer.jwt.claims`` (HTTP API payload-v2 JWT authorizer).
+    ``requestContext.authorizer.jwt.claims`` (HTTP API payload-v2 JWT authorizer). The token's
+    app client (``aud`` of an ID token, ``client_id`` of an access token) must be listed in the
+    comma-separated SSM String parameter named by ``CRM_API_ALLOWED_CLIENT_IDS_PARAMETER``, read
+    once per process.
 
 ``gateway``
     AgentCore Gateway with a Lambda target. The identity is the one the Gateway REQUEST
@@ -23,11 +26,12 @@ There is no default: a request whose identity cannot be established raises
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import os
+from collections.abc import Callable, Mapping
 from typing import Any, Final
 
 from crm.authz import DEMO_TENANT, Identity, IdentitySource, PrincipalType
-from crm.errors import AuthenticationFailed
+from crm.errors import AuthenticationFailed, CrmError, wrap_aws_error
 
 #: The supported public surface of this module; `decode_identity` is the only way to obtain an
 #: `Identity` from untrusted input.
@@ -66,6 +70,19 @@ CLAIM_GROUPS: Final[str] = "cognito:groups"
 
 #: Optional top-level key of the agent identity block naming the forwarded principal type.
 AGENT_PRINCIPAL_TYPE_KEY: Final[str] = "principal_type"
+
+#: Environment variable naming the SSM String parameter that lists, comma-separated, the app
+#: client ids admitted on the ``apigw`` channel.
+API_ALLOWED_CLIENT_IDS_PARAMETER_ENV: Final[str] = "CRM_API_ALLOWED_CLIENT_IDS_PARAMETER"
+
+#: Reads one SSM String parameter's value by name; raises the SDK's exception on failure.
+ParameterReader = Callable[[str], str]
+
+_SSM_OPERATION: Final[str] = "ssm:GetParameter(api_allowed_client_ids)"
+_allowed_client_ids_cache: frozenset[str] | None = None
+
+#: The claim naming the token's app client, per Cognito ``token_use``.
+_CLIENT_CLAIM_BY_TOKEN_USE: Final[Mapping[str, str]] = {"id": "aud", "access": "client_id"}
 
 
 def split_book(raw: object) -> frozenset[str]:
@@ -195,12 +212,91 @@ def identity_from_claims(
         ) from exc
 
 
+def _ssm_parameter_reader(name: str) -> str:
+    """Return the value of the SSM String parameter `name`, read with a short-timeout client."""
+    import boto3
+    from botocore.config import Config
+
+    client = boto3.client(
+        "ssm",
+        config=Config(
+            connect_timeout=2,
+            read_timeout=2,
+            retries={"mode": "standard", "total_max_attempts": 3},
+        ),
+    )
+    return str(client.get_parameter(Name=name)["Parameter"]["Value"])
+
+
+_parameter_reader: ParameterReader = _ssm_parameter_reader
+
+
+def _allowed_client_ids() -> frozenset[str]:
+    """Return the admitted ``apigw`` app client ids, read once per process and then cached.
+
+    Raises:
+        CrmError: The parameter variable is unset, the read fails (mapped by
+            :func:`~crm.errors.wrap_aws_error`, with any 4xx member raised as a 5xx instead), or
+            the value lists no client id. Only a non-empty value is cached; a failed read or an
+            empty value is read again on the next call.
+    """
+    global _allowed_client_ids_cache
+    if _allowed_client_ids_cache is not None:
+        allowed = _allowed_client_ids_cache
+    else:
+        name = os.environ.get(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, "").strip()
+        if not name:
+            raise CrmError(
+                "The request could not be completed.",
+                detail=f"{API_ALLOWED_CLIENT_IDS_PARAMETER_ENV} is unset",
+            )
+        try:
+            raw = _parameter_reader(name)
+        except Exception as exc:
+            error = wrap_aws_error(exc, operation=_SSM_OPERATION)
+            if error.http_status < 500:
+                error = CrmError("The request could not be completed.", detail=error.detail)
+            error.detail = f"parameter={name} {error.detail}"
+            raise error from exc
+        allowed = frozenset(part.strip() for part in raw.split(",") if part.strip())
+        if allowed:
+            _allowed_client_ids_cache = allowed
+    if not allowed:
+        raise CrmError(
+            "The request could not be completed.",
+            detail="the API client allowlist parameter lists no client id",
+        )
+    return allowed
+
+
+def _require_allowed_client(claims: Mapping[str, Any]) -> None:
+    """Refuse an ``apigw`` token not issued to an admitted app client.
+
+    An ID token (``token_use=id``) is matched on ``aud``, an access token (``token_use=access``) on
+    ``client_id``, against :func:`_allowed_client_ids`. An absent or unrecognised ``token_use``,
+    and an absent or unlisted client claim, raise :class:`~crm.errors.AuthenticationFailed`; an
+    unavailable or empty allowlist raises a 5xx :class:`~crm.errors.CrmError`.
+    """
+    token_use = claims.get("token_use")
+    client_claim = _CLIENT_CLAIM_BY_TOKEN_USE.get(token_use) if isinstance(token_use, str) else None
+    if client_claim is None:
+        raise AuthenticationFailed(
+            "Authentication is required.", detail="token carries no recognised token_use"
+        )
+    client_id = claims.get(client_claim)
+    if not isinstance(client_id, str) or client_id not in _allowed_client_ids():
+        raise AuthenticationFailed(
+            "Authentication is required.",
+            detail=f"token {client_claim} is not an admitted app client",
+        )
+
+
 def _from_api_gateway(event: dict[str, Any]) -> Identity:
     """Decode claims placed by the API Gateway Cognito authorizer, in either nesting.
 
     Reads ``authorizer.jwt.claims`` (HTTP API payload v2) or ``authorizer.claims`` (REST), and
-    ``cognito:groups`` via :func:`split_groups`. Absent or non-dict claims raise
-    :class:`~crm.errors.AuthenticationFailed`.
+    ``cognito:groups`` via :func:`split_groups`. Absent or non-dict claims, and a token whose app
+    client :func:`_require_allowed_client` refuses, raise :class:`~crm.errors.AuthenticationFailed`.
     """
     request_context = event.get("requestContext")
     if not isinstance(request_context, dict):
@@ -220,6 +316,7 @@ def _from_api_gateway(event: dict[str, Any]) -> Identity:
             "Authentication is required.", detail="authorizer block carries no claims"
         )
 
+    _require_allowed_client(claims)
     return identity_from_claims(
         claims,
         source="apigw",

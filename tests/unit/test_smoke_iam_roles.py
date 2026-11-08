@@ -96,6 +96,16 @@ _FIXTURE_TERRAFORM_GRANTS: dict[str, set[tuple[str, str]]] = {
 }
 
 
+#: The real supplementary rows, kept before the autouse fixture below replaces them.
+_REAL_SUPPLEMENTARY_CHECKS: Final = iam_roles.supplementary_checks
+
+
+@pytest.fixture(autouse=True)
+def _no_supplementary_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Matrix tests stub only the IAM client; the supplementary rows are tested on their own below."""
+    monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter(()))
+
+
 @pytest.fixture(autouse=True)
 def _fixture_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -1336,7 +1346,12 @@ def test_expected_check_count_is_derived_from_the_real_files_not_hardcoded(
     ), (conditioned_rows, sweep_rows)
     assert tool_rows > 0 and sweep_rows > 0
     assert expectation.minimum == (
-        roles * triples + non_own_rows + scope_rows + conditioned_rows + roles * 4
+        roles * triples
+        + non_own_rows
+        + scope_rows
+        + conditioned_rows
+        + roles * 4
+        + iam_roles.SUPPLEMENTARY_ROW_COUNT
     )
     assert str(roles) in expectation.basis and str(triples) in expectation.basis
     assert f"{scope_rows} index_scope_denied" in expectation.basis
@@ -1366,8 +1381,13 @@ def test_the_floor_rejects_the_harness_s_own_single_synthesised_failure(
     assert str(expectation.minimum) in verdict.detail
 
 
-def test_a_complete_run_satisfies_its_own_floor() -> None:
+def test_a_complete_run_satisfies_its_own_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     """A complete run over the fixture matrix satisfies its own floor."""
+    supplementary = [
+        CheckResult(resource="s", check=f"supplementary_{n}", status="pass", detail="")
+        for n in range(iam_roles.SUPPLEMENTARY_ROW_COUNT)
+    ]
+    monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter(supplementary))
     clients = _StubbedClientSet()
     for role_function in _SORTED_FUNCTIONS:
         clients.add_role_for(role_function)
@@ -1625,7 +1645,7 @@ class TestCommentTextCannotMisDelimitAGrantValue:
         assert {name: len(pairs) for name, pairs in locals_grants.items()} == {
             "dynamodb_grants": 1,
             "eval_trigger_eval_runs_grants": 6,
-            "tool_dynamodb_grants": 33,
+            "tool_dynamodb_grants": 34,
         }
         assert len(iam_roles._terraform_tool_grants()) == len(ALL_TOOLS)
 
@@ -1955,6 +1975,7 @@ class TestIndexOnlyGrantReader:
             ("revert_audit_record", "opportunities", "dynamodb:Query"): "gsi_account",
             ("revert_audit_record", "activities", "dynamodb:Query"): "gsi_account",
             ("revert_audit_record", "notes", "dynamodb:Query"): "gsi_opportunity",
+            ("approve_proposal", "opportunities", "dynamodb:Query"): "gsi_account",
         }
         assert _real_terraform_index_only_grants() == expected
         # These index grants are gone.
@@ -4108,6 +4129,7 @@ class TestToolScopedQueryIndexes:
             ("revert_audit_record", "opportunities"): ("gsi_account",),
             ("revert_audit_record", "activities"): ("gsi_account", "gsi_opportunity"),
             ("revert_audit_record", "notes"): ("gsi_opportunity",),
+            ("approve_proposal", "opportunities"): ("gsi_account",),
         }
 
     def test_an_absent_block_is_no_scoping(self, tmp_path: Path) -> None:
@@ -4528,3 +4550,295 @@ class TestSelectConditionReader:
     def test_an_unreadable_select_condition_raises(self, select: str) -> None:
         with pytest.raises(iam_roles.UnreadableTerraformGrantsError):
             self._grants(select)
+
+
+# ---------------------------------------------------------------------------
+# Supplementary rows: non-API roles refused the cursor key and the allowlist parameter, and
+# approve_proposal's opportunities Query confined to gsi_account.
+# ---------------------------------------------------------------------------
+
+_SUP_ACCOUNT: Final = "123456789012"
+_SUP_KEY_ARN: Final = "arn:aws:kms:us-east-1:123456789012:key/0000aaaa-1111-2222-3333-4444bbbb5555"
+_SUP_PARAMETER: Final = "/crm-agent-eval/api/allowed-client-ids"
+_SUP_PARAMETER_ARN: Final = f"arn:aws:ssm:us-east-1:{_SUP_ACCOUNT}:parameter{_SUP_PARAMETER}"
+_SUP_TABLE: Final = "crm-agent-evalopportunities"
+_SUP_TABLE_ARN: Final = f"arn:aws:dynamodb:us-east-1:{_SUP_ACCOUNT}:table/{_SUP_TABLE}"
+_SUP_INDEXES: Final = ("gsi_account", "gsi_tenant", "gsi_stage")
+
+
+def _sup_role_arn(name: str) -> str:
+    return f"arn:aws:iam::{_SUP_ACCOUNT}:role/{name}"
+
+
+_SUP_APPROVE_ARN: Final = _sup_role_arn(iam_roles._role_name("approve_proposal"))
+
+#: (role ARN, action, resource ARN) triples the healthy fake allows; everything else is implicitDeny.
+_SUP_HEALTHY_ALLOWED: Final = frozenset(
+    {(_SUP_APPROVE_ARN, "dynamodb:Query", f"{_SUP_TABLE_ARN}/index/gsi_account")}
+)
+
+
+class _SupIam:
+    def __init__(self, allowed: frozenset[tuple[str, str, str]], roles: Sequence[str]) -> None:
+        self.allowed = allowed
+        self.roles = list(roles)
+        self.requests: list[dict[str, Any]] = []
+
+    def get_paginator(self, name: str) -> Any:
+        assert name == "list_roles"
+        roles = self.roles
+
+        class _Paginator:
+            def paginate(self) -> Any:
+                half = len(roles) // 2
+                for chunk in (roles[:half], roles[half:]):
+                    yield {"Roles": [{"RoleName": r, "Arn": _sup_role_arn(r)} for r in chunk]}
+
+        return _Paginator()
+
+    def simulate_principal_policy(self, **request: Any) -> dict[str, Any]:
+        self.requests.append(request)
+        triple = (request["PolicySourceArn"], request["ActionNames"][0], request["ResourceArns"][0])
+        decision = "allowed" if triple in self.allowed else "implicitDeny"
+        return {"EvaluationResults": [{"EvalDecision": decision, "MissingContextValues": []}]}
+
+
+class _SupLambda:
+    def __init__(self, env: dict[str, str]) -> None:
+        self.env = env
+
+    def get_function_configuration(self, FunctionName: str) -> dict[str, Any]:  # noqa: N803
+        assert FunctionName == iam_roles.CURSOR_ENV_FUNCTION
+        return {"Environment": {"Variables": dict(self.env)}}
+
+
+class _SupDynamo:
+    def __init__(self, indexes: Sequence[str]) -> None:
+        self.indexes = list(indexes)
+
+    def describe_table(self, TableName: str) -> dict[str, Any]:  # noqa: N803
+        assert TableName == _SUP_TABLE
+        return {"Table": {"GlobalSecondaryIndexes": [{"IndexName": n} for n in self.indexes]}}
+
+
+class _SupSts:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    def get_caller_identity(self) -> dict[str, str]:
+        if self.fail:
+            raise RuntimeError("no credentials")
+        return {"Account": _SUP_ACCOUNT}
+
+
+_SUP_ALL_ROLES: Final = (
+    *iam_roles.NON_API_ROLE_NAMES.values(),
+    iam_roles._role_name("approve_proposal"),
+    "crm-agent-eval-unrelated-role",
+)
+_SUP_ENV: Final = {
+    iam_roles.CURSOR_KEY_ENV: _SUP_KEY_ARN,
+    iam_roles.ALLOWLIST_PARAMETER_ENV: _SUP_PARAMETER,
+}
+
+
+def _sup_run(
+    *,
+    allowed: frozenset[tuple[str, str, str]] = _SUP_HEALTHY_ALLOWED,
+    roles: Sequence[str] = _SUP_ALL_ROLES,
+    env: dict[str, str] | None = None,
+    indexes: Sequence[str] = _SUP_INDEXES,
+    sts_fails: bool = False,
+) -> tuple[dict[str, Any], _SupIam]:
+    iam = _SupIam(allowed, roles)
+    ctx = context_for_test(
+        outputs={"dynamodb_table_names": {"opportunities": _SUP_TABLE}},
+        clients={
+            "iam": iam,
+            "lambda": _SupLambda(dict(_SUP_ENV) if env is None else env),
+            "dynamodb": _SupDynamo(indexes),
+            "sts": _SupSts(sts_fails),
+        },
+    )
+    results = list(_REAL_SUPPLEMENTARY_CHECKS(ctx))
+    assert len(results) == iam_roles.SUPPLEMENTARY_ROW_COUNT, [r.check for r in results]
+    rows = {r.check: r for r in results}
+    assert len(rows) == len(results), "duplicate supplementary row names"
+    return rows, iam
+
+
+def _failing(rows: dict[str, Any]) -> set[str]:
+    return {name for name, row in rows.items() if row.status != "pass"}
+
+
+def test_supplementary_rows_all_pass_on_a_healthy_deployment() -> None:
+    rows, _ = _sup_run()
+    assert _failing(rows) == set(), {n: r.detail for n, r in rows.items() if r.status != "pass"}
+    assert set(rows) == {
+        *(
+            f"{check}:{label}"
+            for label in iam_roles.NON_API_ROLE_NAMES
+            for check in (
+                "cursor_key_use_denied",
+                "allowlist_parameter_write_denied",
+                "allowlist_parameter_read_denied",
+            )
+        ),
+        "approve_query_gsi_account_allowed",
+        "approve_query_base_table_denied",
+        "approve_query_other_indexes_denied",
+        "approve_scan_denied",
+    }
+
+
+def _sup_named_role(label: str) -> str:
+    return _sup_role_arn(iam_roles.NON_API_ROLE_NAMES[label])
+
+
+@pytest.mark.parametrize(
+    ("extra_allowed", "expected_failure"),
+    [
+        (
+            (_sup_named_role("sweep_task"), "kms:Decrypt", _SUP_KEY_ARN),
+            "cursor_key_use_denied:sweep_task",
+        ),
+        (
+            (_sup_named_role("pre_token_generation"), "kms:Encrypt", _SUP_KEY_ARN),
+            "cursor_key_use_denied:pre_token_generation",
+        ),
+        (
+            (_sup_named_role("codebuild"), "ssm:PutParameter", _SUP_PARAMETER_ARN),
+            "allowlist_parameter_write_denied:codebuild",
+        ),
+        (
+            (_sup_named_role("sweep_task"), "ssm:LabelParameterVersion", _SUP_PARAMETER_ARN),
+            "allowlist_parameter_write_denied:sweep_task",
+        ),
+        (
+            (_sup_named_role("pre_token_generation"), "ssm:GetParameter", _SUP_PARAMETER_ARN),
+            "allowlist_parameter_read_denied:pre_token_generation",
+        ),
+        ((_SUP_APPROVE_ARN, "dynamodb:Query", _SUP_TABLE_ARN), "approve_query_base_table_denied"),
+        (
+            (_SUP_APPROVE_ARN, "dynamodb:Query", f"{_SUP_TABLE_ARN}/index/gsi_stage"),
+            "approve_query_other_indexes_denied",
+        ),
+        (
+            (_SUP_APPROVE_ARN, "dynamodb:Scan", f"{_SUP_TABLE_ARN}/index/gsi_account"),
+            "approve_scan_denied",
+        ),
+        ((_SUP_APPROVE_ARN, "dynamodb:Scan", _SUP_TABLE_ARN), "approve_scan_denied"),
+    ],
+)
+def test_each_over_grant_fails_exactly_its_own_row(
+    extra_allowed: tuple[str, str, str], expected_failure: str
+) -> None:
+    rows, _ = _sup_run(allowed=_SUP_HEALTHY_ALLOWED | {extra_allowed})
+    assert _failing(rows) == {expected_failure}
+
+
+def test_a_refused_gsi_account_query_fails_only_the_allowed_row() -> None:
+    rows, _ = _sup_run(allowed=frozenset())
+    assert _failing(rows) == {"approve_query_gsi_account_allowed"}
+
+
+def test_the_cursor_simulation_sends_the_valid_encryption_context() -> None:
+    """A refusal caused by a missing context would prove nothing, so the valid one is sent."""
+    _, iam = _sup_run()
+    kms = [r for r in iam.requests if r["ActionNames"][0].startswith("kms:")]
+    assert kms, "no cursor-key simulation was made"
+    for request in kms:
+        context = {e["ContextKeyName"]: e["ContextKeyValues"] for e in request["ContextEntries"]}
+        assert context["kms:EncryptionContext:purpose"] == ["crm-cursor"]
+        assert request["ResourceArns"] == [_SUP_KEY_ARN]
+
+
+def test_the_parameter_arn_is_built_from_the_functions_env_value() -> None:
+    _, iam = _sup_run()
+    ssm = {r["ResourceArns"][0] for r in iam.requests if r["ActionNames"][0].startswith("ssm:")}
+    assert ssm == {_SUP_PARAMETER_ARN}
+
+
+def test_an_unknown_simulation_decision_is_never_a_pass() -> None:
+    class _Broken(_SupIam):
+        def simulate_principal_policy(self, **request: Any) -> dict[str, Any]:
+            return {"EvaluationResults": []}
+
+    iam = _Broken(_SUP_HEALTHY_ALLOWED, _SUP_ALL_ROLES)
+    ctx = context_for_test(
+        outputs={"dynamodb_table_names": {"opportunities": _SUP_TABLE}},
+        clients={
+            "iam": iam,
+            "lambda": _SupLambda(dict(_SUP_ENV)),
+            "dynamodb": _SupDynamo(_SUP_INDEXES),
+            "sts": _SupSts(),
+        },
+    )
+    results = list(_REAL_SUPPLEMENTARY_CHECKS(ctx))
+    assert results and all(r.status == "fail" for r in results)
+
+
+def test_a_role_missing_from_list_roles_fails_its_three_rows_only() -> None:
+    absent = iam_roles.NON_API_ROLE_NAMES["codebuild"]
+    rows, _ = _sup_run(roles=[r for r in _SUP_ALL_ROLES if r != absent])
+    assert _failing(rows) == {
+        "cursor_key_use_denied:codebuild",
+        "allowlist_parameter_write_denied:codebuild",
+        "allowlist_parameter_read_denied:codebuild",
+    }
+    assert absent in rows["cursor_key_use_denied:codebuild"].detail
+
+
+def test_a_missing_approve_role_fails_the_four_approve_rows() -> None:
+    absent = iam_roles._role_name("approve_proposal")
+    rows, _ = _sup_run(roles=[r for r in _SUP_ALL_ROLES if r != absent])
+    assert _failing(rows) == {
+        "approve_query_gsi_account_allowed",
+        "approve_query_base_table_denied",
+        "approve_query_other_indexes_denied",
+        "approve_scan_denied",
+    }
+
+
+def test_a_missing_cursor_key_env_fails_only_the_cursor_rows() -> None:
+    env = {iam_roles.ALLOWLIST_PARAMETER_ENV: _SUP_PARAMETER}
+    rows, _ = _sup_run(env=env)
+    assert _failing(rows) == {
+        f"cursor_key_use_denied:{label}" for label in iam_roles.NON_API_ROLE_NAMES
+    }
+    assert iam_roles.CURSOR_KEY_ENV in rows["cursor_key_use_denied:sweep_task"].detail
+
+
+def test_a_missing_parameter_env_fails_only_the_parameter_rows() -> None:
+    rows, _ = _sup_run(env={iam_roles.CURSOR_KEY_ENV: _SUP_KEY_ARN})
+    assert _failing(rows) == {
+        f"{check}:{label}"
+        for label in iam_roles.NON_API_ROLE_NAMES
+        for check in ("allowlist_parameter_write_denied", "allowlist_parameter_read_denied")
+    }
+
+
+def test_a_table_without_gsi_account_fails_every_approve_row() -> None:
+    rows, _ = _sup_run(indexes=("gsi_tenant",))
+    assert _failing(rows) == {
+        "approve_query_gsi_account_allowed",
+        "approve_query_base_table_denied",
+        "approve_query_other_indexes_denied",
+        "approve_scan_denied",
+    }
+
+
+def test_an_identity_failure_fails_every_row() -> None:
+    rows, _ = _sup_run(sts_fails=True)
+    assert _failing(rows) == set(rows)
+
+
+def test_checks_appends_the_supplementary_rows_after_the_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = CheckResult(resource="m", check="matrix_row", status="pass", detail="")
+    extra = CheckResult(resource="s", check="supplementary_row", status="pass", detail="")
+    monkeypatch.setattr(iam_roles, "_role_matrix_checks", lambda _ctx: iter([marker]))
+    monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter([extra]))
+    ctx = context_for_test(clients={}, outputs={})
+    assert [r.check for r in iam_roles.checks(ctx)] == ["matrix_row", "supplementary_row"]

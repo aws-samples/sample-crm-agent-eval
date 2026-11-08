@@ -3,7 +3,8 @@
 
 Before :func:`crm.proposals.submit_proposal` reads or writes anything, this handler checks scope,
 applies the cascade checks in :mod:`crm.handlers.cascade_rules` to a delete, and refuses an
-opportunity update proposing an impermissible stage transition.
+opportunity update proposing an impermissible stage transition or a ``primary_contact_id`` outside
+the opportunity's account.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from crm.authz import Identity, require_record_scope
+from crm.domain.references import require_primary_contact_in_account
 from crm.domain.stages import PERMITTED_TRANSITION_KINDS, classify_requested_transition
 from crm.errors import NotFound, ValidationFailed, bounded_detail_value
 from crm.handlers._common import build_handler, idempotent_id, now_iso
@@ -58,6 +60,20 @@ def _submit_proposal(store: Store, identity: Identity, arguments: dict[str, Any]
             )
         elif target_table == "contacts":
             reject_contact_delete_if_referenced(store, tenant=identity.tenant, contact_id=target_id)
+
+    if (
+        operation == "update"
+        and target_table == "opportunities"
+        and isinstance(after_payload, dict)
+        and "primary_contact_id" in after_payload
+    ):
+        require_primary_contact_in_account(
+            store,
+            identity,
+            str(current.get("account_id")),
+            after_payload["primary_contact_id"],
+            source="after_payload.primary_contact_id",
+        )
 
     if (
         operation == "update"

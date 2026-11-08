@@ -5,8 +5,10 @@ Both :mod:`providers.anthropic_adapter` and :mod:`providers.openai_adapter` buil
 from this module and nothing else:
 
 * :func:`build_http_client` returns the ``httpx2.AsyncClient`` handed to the SDK as ``http_client``,
-  with the per-phase timeouts (5s connect; 120s for each read, write and pool wait) and the
-  request/response hooks that record every transport attempt the SDK makes, retries included.
+  with the per-phase timeouts (5s connect; 120s for each read, write and pool wait), the
+  request/response hooks that record every transport attempt the SDK makes, retries included, and
+  ``trust_env=False``, so no proxy or CA-bundle (``SSL_CERT_FILE``/``SSL_CERT_DIR``) environment
+  variable reaches it.
 * :func:`model_call_deadline` bounds one whole model call (the open, every SDK retry, and every
   stream chunk) to a 120s wall-clock budget. The per-phase timeouts are a second bound and
   do not limit a whole call.
@@ -44,14 +46,15 @@ deadline therefore bounds each await rather than enclosing the stream. The adapt
 The recorder object stays readable after its block closes. The SDK stream must be closed on every
 exit path, deadline expiry included.
 
-Importing this module sets the ``anthropic``, ``openai``, ``httpx2`` and ``httpcore2`` loggers to
-WARNING, so request and response bodies are never logged. Neither vendor package is imported here.
+Importing this module sets every logger in :data:`SDK_LOGGERS` (the two vendor SDKs, their HTTP
+stack, and the ``boto3``/``botocore`` family) to WARNING, so request and response bodies are never
+logged. ``SDK_LOGGERS`` and ``quiet_sdk_loggers`` are re-exported from :mod:`providers.sdk_loggers`,
+which code that must not import ``httpx2`` uses directly. Neither vendor package is imported here.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import re
 import time
@@ -65,6 +68,8 @@ import httpx2
 
 from crm.errors import ValidationFailed
 from providers.base import PROVIDER_TIMEOUT_SECONDS, RetriedAttempt
+from providers.sdk_loggers import SDK_LOGGERS as SDK_LOGGERS
+from providers.sdk_loggers import quiet_sdk_loggers as quiet_sdk_loggers
 
 #: Per-phase timeouts for every SDK client: 5s connect, and 120s for each read, write and pool
 #: wait. They bound one phase, not a whole call; :func:`model_call_deadline` bounds the call.
@@ -86,10 +91,6 @@ FORBIDDEN_ENV_VARS: Final[tuple[str, ...]] = (
     "AWS_BEDROCK_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
 )
-
-#: Loggers held at WARNING so no SDK or transport debug record (which carries URLs and bodies) is
-#: ever emitted.
-SDK_LOGGERS: Final[tuple[str, ...]] = ("anthropic", "openai", "httpx2", "httpcore2")
 
 RETRY_COUNT_HEADER: Final[str] = "x-stainless-retry-count"
 
@@ -215,8 +216,8 @@ def build_http_client(
         clock: The monotonic clock stamped on each attempt; injectable for latency tests.
 
     Returns:
-        A client with :data:`REQUEST_TIMEOUT` whose request hook appends an :class:`AttemptRecord`
-        to the bound recorder and whose response hook fills in its status. A hook firing with no
+        A client with :data:`REQUEST_TIMEOUT` and ``trust_env=False`` whose request hook appends an
+        :class:`AttemptRecord` to the bound recorder and whose response hook fills in its status. A hook firing with no
         recorder bound raises :class:`RecorderNotBoundError`. It sends no default ``Connection``
         header, so SigV4 never signs one.
     """
@@ -238,6 +239,7 @@ def build_http_client(
     client = _RecordingAsyncClient(
         timeout=REQUEST_TIMEOUT,
         transport=transport,
+        trust_env=False,
         event_hooks={"request": [on_request], "response": [on_response]},
     )
     client.headers.pop("connection", None)
@@ -326,16 +328,6 @@ async def model_call_deadline(
 def render_deadline_exceeded(exc: ModelCallDeadlineError) -> str:
     """Render a deadline expiry for an ``error`` event. Carries no :mod:`eval.live` retry marker."""
     return f"The model provider call exceeded its {exc.seconds:g}s wall-clock deadline."
-
-
-def quiet_sdk_loggers() -> None:
-    """Set every logger in :data:`SDK_LOGGERS` to WARNING.
-
-    Runs at import and again at every client build, since importing a vendor SDK with
-    ``ANTHROPIC_LOG`` / ``OPENAI_LOG`` set lowers its logger's level.
-    """
-    for name in SDK_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def runtime_base_url(region: str) -> str:

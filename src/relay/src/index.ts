@@ -26,7 +26,12 @@ import {
 } from "./generated/events.js";
 import { causeClassification, runtimeClientStatusFromThrownError } from "./errorClassification.js";
 import { JWT_HEADER, JwtVerificationError, verifyBearerToken, type VerifiedClaims } from "./jwt.js";
-import { decodeBody, decodeCancelBody, sessionIdRangeError } from "./requests.js";
+import {
+  decodeBody,
+  decodeCancelBody,
+  promptLengthError,
+  sessionIdRangeError,
+} from "./requests.js";
 import {
   RuntimeInvocationError,
   RuntimeValidationError,
@@ -64,6 +69,8 @@ export {
   decodeBody,
   decodeCancelBody,
   parseJsonBody,
+  PROMPT_MAX_CHARS,
+  PROMPT_TOO_LONG_MESSAGE,
   SESSION_ID_MAX_LENGTH,
   SESSION_ID_MIN_LENGTH,
   SESSION_ID_RANGE_MESSAGE,
@@ -243,6 +250,13 @@ export async function streamTurn(
     if (cancelBody !== undefined) {
       log.session_id = cancelBody.sessionId;
       failure = await respondToCancel(cancelBody.sessionId, claims, sink, deps, log);
+      return;
+    }
+
+    const promptProblem = promptLengthError(event);
+    if (promptProblem !== undefined) {
+      log.outcome = "prompt_too_long";
+      rejectBeforeStream(sink, 400, promptProblem);
       return;
     }
 

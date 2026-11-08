@@ -13,12 +13,19 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agents.budget import CHAT_BUDGET
+from agents.cancellation import InMemoryCancellationStore, SessionOwner
+from agents.conversation_history import InMemoryConversationHistory
 from agents.events import AgentEvent
 from agents.runtime_entrypoint import (
+    MAX_EVENTS_PER_SESSION,
+    MAX_ROUND_OUTPUT_TOKENS,
+    PROMPT_MAX_CHARS,
     InMemorySessionStore,
     RuntimeInvocation,
+    SessionStore,
     build_supervisor_turn,
     decode_invocation,
     format_sse_line,
@@ -31,13 +38,23 @@ from crm.errors import AuthenticationFailed, ValidationFailed
 from providers.capabilities import CapabilityMatrix, Family, load_capability_matrix
 from providers.stub import StubProvider
 from providers.tier_tuning import TIERS, WIRE_SCHEMA_VERSION, TurnTuning
+from tests.conftest import TEST_API_CLIENT_ID
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _APIGW_PAYLOAD = {
     "requestContext": {
         "requestId": "req-1",
-        "authorizer": {"jwt": {"claims": {"custom:rep_id": "rep-1", "custom:book": "acc-1,acc-2"}}},
+        "authorizer": {
+            "jwt": {
+                "claims": {
+                    "custom:rep_id": "rep-1",
+                    "custom:book": "acc-1,acc-2",
+                    "token_use": "id",
+                    "aud": TEST_API_CLIENT_ID,
+                }
+            }
+        },
     },
     "prompt": "What is the status of Acme?",
     "session_id": "session-abc",
@@ -248,13 +265,45 @@ def test_decode_invocation_succeeds_and_carries_prompt_and_session_id() -> None:
     assert invocation.identity.rep_id == "rep-1"
 
 
+def test_decode_invocation_accepts_a_prompt_of_exactly_the_cap() -> None:
+    matrix = load_capability_matrix()
+    invocation = decode_invocation({**_APIGW_PAYLOAD, "prompt": "x" * PROMPT_MAX_CHARS}, matrix)
+    assert len(invocation.prompt) == PROMPT_MAX_CHARS
+
+
+def test_decode_invocation_rejects_a_prompt_one_character_over_the_cap() -> None:
+    """An over-long prompt is a validation failure naming the prompt, before any turn is built."""
+    matrix = load_capability_matrix()
+    with pytest.raises(ValidationFailed) as exc_info:
+        decode_invocation({**_APIGW_PAYLOAD, "prompt": "x" * (PROMPT_MAX_CHARS + 1)}, matrix)
+    assert exc_info.value.source == "agent.invocation.prompt"
+    assert str(PROMPT_MAX_CHARS) in str(exc_info.value)
+
+
+def test_decode_invocation_counts_code_points_not_utf16_units() -> None:
+    """A prompt of cap-many astral characters is at the cap, not twice over it."""
+    matrix = load_capability_matrix()
+    invocation = decode_invocation(
+        {**_APIGW_PAYLOAD, "prompt": "\U0001f600" * PROMPT_MAX_CHARS}, matrix
+    )
+    assert len(invocation.prompt) == PROMPT_MAX_CHARS
+
+
 def test_decode_invocation_falls_back_to_identity_session_id_when_payload_omits_one() -> None:
     """A payload with no top-level session_id uses the identity's own session id instead."""
     matrix = load_capability_matrix()
     payload = {
         "requestContext": {
             "requestId": "req-9",
-            "authorizer": {"jwt": {"claims": {"custom:rep_id": "rep-2"}}},
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        "custom:rep_id": "rep-2",
+                        "token_use": "id",
+                        "aud": TEST_API_CLIENT_ID,
+                    }
+                }
+            },
         },
         "prompt": "hello",
     }
@@ -395,6 +444,180 @@ def test_in_memory_session_store_sequence_numbers_are_stable_and_monotonic() -> 
     seq2 = store.append("sess-5", AgentEvent(kind="completed", text="b"))
     assert seq1 == 1
     assert seq2 == 2
+
+
+def _texts(events: tuple[AgentEvent, ...]) -> list[str | None]:
+    return [event.text for event in events]
+
+
+def _fill(store: InMemorySessionStore, session_id: str, count: int) -> None:
+    for index in range(1, count + 1):
+        store.append(session_id, AgentEvent(kind="completed", text=f"e{index}"))
+
+
+def test_in_memory_session_store_drops_the_oldest_events_past_its_bound() -> None:
+    """Appending past `max_events` keeps only the newest `max_events` events."""
+    store = InMemorySessionStore(max_events=3)
+    _fill(store, "sess-b", 5)
+
+    assert _texts(store.events_after("sess-b", sequence=0)) == ["e3", "e4", "e5"]
+
+
+def test_in_memory_session_store_keeps_counting_sequences_across_drops() -> None:
+    """A dropped event's sequence number is never reused."""
+    store = InMemorySessionStore(max_events=2)
+    _fill(store, "sess-b", 4)
+
+    assert store.last_sequence("sess-b") == 4
+    assert store.append("sess-b", AgentEvent(kind="completed", text="e5")) == 5
+
+
+def test_in_memory_session_store_events_after_is_exact_inside_the_window() -> None:
+    """Resuming from any sequence whose successors are all retained returns exactly those."""
+    store = InMemorySessionStore(max_events=3)
+    _fill(store, "sess-b", 6)
+
+    assert _texts(store.events_after("sess-b", sequence=3)) == ["e4", "e5", "e6"]
+    assert _texts(store.events_after("sess-b", sequence=4)) == ["e5", "e6"]
+    assert store.events_after("sess-b", sequence=6) == ()
+
+
+def test_in_memory_session_store_bounds_each_session_independently() -> None:
+    """One session's volume never drops another session's events."""
+    store = InMemorySessionStore(max_events=2)
+    _fill(store, "busy", 10)
+    _fill(store, "quiet", 2)
+
+    assert _texts(store.events_after("quiet", sequence=0)) == ["e1", "e2"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_in_memory_session_store_rejects_a_non_positive_bound(bad: int) -> None:
+    with pytest.raises(ValueError, match="max_events"):
+        InMemorySessionStore(max_events=bad)
+
+
+def test_in_memory_session_store_defaults_to_the_per_session_bound() -> None:
+    assert InMemorySessionStore().max_events == MAX_EVENTS_PER_SESSION
+
+
+def test_run_turn_replays_a_whole_turn_that_exactly_fills_the_bound() -> None:
+    """A turn recording exactly `max_events` events resumes from 0 with nothing lost."""
+    store = InMemorySessionStore(max_events=4)
+    invocation = _fake_invocation(session_id="sess-full")
+    turn = [AgentEvent(kind="completed", text=f"e{index}") for index in range(1, 5)]
+    list(run_turn(invocation, iter(turn), store=store, resume_from=0))
+
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=0))
+
+    assert [json.loads(line[len("data: ") : -2])["text"] for line in replayed] == [
+        "e1",
+        "e2",
+        "e3",
+        "e4",
+    ]
+
+
+def test_run_turn_resumes_the_latest_turn_after_earlier_turns_were_dropped() -> None:
+    """Later turns push earlier ones out; resuming inside the latest turn is still exact."""
+    store = InMemorySessionStore(max_events=3)
+    invocation = _fake_invocation(session_id="sess-many")
+    for turn_number in range(1, 4):
+        turn = [AgentEvent(kind="completed", text=f"t{turn_number}e{i}") for i in range(1, 4)]
+        list(
+            run_turn(
+                invocation, iter(turn), store=store, resume_from=store.last_sequence("sess-many")
+            )
+        )
+
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=7))
+
+    assert [json.loads(line[len("data: ") : -2])["text"] for line in replayed] == ["t3e2", "t3e3"]
+
+
+def _sse_texts(lines: list[str]) -> list[str]:
+    return [json.loads(line[len("data: ") : -2])["text"] for line in lines]
+
+
+def _run_fresh_turn(
+    store: SessionStore, invocation: RuntimeInvocation, texts: list[str]
+) -> list[str]:
+    turn = iter([AgentEvent(kind="completed", text=text) for text in texts])
+    resume_from = store.last_sequence(invocation.session_id)
+    return list(run_turn(invocation, turn, store=store, resume_from=resume_from))
+
+
+def test_run_turn_keeps_only_the_latest_turn_however_many_turns_ran() -> None:
+    """Across-turn growth is bounded to one turn: a fresh turn drops every earlier turn's events."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-turns")
+    for turn_number in range(1, 6):
+        _run_fresh_turn(store, invocation, [f"t{turn_number}e{i}" for i in range(1, 5)])
+
+    assert store.last_sequence("sess-turns") == 20
+    assert _texts(store.events_after("sess-turns", sequence=0)) == ["t5e1", "t5e2", "t5e3", "t5e4"]
+
+
+def test_run_turn_resume_inside_a_later_turn_returns_every_event_after_the_cursor() -> None:
+    """Sequence numbers continue across turns, so a cursor inside the latest turn resumes exactly."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-resume")
+    _run_fresh_turn(store, invocation, ["t1e1", "t1e2", "t1e3"])
+    _run_fresh_turn(store, invocation, ["t2e1", "t2e2", "t2e3", "t2e4"])
+
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=4))
+
+    assert _sse_texts(replayed) == ["t2e2", "t2e3", "t2e4"]
+
+
+def test_begin_turn_keeps_the_sequence_counter_and_ignores_an_unknown_session() -> None:
+    store = InMemorySessionStore()
+    store.begin_turn("never-seen")
+    _fill(store, "sess-c", 3)
+
+    store.begin_turn("sess-c")
+
+    assert store.events_after("sess-c", sequence=0) == ()
+    assert store.last_sequence("sess-c") == 3
+    assert store.append("sess-c", AgentEvent(kind="completed", text="next")) == 4
+
+
+def test_a_fresh_turn_leaves_the_history_and_cancellation_stores_untouched() -> None:
+    """Dropping a session's earlier events never clears its conversation history or cancel marker."""
+    store = InMemorySessionStore()
+    history = InMemoryConversationHistory()
+    cancellation = InMemoryCancellationStore()
+    invocation = _fake_invocation(session_id="sess-side")
+    owner = SessionOwner.of(invocation.identity)
+    history.record_turn("sess-side", identity=invocation.identity, prompt="p1", answer="a1")
+    cancellation.register_turn("sess-side", owner=owner)
+    cancellation.request_cancellation("sess-side", requester=owner)
+
+    _run_fresh_turn(store, invocation, ["t1e1"])
+    _run_fresh_turn(store, invocation, ["t2e1"])
+
+    assert [
+        turn.prompt for turn in history.history_for("sess-side", identity=invocation.identity)
+    ] == ["p1"]
+    assert cancellation.is_cancelled("sess-side")
+
+
+def _configured_max_output_tokens(node: object) -> list[int]:
+    if isinstance(node, dict):
+        found = [v for k, v in node.items() if k == "max_output_tokens" and isinstance(v, int)]
+        return found + [n for v in node.values() for n in _configured_max_output_tokens(v)]
+    if isinstance(node, list):
+        return [n for v in node for n in _configured_max_output_tokens(v)]
+    return []
+
+
+def test_round_output_cap_covers_every_configured_model() -> None:
+    """The per-round output cap the bound is built from is at least every model's own cap."""
+    config = yaml.safe_load((REPO_ROOT / "config" / "model_capabilities.yaml").read_text())
+    caps = _configured_max_output_tokens(config)
+
+    assert caps
+    assert max(caps) <= MAX_ROUND_OUTPUT_TOKENS
 
 
 # --------------------------------------------------------------------------------------

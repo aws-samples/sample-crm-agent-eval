@@ -259,9 +259,12 @@ def _harness_and_forbidden_references(tree: ast.Module, package: str) -> list[tu
                 harness_attribute != dotted and harness_attribute not in HARNESS_ALLOWED_NAMES
             ):
                 found.append((node.lineno, f"reaches {dotted}"))
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if (forbidden := _within(node.value, FORBIDDEN_MODULES)) is not None:
-                found.append((node.lineno, f"names {forbidden} in a string literal"))
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and (forbidden := _within(node.value, FORBIDDEN_MODULES)) is not None
+        ):
+            found.append((node.lineno, f"names {forbidden} in a string literal"))
     return sorted(set(found))
 
 

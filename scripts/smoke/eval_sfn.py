@@ -27,6 +27,12 @@ calls `POST /api/eval_trigger` with its ID token.
   - the S3 artifacts pass `eval.harness.assert_artifacts`;
   - `artefact_url` presigns a recorded artefact: an https GET returns 200; the same URL over plain
     http returns 403 `AccessDenied`, and with a tampered key 403 `SignatureDoesNotMatch`;
+  - `status_carries_tier_comparison_table`: the completed run's `status` payload carries
+    `tier_comparison_table` with headers `Metric` plus one column per arm, the Supervisor,
+    Subagent and ToolCall sections in that order, and every row as wide as the headers;
+  - `matrix_md_download_is_attachment` and `matrix_md_download_bytes_match_artefact`:
+    `artefact_url` with `download: true` for the recorded `matrix_md` signs a URL whose https GET
+    answers `Content-Disposition: attachment`, with bytes equal to those of the plain URL's GET;
   - the sweep tenant is empty, and the `demo` row counts are unchanged;
   - `tenant_emptied_by_the_workers_own_role`: the run's `eval_runs` catalog row is `torn_down`, so
     the `Teardown` step ran under `sweep_control`'s `{Query, BatchWriteItem}` role, and the run
@@ -185,8 +191,13 @@ class RunApi:
     def cancel(self, run_id: str) -> tuple[int, dict[str, Any]]:
         return self.call({"action": "cancel", "run_id": run_id})
 
-    def artefact_url(self, run_id: str, key: str) -> tuple[int, dict[str, Any]]:
-        return self.call({"action": "artefact_url", "run_id": run_id, "key": key})
+    def artefact_url(
+        self, run_id: str, key: str, *, download: bool = False
+    ) -> tuple[int, dict[str, Any]]:
+        body: dict[str, Any] = {"action": "artefact_url", "run_id": run_id, "key": key}
+        if download:
+            body["download"] = True
+        return self.call(body)
 
 
 def _row(check: str, ok: bool, detail: str, *, resource: str = RESOURCE_CLASS) -> CheckResult:
@@ -797,6 +808,122 @@ def check_artefact_url(
             observed == expected and code == expected_code,
             f"GET -> HTTP {observed} code={code!r}, expected {expected} code={expected_code!r}",
         )
+
+
+#: The `tier_comparison_table` sections a completed run carries, in order.
+TIER_TABLE_SECTIONS: Final[tuple[str, ...]] = ("supervisor", "subagent", "tool")
+
+
+def check_tier_comparison_table(run: Mapping[str, Any], *, arm_count: int) -> CheckResult:
+    """The `status` payload carries `tier_comparison_table`: `Metric` plus one header per arm, the
+    three tier sections in order, and every row as wide as the headers."""
+    check = "status_carries_tier_comparison_table"
+    table = run.get("tier_comparison_table")
+    if not isinstance(table, Mapping):
+        return _row(check, False, f"tier_comparison_table absent or not an object: {table!r}")
+    headers = table.get("headers")
+    sections = table.get("sections")
+    header_ok = (
+        isinstance(headers, list)
+        and len(headers) == 1 + arm_count
+        and headers[:1] == ["Metric"]
+        and all(isinstance(header, str) and header for header in headers)
+    )
+    tiers = (
+        [s.get("tier") for s in sections if isinstance(s, Mapping)]
+        if isinstance(sections, list)
+        else None
+    )
+    width = len(headers) if isinstance(headers, list) else -1
+    rows_ok = isinstance(sections, list) and all(
+        isinstance(section, Mapping)
+        and isinstance(section.get("rows"), list)
+        and section["rows"]
+        and all(isinstance(row, list) and len(row) == width for row in section["rows"])
+        for section in sections
+    )
+    ok = header_ok and tiers == list(TIER_TABLE_SECTIONS) and rows_ok
+    return _row(
+        check,
+        ok,
+        f"headers={headers!r} (expected Metric + {arm_count} arm column(s)), tiers={tiers!r}, "
+        f"rows as wide as the headers={rows_ok}",
+    )
+
+
+#: `(url) -> (HTTP status, lower-cased response headers, body)` for an https GET of a presigned
+#: artefact URL.
+ArtefactGet = Callable[[str], tuple[int, Mapping[str, str], bytes]]
+
+#: Bytes of an artefact body read for the download comparison.
+_ARTEFACT_BODY_LIMIT: Final[int] = 16 * 1024 * 1024
+
+
+def get_artefact(url: str) -> tuple[int, Mapping[str, str], bytes]:
+    """GET `url` over https, following no redirect: its status, lower-cased headers and body."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"refusing a non-https artefact URL: scheme {parsed.scheme!r}")
+    target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    connection = http.client.HTTPSConnection(parsed.netloc, timeout=30)
+    try:
+        connection.request("GET", target)
+        response = connection.getresponse()
+        headers = {name.lower(): value for name, value in response.getheaders()}
+        return response.status, headers, response.read(_ARTEFACT_BODY_LIMIT)
+    finally:
+        connection.close()
+
+
+def check_matrix_md_download(
+    api: RunApi, run: Mapping[str, Any], *, get: ArtefactGet = get_artefact
+) -> Iterator[CheckResult]:
+    """`artefact_url` with `download: true` for the recorded `matrix_md` signs a URL whose GET is an
+    attachment, with bytes equal to the plain URL's."""
+    attachment, matches = (
+        "matrix_md_download_is_attachment",
+        "matrix_md_download_bytes_match_artefact",
+    )
+    run_id = str(run.get("run_id") or "")
+    artifacts = run.get("artifacts")
+    key = artifacts.get("matrix_md") if isinstance(artifacts, Mapping) else None
+    if not run_id or not isinstance(key, str) or not key:
+        detail = f"the run recorded no matrix_md artefact ({summarise(run, 160)})"
+        yield _row(attachment, False, detail)
+        yield _row(matches, False, detail)
+        return
+    fetched: dict[bool, tuple[int, Mapping[str, str], bytes]] = {}
+    for download in (True, False):
+        status, payload = api.artefact_url(run_id, key, download=download)
+        url = payload.get("url")
+        if status != 200 or not isinstance(url, str) or not url.startswith("https://"):
+            detail = (
+                f"artefact_url {key!r} download={download} -> HTTP {status} {error_fields(payload)}"
+            )
+            yield _row(attachment, False, detail)
+            yield _row(matches, False, detail)
+            return
+        try:
+            fetched[download] = get(url)
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            detail = f"GET (download={download}) failed: {type(exc).__name__}: {exc}"
+            yield _row(attachment, False, detail)
+            yield _row(matches, False, detail)
+            return
+    d_status, d_headers, d_body = fetched[True]
+    p_status, _p_headers, p_body = fetched[False]
+    disposition = d_headers.get("content-disposition", "")
+    yield _row(
+        attachment,
+        d_status == 200 and disposition.strip().lower().startswith("attachment"),
+        f"download GET -> HTTP {d_status} Content-Disposition={disposition!r}",
+    )
+    yield _row(
+        matches,
+        d_status == 200 and p_status == 200 and bool(p_body) and d_body == p_body,
+        f"download GET HTTP {d_status} {len(d_body)} byte(s); plain GET HTTP {p_status} "
+        f"{len(p_body)} byte(s); equal={d_body == p_body}",
+    )
 
 
 def download_artifacts(s3: Any, *, bucket: str, root: str, into: Path) -> int:
@@ -1498,6 +1625,7 @@ def _rehearsal(
     clock: Callable[[], float],
     sleeper: Callable[[float], None],
     fetch: UrlFetch = fetch_status,
+    artefact_get: ArtefactGet = get_artefact,
     units: dict[str, tuple[str, ...]] | None = None,
 ) -> Iterator[CheckResult]:
     families, task_count = sweep_shape()
@@ -1573,6 +1701,8 @@ def _rehearsal(
         task_count=task_count * repeats,
     )
     yield from check_artefact_url(api, run, fetch=fetch)
+    yield check_tier_comparison_table(run, arm_count=len(families))
+    yield from check_matrix_md_download(api, run, get=artefact_get)
     yield check_tenant_empty(store, tenant, check="rehearsal_tenant_empty")
     yield check_tenant_emptied_by_the_workers_own_role(store, run_id, tenant, expected_units)
     yield check_demo_untouched(demo_before, tenant_row_counts(store, DEMO_TENANT))
@@ -1659,6 +1789,7 @@ def checks(
     clock: Callable[[], float] | None = None,
     sleeper: Callable[[float], None] | None = None,
     fetch: UrlFetch | None = None,
+    artefact_get: ArtefactGet | None = None,
 ) -> Iterator[CheckResult]:
     """The stub flow: estimate, rehearsal, cancel proof and role simulations; cleanup in `finally`.
 
@@ -1671,6 +1802,8 @@ def checks(
         clock, sleeper: Time seams for the poll loops.
         fetch: GETs a presigned artefact URL and returns its status and S3 error code;
             :func:`fetch_status` by default.
+        artefact_get: GETs a presigned artefact URL and returns its status, headers and body;
+            :func:`get_artefact` by default.
     """
     admin = (
         provisioner
@@ -1708,6 +1841,7 @@ def checks(
             clock=now,
             sleeper=wait,
             fetch=fetch if fetch is not None else fetch_status,
+            artefact_get=artefact_get if artefact_get is not None else get_artefact,
             units=units,
         )
         yield from _cancel_proof(ctx, api, resolved_store, started, clock=now, sleeper=wait)

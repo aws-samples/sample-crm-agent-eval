@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Field-level approval against DynamoDB Local: an unrelated later write and the TOCTOU race.
+"""Field-level approval against DynamoDB Local: unrelated writes, the TOCTOU race, stage moves.
 
 Every call goes through the real handlers and the prefixed `dynamodb_local_store` fixture, so the
 condition expressions, derived-attribute rewrites and transaction cancellation are evaluated by the
@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from crm.envelope import IDENTITY_KEY, identity_event
-from crm.handlers import approve_proposal, log_activity, submit_proposal
+from crm.handlers import approve_proposal, log_activity, rebase_proposal, submit_proposal
 from crm.store.store import Store
 
 _TENANT = "demo"
@@ -204,3 +204,60 @@ def test_a_racing_change_to_an_untouched_derived_source_cancels_it(store: Store)
     assert result["statusCode"] == 409
     target = _get(store, "opp-derived")
     assert target["stage_close_date"] == "Discovery#2026-09-30"
+
+
+def _rebase(store: Store, proposal_id: str) -> Any:
+    return rebase_proposal.handler(
+        _event({"proposal_id": proposal_id, "transaction_key": _key()}), store=store
+    )
+
+
+def test_rebase_then_approve_cannot_reopen_a_closed_opportunity(store: Store) -> None:
+    _seed(store, "opp-reopen")
+    store.put_item("opportunities", {**_get(store, "opp-reopen"), "stage": "Negotiation"})
+    proposal_id = _submit(store, "opp-reopen", {"stage": "Qualification"})
+    store.put_item("opportunities", {**_get(store, "opp-reopen"), "stage": "Closed Won"})
+
+    rebased = _rebase(store, proposal_id)
+    assert rebased["statusCode"] == 400, rebased
+    assert rebased["error"]["source"] == "after_payload.stage"
+
+    approved = _approve(store, proposal_id)
+    assert approved["statusCode"] == 409, approved
+    assert _get(store, "opp-reopen")["stage"] == "Closed Won"
+    proposal = store.get_item("proposals", {"proposal_id": proposal_id})
+    assert proposal is not None and proposal["status"] == "pending"
+
+
+def test_approve_refuses_a_reopen_even_when_the_snapshot_matches(store: Store) -> None:
+    """The stage check at approve holds without the rebase check, as for a pre-existing rebase."""
+    _seed(store, "opp-snapshot")
+    store.put_item("opportunities", {**_get(store, "opp-snapshot"), "stage": "Negotiation"})
+    proposal_id = _submit(store, "opp-snapshot", {"stage": "Qualification"})
+    store.put_item("opportunities", {**_get(store, "opp-snapshot"), "stage": "Closed Won"})
+    proposal = store.get_item("proposals", {"proposal_id": proposal_id})
+    assert proposal is not None
+    store.put_item("proposals", {**proposal, "before_snapshot": _get(store, "opp-snapshot")})
+
+    approved = _approve(store, proposal_id)
+
+    assert approved["statusCode"] == 400, approved
+    assert approved["error"]["source"] == "after_payload.stage"
+    assert _get(store, "opp-snapshot")["stage"] == "Closed Won"
+
+
+def test_a_regression_after_rebase_is_approved(store: Store) -> None:
+    """Refused at approve after a racing move, rebased, then approved as a regression."""
+    _seed(store, "opp-regress")
+    proposal_id = _submit(store, "opp-regress", {"stage": "Qualification"})
+    store.put_item("opportunities", {**_get(store, "opp-regress"), "stage": "Negotiation"})
+
+    refused = _approve(store, proposal_id)
+    assert refused["statusCode"] == 409
+    assert refused["error"]["reason"] == "fields_changed"
+    assert _rebase(store, proposal_id)["statusCode"] == 200
+
+    approved = _approve(store, proposal_id)
+
+    assert approved["statusCode"] == 200, approved
+    assert _get(store, "opp-regress")["stage"] == "Qualification"

@@ -85,6 +85,7 @@ from crm.handlers._common import ok
 from crm.store.store import Store
 from providers.base import ModelProvider
 from providers.capabilities import CapabilityMatrix, Family, load_capability_matrix
+from providers.sdk_loggers import quiet_sdk_loggers
 from providers.tier_tuning import TurnTuning
 
 logger = logging.getLogger(__name__)
@@ -97,12 +98,14 @@ _DEFAULT_LOG_LEVEL: Final[str] = "INFO"
 def configure_logging() -> None:
     """Attach a root log handler so this module's structured lines reach the container's log stream.
 
-    Reads ``LOG_LEVEL`` (default ``INFO``; an unrecognised value falls back to the default). A no-op
-    when the root logger already has a handler.
+    Reads ``LOG_LEVEL`` (default ``INFO``; an unrecognised value falls back to the default). The
+    root handler is left alone when one is already attached. Every logger in
+    :data:`providers.sdk_loggers.SDK_LOGGERS` is then held at WARNING whatever ``LOG_LEVEL`` says.
     """
     requested = os.environ.get(_LOG_LEVEL_ENV_VAR, _DEFAULT_LOG_LEVEL).strip().upper()
     level = logging.getLevelNamesMapping().get(requested, logging.INFO)
     logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    quiet_sdk_loggers()
 
 
 #: Environment variable naming how this Runtime process invokes models. ``stub`` (the default)

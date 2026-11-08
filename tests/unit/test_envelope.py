@@ -6,13 +6,17 @@ A missing or malformed identity on any channel raises rather than yielding an em
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from crm import envelope
 from crm.authz import DEMO_TENANT
 from crm.envelope import (
     AGENT_IDENTITY_KEY,
+    API_ALLOWED_CLIENT_IDS_PARAMETER_ENV,
     CLAIM_BOOK,
     CLAIM_FULL_VISIBILITY,
     CLAIM_REP_ID,
@@ -24,17 +28,45 @@ from crm.envelope import (
     split_book,
     strip_identity,
 )
-from crm.errors import AuthenticationFailed
+from crm.errors import AuthenticationFailed, CrmError
+from tests.conftest import (
+    RECORDED_EVENT_CLIENT_ID,
+    SESSION_ALLOWLIST,
+    TEST_API_CLIENT_ID,
+    TEST_API_CLIENT_IDS_PARAMETER,
+    StubAllowlist,
+)
+
+_SPA_CLIENT_ID = TEST_API_CLIENT_ID
+_MCP_CLIENT_ID = "mcp-oauth-client-1"
 
 
 def _apigw_event(**claims: Any) -> dict[str, Any]:
-    """Build an API Gateway event carrying authorizer claims."""
+    """Build an API Gateway event carrying the authorizer claims of a SPA ID token."""
     return {
         "requestContext": {
             "requestId": "req-1",
-            "authorizer": {"jwt": {"claims": {CLAIM_REP_ID: "rep-1", **claims}}},
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        CLAIM_REP_ID: "rep-1",
+                        "token_use": "id",
+                        "aud": _SPA_CLIENT_ID,
+                        **claims,
+                    }
+                }
+            },
         }
     }
+
+
+def _apigw_event_without(*claim_names: str) -> dict[str, Any]:
+    """Build a SPA ID-token API Gateway event with `claim_names` removed from its claims."""
+    event = _apigw_event()
+    claims = event["requestContext"]["authorizer"]["jwt"]["claims"]
+    for name in claim_names:
+        del claims[name]
+    return event
 
 
 def _gateway_event(**overrides: Any) -> dict[str, Any]:
@@ -152,7 +184,9 @@ def test_apigw_rest_authorizer_claims_without_the_jwt_nesting_are_honoured() -> 
         {
             "requestContext": {
                 "requestId": "req-rest-1",
-                "authorizer": {"claims": {CLAIM_REP_ID: "rep-1"}},
+                "authorizer": {
+                    "claims": {CLAIM_REP_ID: "rep-1", "token_use": "id", "aud": _SPA_CLIENT_ID}
+                },
             }
         }
     )
@@ -179,6 +213,277 @@ def test_apigw_event_missing_the_rep_claim_is_rejected() -> None:
     event = {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": "abc"}}}}}
     with pytest.raises(AuthenticationFailed):
         decode_identity(event)
+
+
+def test_apigw_access_token_is_matched_on_its_client_id() -> None:
+    """An access token names its app client in ``client_id``; a listed one decodes."""
+    event = _apigw_event_without("aud")
+    event["requestContext"]["authorizer"]["jwt"]["claims"].update(
+        {"token_use": "access", "client_id": _SPA_CLIENT_ID}
+    )
+
+    assert decode_identity(event).rep_id == "rep-1"
+
+
+def test_the_session_stub_admits_the_shared_test_client_by_default() -> None:
+    """Without the opt-out, every test decodes against the suite-wide stub parameter."""
+    assert envelope._parameter_reader == SESSION_ALLOWLIST.read
+
+    assert decode_identity(_apigw_event()).source == "apigw"
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(_apigw_event(aud=_MCP_CLIENT_ID))
+
+
+_RECORDED_EVENTS = sorted(
+    (Path(__file__).resolve().parents[1] / "fixtures" / "events").glob("apigw_*.json")
+)
+
+
+@pytest.mark.parametrize("path", _RECORDED_EVENTS, ids=lambda path: path.name)
+def test_recorded_apigw_events_name_the_client_the_session_stub_admits(path: Path) -> None:
+    """The recorded events are SPA access tokens whose client id the session stub lists."""
+    event = json.loads(path.read_text(encoding="utf-8"))
+    authorizer = event["requestContext"]["authorizer"]
+    claims = authorizer["jwt"]["claims"] if "jwt" in authorizer else authorizer["claims"]
+
+    assert (claims["token_use"], claims["client_id"]) == ("access", RECORDED_EVENT_CLIENT_ID)
+    assert decode_identity(event).source == "apigw"
+
+
+def test_recorded_apigw_events_exist() -> None:
+    assert len(_RECORDED_EVENTS) >= 2
+
+
+def test_the_opt_out_replaces_the_session_stub(apigw_client_allowlist: StubAllowlist) -> None:
+    """With the opt-out, the session stub is neither consulted nor able to admit the request."""
+    apigw_client_allowlist.value = "some-other-client"
+    session_reads_before = list(SESSION_ALLOWLIST.reads)
+
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(_apigw_event())
+
+    assert apigw_client_allowlist.reads == [TEST_API_CLIENT_IDS_PARAMETER]
+    assert SESSION_ALLOWLIST.reads == session_reads_before
+
+
+def test_apigw_allowlist_admits_any_listed_client(apigw_client_allowlist: StubAllowlist) -> None:
+    """The parameter is a comma-separated list; surrounding whitespace is ignored."""
+    apigw_client_allowlist.value = f" other-client , {_SPA_CLIENT_ID} "
+
+    assert decode_identity(_apigw_event()).source == "apigw"
+
+
+@pytest.mark.usefixtures("apigw_client_allowlist")
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"aud": _MCP_CLIENT_ID},
+        {"token_use": "access", "client_id": _MCP_CLIENT_ID},
+        {"aud": f"{_SPA_CLIENT_ID},{_MCP_CLIENT_ID}"},
+        {"aud": [_SPA_CLIENT_ID]},
+        {"aud": ""},
+    ],
+    ids=["id-foreign-aud", "access-foreign-client", "joined-aud", "list-aud", "empty-aud"],
+)
+def test_apigw_token_for_a_foreign_app_client_is_rejected(claims: dict[str, Any]) -> None:
+    """A Cognito token issued to another app client of the same pool is refused."""
+    with pytest.raises(AuthenticationFailed) as caught:
+        decode_identity(_apigw_event(**claims))
+
+    assert caught.value.http_status == 401
+
+
+@pytest.mark.usefixtures("apigw_client_allowlist")
+@pytest.mark.parametrize(
+    ("token_use", "present_claim"),
+    [("id", "client_id"), ("access", "aud")],
+)
+def test_apigw_client_is_read_only_from_the_claim_its_token_use_names(
+    token_use: str, present_claim: str
+) -> None:
+    """An ID token is matched on ``aud`` and an access token on ``client_id``, never swapped."""
+    event = _apigw_event_without("aud")
+    event["requestContext"]["authorizer"]["jwt"]["claims"].update(
+        {"token_use": token_use, present_claim: _SPA_CLIENT_ID}
+    )
+
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(event)
+
+
+@pytest.mark.usefixtures("apigw_client_allowlist")
+@pytest.mark.parametrize("missing", ["aud", "token_use"])
+def test_apigw_token_missing_its_client_claims_is_rejected(missing: str) -> None:
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(_apigw_event_without(missing))
+
+
+@pytest.mark.usefixtures("apigw_client_allowlist")
+@pytest.mark.parametrize("token_use", ["refresh", "ID", ""])
+def test_apigw_token_with_an_unrecognised_token_use_is_rejected(token_use: str) -> None:
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(_apigw_event(token_use=token_use))
+
+
+def test_apigw_allowlist_parameter_is_read_once_per_process(
+    apigw_client_allowlist: StubAllowlist,
+) -> None:
+    """A second decode in the same process reuses the cached value instead of reading again."""
+    decode_identity(_apigw_event())
+    decode_identity(_apigw_event())
+    with pytest.raises(AuthenticationFailed):
+        decode_identity(_apigw_event(aud=_MCP_CLIENT_ID))
+
+    assert apigw_client_allowlist.reads == [TEST_API_CLIENT_IDS_PARAMETER]
+
+
+@pytest.mark.parametrize("value", ["", " , ", "  "])
+def test_apigw_empty_allowlist_parameter_is_a_server_error_that_refuses(
+    apigw_client_allowlist: StubAllowlist, value: str
+) -> None:
+    """A parameter listing no client is a configuration error (5xx), and admits no one."""
+    apigw_client_allowlist.value = value
+
+    with pytest.raises(CrmError) as caught:
+        decode_identity(_apigw_event())
+
+    assert not isinstance(caught.value, AuthenticationFailed)
+    assert caught.value.http_status >= 500
+
+
+def test_apigw_empty_allowlist_parameter_is_not_cached(
+    apigw_client_allowlist: StubAllowlist,
+) -> None:
+    """An empty value is read again on the next call, so filling the parameter recovers."""
+    apigw_client_allowlist.value = " , "
+    with pytest.raises(CrmError):
+        decode_identity(_apigw_event())
+
+    apigw_client_allowlist.value = _SPA_CLIENT_ID
+    assert decode_identity(_apigw_event()).source == "apigw"
+    assert apigw_client_allowlist.reads == [TEST_API_CLIENT_IDS_PARAMETER] * 2
+
+
+@pytest.mark.parametrize("configured", [None, "", "  "])
+def test_apigw_unset_parameter_variable_is_a_server_error_with_no_read(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch, configured: str | None
+) -> None:
+    if configured is None:
+        monkeypatch.delenv(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, configured)
+
+    with pytest.raises(CrmError) as caught:
+        decode_identity(_apigw_event())
+
+    assert not isinstance(caught.value, AuthenticationFailed)
+    assert caught.value.http_status >= 500
+    assert API_ALLOWED_CLIENT_IDS_PARAMETER_ENV in (caught.value.detail or "")
+    assert apigw_client_allowlist.reads == []
+
+
+@pytest.mark.parametrize(
+    "aws_code",
+    [
+        "ThrottlingException",
+        "AccessDeniedException",
+        "ExpiredTokenException",
+        "ParameterNotFound",
+        "ValidationException",
+        "InternalServerError",
+    ],
+)
+def test_apigw_parameter_read_failure_is_never_a_401_and_is_not_cached(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch, aws_code: str
+) -> None:
+    """An SSM failure refuses the request as a server error; the next request reads again."""
+    from botocore.exceptions import ClientError
+
+    def _failing_read(name: str) -> str:
+        apigw_client_allowlist.reads.append(name)
+        raise ClientError({"Error": {"Code": aws_code, "Message": "x"}}, "GetParameter")
+
+    monkeypatch.setattr(envelope, "_parameter_reader", _failing_read)
+
+    with pytest.raises(CrmError) as caught:
+        decode_identity(_apigw_event())
+
+    assert not isinstance(caught.value, AuthenticationFailed)
+    assert caught.value.http_status >= 500
+    assert TEST_API_CLIENT_IDS_PARAMETER in (caught.value.detail or "")
+
+    monkeypatch.setattr(envelope, "_parameter_reader", apigw_client_allowlist.read)
+    assert decode_identity(_apigw_event()).source == "apigw"
+    assert len(apigw_client_allowlist.reads) == 2
+
+
+def test_apigw_transport_failure_reading_the_parameter_is_a_server_error(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.exceptions import EndpointConnectionError
+
+    def _unreachable(_name: str) -> str:
+        raise EndpointConnectionError(endpoint_url="https://ssm.us-east-1.amazonaws.com")
+
+    monkeypatch.setattr(envelope, "_parameter_reader", _unreachable)
+
+    with pytest.raises(CrmError) as caught:
+        decode_identity(_apigw_event())
+
+    assert not isinstance(caught.value, AuthenticationFailed)
+    assert caught.value.http_status >= 500
+
+
+def test_apigw_allowlist_is_read_from_ssm_by_the_default_reader(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production reader resolves the named String parameter (moto SSM)."""
+    import boto3
+    from moto import mock_aws
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr(envelope, "_parameter_reader", envelope._ssm_parameter_reader)
+    with mock_aws():
+        boto3.client("ssm", region_name="us-east-1").put_parameter(
+            Name=TEST_API_CLIENT_IDS_PARAMETER,
+            Value=f"{_SPA_CLIENT_ID},other-client",
+            Type="String",
+        )
+        assert decode_identity(_apigw_event()).rep_id == "rep-1"
+        with pytest.raises(AuthenticationFailed):
+            decode_identity(_apigw_event(aud=_MCP_CLIENT_ID))
+
+
+def test_apigw_missing_ssm_parameter_is_a_server_error_not_a_401(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from moto import mock_aws
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr(envelope, "_parameter_reader", envelope._ssm_parameter_reader)
+    with mock_aws(), pytest.raises(CrmError) as caught:
+        decode_identity(_apigw_event())
+
+    assert not isinstance(caught.value, AuthenticationFailed)
+    assert caught.value.http_status >= 500
+
+
+def test_gateway_and_agent_channels_ignore_the_apigw_allowlist(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The allowlist binds the ``apigw`` channel only; neither other channel reads it."""
+    monkeypatch.delenv(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, raising=False)
+    agent_event = {AGENT_IDENTITY_KEY: {"claims": {CLAIM_REP_ID: "rep-2"}, "session_id": "s"}}
+
+    assert decode_identity(_gateway_event()).source == "gateway"
+    assert decode_identity(agent_event).source == "agent"
+    assert apigw_client_allowlist.reads == []
 
 
 # --------------------------------------------------------------------------------------

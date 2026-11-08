@@ -9,10 +9,14 @@ Operations, selected by a required ``action`` argument:
 * ``estimate {repeats?: int}`` — the live-sweep cost estimate for that many repeats, and its basis.
 * ``status {run_id}`` — one run, reconciled against its execution first.
 * ``list {cursor?}`` — 20 runs, newest first, and the next page's cursor.
+
+``estimate``, ``status`` and ``list`` require an admin or full tenant visibility (403
+``eval:trigger`` otherwise).
 * ``cancel {run_id}`` — admin only; cooperative, never stops the execution.
 * ``unlock`` — admin only; releases a lock whose holder is not running.
-* ``artefact_url {run_id, key}`` — a presigned GET, valid 300 s, for one artefact the run recorded;
-  admin or full tenant visibility (``eval.artefacts``).
+* ``artefact_url {run_id, key, download?: bool}`` — a presigned GET, valid 300 s, for one artefact
+  the run recorded, as an attachment when ``download`` is true; admin or full tenant visibility
+  (``eval.artefacts``).
 
 This handler is not an action tool; it composes ``_common``'s ``decode``, ``ok``,
 ``error_response`` and ``is_proxy_event`` and validates its own arguments. Unauthenticated callers
@@ -25,7 +29,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Final
 
 from crm.authz import Identity
-from crm.errors import CrmError, ValidationFailed, bounded_detail_value
+from crm.errors import CrmError, ScopeDenied, ValidationFailed, bounded_detail_value
 from crm.handlers._common import decode, default_store, error_response, is_proxy_event, ok
 from crm.store.store import Store
 
@@ -51,7 +55,7 @@ ACTIONS: Final[tuple[str, ...]] = (
 
 #: Every argument key this handler recognises. An unrecognised key is refused.
 _RECOGNISED_ARGUMENTS: Final[frozenset[str]] = frozenset(
-    {"action", "run_id", "mode", "confirmed", "cursor", "key", "repeats"}
+    {"action", "run_id", "mode", "confirmed", "cursor", "key", "repeats", "download"}
 )
 
 #: The keys each action accepts beyond ``action``.
@@ -62,7 +66,7 @@ _ACTION_ARGUMENTS: Final[dict[str, frozenset[str]]] = {
     ACTION_LIST: frozenset({"cursor"}),
     ACTION_CANCEL: frozenset({"run_id"}),
     ACTION_UNLOCK: frozenset(),
-    ACTION_ARTEFACT_URL: frozenset({"run_id", "key"}),
+    ACTION_ARTEFACT_URL: frozenset({"run_id", "key", "download"}),
 }
 
 _MAX_CURSOR_LENGTH: Final[int] = 2048
@@ -141,6 +145,37 @@ def _submit_arguments(arguments: dict[str, Any]) -> tuple[EvalMode, bool, int]:
     return mode, confirmed, validate_repeats(arguments.get("repeats"))
 
 
+def _download(arguments: dict[str, Any]) -> bool:
+    """Return ``artefact_url``'s ``download`` flag (default ``False``).
+
+    Raises:
+        ValidationFailed: ``download`` is present and not a boolean.
+    """
+    download = arguments.get("download", False)
+    if not isinstance(download, bool):
+        raise ValidationFailed("download must be a boolean.", source="download")
+    return download
+
+
+def _require_run_reader(identity: Identity, *, operation: str) -> None:
+    """Raise :class:`ScopeDenied` (``eval:trigger``) unless ``identity`` may read eval runs.
+
+    An admin may; anyone else must pass :func:`eval.trigger.require_eval_trigger_scope`.
+    """
+    from eval.trigger import require_eval_trigger_scope
+
+    if identity.is_admin:
+        return
+    try:
+        require_eval_trigger_scope(identity, operation=operation)
+    except ScopeDenied as denied:
+        raise ScopeDenied(
+            "Viewing evaluation runs requires full tenant visibility.",
+            missing_scope=denied.missing_scope,
+            detail=denied.detail,
+        ) from denied
+
+
 def _cursor(arguments: dict[str, Any]) -> str | None:
     cursor = arguments.get("cursor")
     if cursor is None:
@@ -186,6 +221,7 @@ def _eval_trigger(
         return record.to_payload()
 
     if action == ACTION_ESTIMATE:
+        _require_run_reader(identity, operation="eval_trigger:estimate")
         families, task_count = sweep_shape()
         repeats = validate_repeats(arguments.get("repeats"))
         return estimate(
@@ -193,10 +229,12 @@ def _eval_trigger(
         ).to_payload()
 
     if action == ACTION_STATUS:
+        _require_run_reader(identity, operation="eval_trigger:status")
         record = require_run(store, _require_run_id(arguments))
         return reconcile(store, sfn, record).to_payload()
 
     if action == ACTION_LIST:
+        _require_run_reader(identity, operation="eval_trigger:list")
         records, next_cursor = list_runs(store, cursor=_cursor(arguments))
         page = [reconcile(store, sfn, record).to_payload() for record in records]
         return {"runs": page, "next_cursor": next_cursor}
@@ -205,6 +243,7 @@ def _eval_trigger(
         from eval.artefacts import ArtefactsConfig, artefact_url
 
         run_id = _require_run_id(arguments)
+        download = _download(arguments)
         config = ArtefactsConfig.from_env()
         return artefact_url(
             store,
@@ -213,6 +252,7 @@ def _eval_trigger(
             run_id=run_id,
             key=arguments.get("key"),
             config=config,
+            download=download,
         )
 
     if action == ACTION_CANCEL:
@@ -222,7 +262,7 @@ def _eval_trigger(
         return {"disposition": disposition, "run": record.to_payload()}
 
     require_eval_admin(identity, operation="eval_trigger:unlock")
-    return unlock(store, sfn)
+    return unlock(store, sfn, identity=identity)
 
 
 def _artefacts_s3_client() -> Any:

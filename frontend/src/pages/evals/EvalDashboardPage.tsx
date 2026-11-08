@@ -28,6 +28,7 @@ import { EvalArmResults } from "./EvalArmResults";
 import { EvalArtifactList } from "./EvalArtifactList";
 import { LiveSweepDialog, RepeatsSelect } from "./LiveSweepDialog";
 import { RunHistory } from "./RunHistory";
+import { TierComparisonSummary } from "./TierComparisonSummary";
 import { classifyRunMode } from "./runMode";
 import { erroredItemsCostNote } from "./types";
 import { toArtifactLinks, useEvalRun } from "./useEvalRun";
@@ -383,6 +384,7 @@ function EvalDashboardPageBody({
               ? " This run was cancelled, so the figures cover only the tasks that finished."
               : ""}
           </p>
+          <TierComparisonSummary table={focused.tier_comparison_table} />
           {/* Keyed on model and effort: `model_id` alone is not unique across the matrix. */}
           {matrix.arms.map((arm) => (
             <EvalArmResults

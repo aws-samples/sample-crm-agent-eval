@@ -42,6 +42,36 @@ def _key_arn(suffix: str) -> str:
 
 
 _DYNAMODB_KEY_ARN = _key_arn("00a6")
+_CURSOR_KEY_ARN = _key_arn("00c7")
+_CURSOR_ROLE = f"arn:aws:iam::{_ACCOUNT}:role/crm-agent-eval-search_opportunities-role"
+#: A key policy as KMS stores it: every statement names `Resource "*"`, plus one list resource that
+#: is not the key and must reach the simulation unchanged.
+_UNRELATED_RESOURCE = f"arn:aws:kms:us-east-1:{_ACCOUNT}:alias/unrelated"
+_CURSOR_POLICY = json.dumps(
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "EnableIAMUserPermissions",
+                "Effect": "Allow",
+                "Action": "kms:*",
+                "Resource": "*",
+            },
+            {
+                "Sid": "DenyOutsidePurpose",
+                "Effect": "Deny",
+                "Action": "kms:Encrypt",
+                "Resource": ["*"],
+            },
+            {
+                "Sid": "Mixed",
+                "Effect": "Deny",
+                "Action": "kms:Decrypt",
+                "Resource": ["*", _UNRELATED_RESOURCE],
+            },
+        ],
+    }
+)
 _CRM_TABLE = "crm-agent-eval-accounts"
 _VPC_ID = "vpc-0abc"
 _RUNTIME_LOG_GROUP = "/aws/bedrock-agentcore/runtimes/crm_agent_eval-AbCdEf-DEFAULT"
@@ -478,6 +508,14 @@ class FakeAccount:
         }
     )
     operator_errors: dict[tuple[str, str], Err] = field(default_factory=dict)
+    cursor_env: dict[str, str] = field(
+        default_factory=lambda: {"CRM_CURSOR_KMS_KEY_ARN": _CURSOR_KEY_ARN}
+    )
+    cursor_policy: str | None = _CURSOR_POLICY
+    cursor_encrypt_outcome: Err | None = field(
+        default_factory=lambda: _explicit_deny("kms:Encrypt", _CURSOR_KEY_ARN)
+    )
+    cursor_simulated: dict[str, dict[str, str]] = field(default_factory=dict)
     create_role_error: Err | None = None
     delete_role_error: Err | None = None
     calls: list[tuple[str, str, str, dict[str, Any]]] = field(default_factory=list)
@@ -647,8 +685,20 @@ class FakeAccount:
         text = self.policies[store]
         return missing if text is None else {"Policy": text}
 
+    def operator_lambda_get_function_configuration(self, p: dict[str, Any]) -> Any:
+        assert p == {"FunctionName": "crm-agent-eval-search_opportunities"}
+        return {
+            "FunctionName": p["FunctionName"],
+            "Role": _CURSOR_ROLE,
+            "Environment": {"Variables": dict(self.cursor_env)},
+        }
+
     def operator_kms_get_key_policy(self, p: dict[str, Any]) -> Any:
         assert p["PolicyName"] == "default"
+        if p["KeyId"] == _CURSOR_KEY_ARN:
+            if self.cursor_policy is None:
+                return Err("NotFoundException", "no", 400)
+            return {"Policy": self.cursor_policy, "PolicyName": "default"}
         return {**self._policy(p, Err("NotFoundException", "no", 400)), "PolicyName": "default"}
 
     def operator_s3_get_bucket_policy(self, p: dict[str, Any]) -> Any:
@@ -726,6 +776,8 @@ class FakeAccount:
         }
 
     def operator_iam_simulate_principal_policy(self, p: dict[str, Any]) -> Any:
+        if p["ResourceArns"] == [_CURSOR_KEY_ARN]:
+            return self._simulate_cursor(p)
         store = next(s for s, b in _BUCKETS.items() if p["ResourceArns"] == [f"arn:aws:s3:::{b}"])
         principal = p["PolicySourceArn"]
         assert p["ContextEntries"][0] == {
@@ -741,6 +793,41 @@ class FakeAccount:
                     "EvalActionName": action,
                     "EvalResourceName": p["ResourceArns"][0],
                     "EvalDecision": decisions.get(action, default),
+                }
+                for action in p["ActionNames"]
+            ],
+            "IsTruncated": False,
+        }
+
+    def _simulate_cursor(self, p: dict[str, Any]) -> Any:
+        principal = p["PolicySourceArn"]
+        sent = json.loads(p["ResourcePolicy"])
+        resources = [s["Resource"] for s in sent["Statement"]]
+        assert resources == [
+            _CURSOR_KEY_ARN,
+            [_CURSOR_KEY_ARN],
+            [_CURSOR_KEY_ARN, _UNRELATED_RESOURCE],
+        ]
+        assert "*" not in json.dumps(resources)
+        context = {e["ContextKeyName"]: e["ContextKeyValues"] for e in p["ContextEntries"]}
+        assert context["aws:PrincipalArn"] == [principal]
+        assert context["kms:EncryptionContext:purpose"] == ["crm-cursor"]
+        assert context["kms:EncryptionContextKeys"] == ["purpose", "tenant", "rep_id", "operation"]
+        decisions = self.cursor_simulated.get(principal, {})
+
+        def default(action: str) -> str:
+            if principal == _PROBE_ROLE_ARN:
+                return "explicitDeny"
+            if principal == _CURSOR_ROLE and action not in ("kms:Encrypt", "kms:Decrypt"):
+                return "explicitDeny"
+            return "allowed"
+
+        return {
+            "EvaluationResults": [
+                {
+                    "EvalActionName": action,
+                    "EvalResourceName": _CURSOR_KEY_ARN,
+                    "EvalDecision": decisions.get(action, default(action)),
                 }
                 for action in p["ActionNames"]
             ],
@@ -794,6 +881,12 @@ class FakeAccount:
         return self._probe(
             p, smoke.PROBE_DECRYPT, {"Plaintext": b"PLAINTEXT-KEY-MATERIAL", "KeyId": p["KeyId"]}
         )
+
+    def probe_kms_encrypt(self, p: dict[str, Any]) -> Any:
+        assert p["KeyId"] == _CURSOR_KEY_ARN
+        assert p["EncryptionContext"]["purpose"] == "crm-cursor"
+        assert set(p["EncryptionContext"]) == {"purpose", "tenant", "rep_id", "operation"}
+        return self.cursor_encrypt_outcome or {"CiphertextBlob": b"c", "KeyId": p["KeyId"]}
 
     def probe_kms_revoke_grant(self, p: dict[str, Any]) -> Any:
         return self._probe(p, smoke.PROBE_REVOKE_GRANT, {})
@@ -1047,6 +1140,7 @@ def _expected_checks() -> set[str]:
     checks |= {f"probe_denied:{s}:{c}" for s in smoke.PROBED_STORES for c in smoke.probe_calls(s)}
     checks |= {f"log_ingestion_current:{w}" for w in smoke.INGESTION_LOGS}
     checks |= {f"admin_simulated_denied:{s}" for s in smoke.BUCKET_STORES}
+    checks |= set(smoke.CURSOR_KEY_CHECKS)
     checks |= {
         "state_operator_list_matches_stack",
         "ecr_layer_fetch",
@@ -1094,7 +1188,7 @@ def test_compliant_account_passes_every_row_and_meets_the_coverage_floor(tmp_pat
     run = _run(tmp_path)
     assert _not_passing(run) == {}
     assert {r.check for r in run.rows} == _expected_checks()
-    assert len(run.rows) == smoke.expected_check_count(context_for_test()).minimum == 66
+    assert len(run.rows) == smoke.expected_check_count(context_for_test()).minimum == 71
 
 
 def test_pre_group_g_account_fails_every_probe_and_shape_row(tmp_path: Path) -> None:
@@ -1113,7 +1207,7 @@ def test_pre_group_g_account_fails_every_probe_and_shape_row(tmp_path: Path) -> 
         for c in by
         if (
             c.startswith(("probe_denied:", "admin_simulated_denied:"))
-            and not c.startswith("probe_denied:dynamodb_key:")
+            and not c.startswith(("probe_denied:dynamodb_key:", "probe_denied:cursor_key:"))
         )
         or c.endswith("_policy_shape")
         or c == "state_operator_list_matches_stack"
@@ -1363,6 +1457,7 @@ def test_every_probe_call_is_non_mutating_by_construction(tmp_path: Path) -> Non
         ("kms", "GenerateDataKey"),
         ("kms", "Decrypt"),
         ("kms", "RevokeGrant"),
+        ("kms", "Encrypt"),
         ("s3", "GetObject"),
         ("s3", "ListObjectsV2"),
         ("s3", "PutObject"),
@@ -1374,6 +1469,8 @@ def test_every_probe_call_is_non_mutating_by_construction(tmp_path: Path) -> Non
         ("ecr", "GetDownloadUrlForLayer"),
     }
     for service, operation, params in probe:
+        if operation == "Encrypt":
+            assert params["Plaintext"] == b"probe"
         if operation == "PutObject":
             assert params["IfMatch"] == '"probe-nonexistent-etag"'
             assert params["Key"] == f"probe-{_RUN_ID}/absent"
@@ -1465,6 +1562,7 @@ def test_probe_role_trusts_only_the_operator_and_allows_exactly_the_probed_resou
         for a in ("dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:PutResourcePolicy")
     }
     expected |= {("logs:FilterLogEvents", _LOG_GROUP_ARN)}
+    expected |= {("kms:Encrypt", _CURSOR_KEY_ARN)}
     assert granted == expected
     assert all(st["Effect"] == "Allow" for st in policy["Statement"])
 
@@ -1488,11 +1586,15 @@ def test_a_probe_setup_failure_still_deletes_the_role_and_fails_every_probe_row(
     by = run.by_check()
     assert by["probe_role_setup"].status == "fail"
     assert by["probe_role_deleted"].status == "pass"
-    probe_rows = [c for c in by if c.startswith(("probe_denied:", "admin_simulated_denied:"))]
-    assert len(probe_rows) == 37
+    probe_rows = [
+        c
+        for c in by
+        if c.startswith(("probe_denied:", "admin_simulated_denied:", "cursor_key_simulated:"))
+    ]
+    assert len(probe_rows) == 42
     assert {by[c].status for c in probe_rows} == {"fail"}
     assert by["logs_probe_denied"].status == "fail"
-    assert len(run.rows) == 67
+    assert len(run.rows) == 72
 
 
 def test_a_create_role_failure_is_reported_and_teardown_tolerates_no_such_entity(
@@ -1542,7 +1644,9 @@ def test_admin_simulation_uses_the_live_document_and_fails_on_any_non_explicit_d
     assert "simulation pair of the live document" in row.detail
     assert set(_not_passing(run)) == {"admin_simulated_denied:cloudtrail_bucket"}
     simulations = [
-        p for _, o, p in run.account.calls_by("operator") if o == "SimulatePrincipalPolicy"
+        p
+        for _, o, p in run.account.calls_by("operator")
+        if o == "SimulatePrincipalPolicy" and p["ResourceArns"] != [_CURSOR_KEY_ARN]
     ]
     assert len(simulations) == 10
     assert sorted({p["PolicySourceArn"] for p in simulations}) == sorted(
@@ -1684,7 +1788,7 @@ def test_absent_backend_config_defers_only_the_state_store_rows(tmp_path: Path) 
         if any(c.endswith(f"{s}_policy_shape") or f":{s}" in c for s in smoke.STATE_STORES)
     } | {"state_operator_list_matches_stack"}
     assert set(not_passing) == state_checks
-    assert len(run.rows) == 66
+    assert len(run.rows) == 71
 
 
 def test_absent_operator_output_defers_every_shape_and_logs_key_event_row(tmp_path: Path) -> None:
@@ -1708,7 +1812,7 @@ def test_absent_bucket_output_defers_that_bucket_and_its_key(tmp_path: Path) -> 
     not_passing = _not_passing(run)
     assert set(not_passing.values()) == {DEFER}
     assert set(not_passing) == {c for c in _expected_checks() if "eval_artifacts" in c}
-    assert len(run.rows) == 66
+    assert len(run.rows) == 71
 
 
 def test_absent_runtime_output_defers_the_ecr_row(tmp_path: Path) -> None:
@@ -1756,7 +1860,7 @@ def test_backend_config_missing_a_field_fails_the_state_rows(tmp_path: Path) -> 
     by = run.by_check()
     assert by["tfstate_key_policy_shape"].status == "fail"
     assert "dynamodb_table" in by["tfstate_key_policy_shape"].detail
-    assert len(run.rows) == 66
+    assert len(run.rows) == 71
 
 
 # ---------------------------------------------------------------------------
@@ -2129,3 +2233,104 @@ def test_absent_runtime_log_group_output_defers_only_its_ingestion_row(tmp_path:
     outputs = {k: v for k, v in _OUTPUTS.items() if k != "agentcore_runtime_log_group_name"}
     run = _run(tmp_path, outputs=outputs)
     assert _not_passing(run) == {"log_ingestion_current:runtime_log": DEFER}
+
+
+# ---------------------------------------------------------------------------
+# The pagination-cursor CMK: a real denied Encrypt and four live-policy simulations.
+# ---------------------------------------------------------------------------
+
+
+def _cursor_failing(run: Run) -> set[str]:
+    by = run.by_check()
+    return {check for check in smoke.CURSOR_KEY_CHECKS if by[check].status != "pass"}
+
+
+def test_the_cursor_key_rows_pass_on_a_compliant_account(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    assert _cursor_failing(run) == set()
+    encrypts = [p for s, o, p in run.account.calls_by("probe") if o == "Encrypt"]
+    assert len(encrypts) == 1 and encrypts[0]["KeyId"] == _CURSOR_KEY_ARN
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        None,
+        _implicit_deny("kms:Encrypt", _CURSOR_KEY_ARN),
+        Err("NotFoundException", "Key does not exist", 400),
+    ],
+    ids=["encrypt-succeeded", "implicit-deny", "reached-the-key"],
+)
+def test_a_cursor_encrypt_not_refused_by_the_key_policy_reds_exactly_its_row(
+    tmp_path: Path, outcome: Err | None
+) -> None:
+    run = _run(tmp_path, FakeAccount(cursor_encrypt_outcome=outcome))
+    assert _cursor_failing(run) == {smoke.CHECK_CURSOR_PROBE}
+    assert run.by_check()[smoke.CHECK_CURSOR_PROBE].status == "fail"
+
+
+@pytest.mark.parametrize(
+    ("principal", "decisions", "reddened"),
+    [
+        (_PROBE_ROLE_ARN, {"kms:Encrypt": "allowed"}, smoke.CHECK_CURSOR_SIM_PROBE),
+        (_PROBE_ROLE_ARN, {"kms:Decrypt": "implicitDeny"}, smoke.CHECK_CURSOR_SIM_PROBE),
+        (_CURSOR_ROLE, {"kms:Decrypt": "explicitDeny"}, smoke.CHECK_CURSOR_SIM_ROLE),
+        (_OPERATOR_ARN, {"kms:Encrypt": "explicitDeny"}, smoke.CHECK_CURSOR_SIM_OPERATOR),
+        (_CURSOR_ROLE, {"kms:PutKeyPolicy": "allowed"}, smoke.CHECK_CURSOR_SIM_ADMIN),
+        (_CURSOR_ROLE, {"kms:DisableKeyRotation": "implicitDeny"}, smoke.CHECK_CURSOR_SIM_ADMIN),
+    ],
+    ids=[
+        "probe-allowed",
+        "probe-implicit",
+        "role-denied",
+        "operator-denied",
+        "role-may-change-policy",
+        "role-rotation-implicit",
+    ],
+)
+def test_each_cursor_simulation_reds_exactly_its_row(
+    tmp_path: Path, principal: str, decisions: dict[str, str], reddened: str
+) -> None:
+    run = _run(tmp_path, FakeAccount(cursor_simulated={principal: decisions}))
+    assert _cursor_failing(run) == {reddened}
+    assert "not a call" in run.by_check()[reddened].detail
+
+
+def test_an_unreadable_cursor_key_policy_fails_every_simulation_but_still_probes(
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path, FakeAccount(cursor_policy=None))
+    assert _cursor_failing(run) == set(smoke.CURSOR_KEY_CHECKS) - {smoke.CHECK_CURSOR_PROBE}
+
+
+def test_a_function_without_the_cursor_key_variable_fails_every_cursor_row(
+    tmp_path: Path,
+) -> None:
+    run = _run(tmp_path, FakeAccount(cursor_env={}))
+    assert _cursor_failing(run) == set(smoke.CURSOR_KEY_CHECKS)
+    by = run.by_check()
+    assert all(by[c].status == "fail" for c in smoke.CURSOR_KEY_CHECKS)
+    assert "CRM_CURSOR_KMS_KEY_ARN" in by[smoke.CHECK_CURSOR_PROBE].detail
+    assert not [o for _s, o, _p in run.account.calls_by("probe") if o == "Encrypt"]
+    policy = next(
+        json.loads(p["PolicyDocument"])
+        for _s, o, p in run.account.calls_by("operator")
+        if o == "PutRolePolicy"
+    )
+    assert "ProbeCursorKmsEncrypt" not in {st["Sid"] for st in policy["Statement"]}
+
+
+def test_key_policy_for_simulation_rewrites_only_star_resources() -> None:
+    from scripts.smoke.harness import key_policy_for_simulation
+
+    rewritten = json.loads(key_policy_for_simulation(_CURSOR_POLICY, _CURSOR_KEY_ARN))
+    assert [s["Resource"] for s in rewritten["Statement"]] == [
+        _CURSOR_KEY_ARN,
+        [_CURSOR_KEY_ARN],
+        [_CURSOR_KEY_ARN, _UNRELATED_RESOURCE],
+    ]
+    untouched = json.dumps(
+        {"Statement": {"Effect": "Deny", "Action": "kms:*", "NotResource": "*", "Resource": "x"}}
+    )
+    single = json.loads(key_policy_for_simulation(untouched, _CURSOR_KEY_ARN))["Statement"]
+    assert (single["Resource"], single["NotResource"]) == ("x", "*")

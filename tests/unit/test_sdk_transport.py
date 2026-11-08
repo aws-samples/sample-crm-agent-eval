@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""The shared SDK transport: attempt recording, deadline, lock-down, logger levels.
+"""The shared SDK transport: attempt recording, deadline, lock-down, environment, logger levels.
 
 Retry, credential and logging assertions drive the real vendor SDK clients over an
 ``httpx2.MockTransport``. No network is reached and no AWS call is made.
@@ -7,10 +7,13 @@ Retry, credential and logging assertions drive the real vendor SDK clients over 
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
 import logging
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import anthropic
@@ -24,9 +27,11 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from scripts import check_lambda_zip_imports
 
+from agents import runtime_server
 from eval.live import is_retryable_error
-from providers import sdk_transport
+from providers import sdk_loggers, sdk_transport
 from providers.base import ProviderEvent, RetriedAttempt
 from providers.sdk_transport import (
     MODEL_CALL_DEADLINE_SECONDS,
@@ -65,7 +70,16 @@ BEDROCK_FALLBACK_ENV_VARS = (
     "AWS_BEDROCK_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
 )
-QUIETED_LOGGERS = ("anthropic", "openai", "httpx2", "httpcore2")
+QUIETED_LOGGERS = (
+    "anthropic",
+    "openai",
+    "httpx2",
+    "httpcore2",
+    "botocore",
+    "boto3",
+    "urllib3",
+    "s3transfer",
+)
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
@@ -720,6 +734,212 @@ def test_client_build_restores_warning_after_an_sdk_lowered_the_level() -> None:
         logging.getLogger(name).setLevel(logging.DEBUG)
     anthropic_client_kwargs(region=REGION, http_client=build_http_client())
     assert {logging.getLogger(n).level for n in QUIETED_LOGGERS} == {logging.WARNING}
+
+
+def test_sdk_loggers_cover_the_boto3_family_and_its_http_stack() -> None:
+    assert set(sdk_transport.SDK_LOGGERS) == set(QUIETED_LOGGERS)
+
+
+@contextmanager
+def _isolated_root_logging() -> Iterator[None]:
+    """Run with no root handler and every quieted logger at NOTSET; restore all of it afterwards.
+
+    Entered inside the test body, since pytest attaches its own root handlers per test phase.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_root_level = root.level
+    saved_levels = {name: logging.getLogger(name).level for name in QUIETED_LOGGERS}
+    root.handlers.clear()
+    for name in QUIETED_LOGGERS:
+        logging.getLogger(name).setLevel(logging.NOTSET)
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_root_level)
+        for name, level in saved_levels.items():
+            logging.getLogger(name).setLevel(level)
+
+
+def _effective_levels_below_warning() -> dict[str, str]:
+    return {
+        name: logging.getLevelName(logging.getLogger(name).getEffectiveLevel())
+        for name in QUIETED_LOGGERS
+        if logging.getLogger(name).getEffectiveLevel() < logging.WARNING
+    }
+
+
+def test_runtime_debug_logging_leaves_every_sdk_logger_at_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    with _isolated_root_logging():
+        runtime_server.configure_logging()
+
+        assert logging.getLogger().level == logging.DEBUG
+        assert _effective_levels_below_warning() == {}
+
+
+def test_runtime_debug_logging_quiets_sdk_loggers_when_a_root_handler_already_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    with _isolated_root_logging():
+        logging.getLogger().addHandler(logging.NullHandler())
+        logging.getLogger().setLevel(logging.DEBUG)
+
+        runtime_server.configure_logging()
+
+        assert _effective_levels_below_warning() == {}
+
+
+def test_control_a_debug_root_alone_lowers_every_sdk_logger() -> None:
+    with _isolated_root_logging():
+        logging.basicConfig(level=logging.DEBUG)
+
+        assert set(_effective_levels_below_warning()) == set(QUIETED_LOGGERS)
+
+
+def test_no_botocore_debug_record_reaches_the_root_after_runtime_debug_logging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    with _isolated_root_logging():
+        runtime_server.configure_logging()
+        handler = _Capture()
+        logging.getLogger().addHandler(handler)
+
+        logging.getLogger("botocore.endpoint").debug("Sending http request: body=secret")
+        logging.getLogger("urllib3.connectionpool").debug("https://example.invalid:443 GET /")
+
+        assert handler.records == []
+
+
+_SRC = Path(__file__).resolve().parents[2] / "src"
+_ADAPTERS = frozenset({"providers.anthropic_adapter", "providers.openai_adapter"})
+
+
+def _source_file(module: str) -> Path | None:
+    candidate = _SRC.joinpath(*module.split("."))
+    if candidate.with_suffix(".py").is_file():
+        return candidate.with_suffix(".py")
+    if (candidate / "__init__.py").is_file():
+        return candidate / "__init__.py"
+    return None
+
+
+def _first_party_closure(root: str, *, stop_at: frozenset[str] = frozenset()) -> set[str]:
+    """Every first-party module `root` can import, function-body imports included.
+
+    Parsed with the zip gate's own import collector; modules in `stop_at` are not entered.
+    """
+    seen: set[str] = set()
+    pending = [root]
+    while pending:
+        module = pending.pop()
+        path = _source_file(module)
+        if module in seen or module in stop_at or path is None:
+            continue
+        seen.add(module)
+        package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+        parents = [".".join(module.split(".")[:i]) for i in range(1, module.count(".") + 1)]
+        targets = check_lambda_zip_imports._import_targets(ast.parse(path.read_text()), package)
+        pending += parents + [target for target, _optional in targets]
+    return seen
+
+
+def _eval_trigger_zip_handler_modules() -> list[str]:
+    specs = check_lambda_zip_imports.expected_zips()
+    return sorted({spec.module for spec in specs if spec.zip_name == "eval_trigger.zip"})
+
+
+def test_no_eval_trigger_zip_handler_reaches_the_sdk_transport_except_via_an_adapter() -> None:
+    handlers = _eval_trigger_zip_handler_modules()
+    assert "crm.handlers.eval_trigger" in handlers
+    reaching = [
+        handler
+        for handler in handlers
+        if "providers.sdk_transport" in _first_party_closure(handler, stop_at=_ADAPTERS)
+    ]
+    assert reaching == []
+
+
+def test_control_the_closure_walk_reaches_the_sdk_transport_through_an_adapter() -> None:
+    assert "providers.sdk_transport" in _first_party_closure("providers.anthropic_adapter")
+
+
+def test_the_runtime_server_reaches_the_logger_set_but_not_the_sdk_transport() -> None:
+    closure = _first_party_closure("agents.runtime_server", stop_at=_ADAPTERS)
+    assert "providers.sdk_loggers" in closure
+    assert "providers.sdk_transport" not in closure
+
+
+def test_sdk_transport_re_exports_the_logger_set_and_quieting() -> None:
+    assert sdk_transport.SDK_LOGGERS is sdk_loggers.SDK_LOGGERS
+    assert sdk_transport.quiet_sdk_loggers is sdk_loggers.quiet_sdk_loggers
+
+
+# --- Environment lock-down ------------------------------------------------------------------------
+
+_PROXY_ENV_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "all_proxy")
+
+
+def _close(client: httpx2.AsyncClient) -> None:
+    asyncio.run(client.aclose())
+
+
+def _mounted_proxies(client: httpx2.AsyncClient) -> dict[str, object]:
+    return {
+        str(pattern.pattern): transport
+        for pattern, transport in client._mounts.items()
+        if transport
+    }
+
+
+@pytest.fixture
+def proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name in _PROXY_ENV_VARS:
+        monkeypatch.setenv(name, "http://proxy.example.invalid:3128")
+
+
+def test_shared_client_does_not_trust_the_environment() -> None:
+    client = build_http_client()
+    try:
+        assert client.trust_env is False
+    finally:
+        _close(client)
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_proxy_environment_variables_mount_no_proxy_on_the_shared_client() -> None:
+    client = build_http_client()
+    try:
+        assert _mounted_proxies(client) == {}
+    finally:
+        _close(client)
+
+
+@pytest.mark.usefixtures("proxy_env")
+def test_control_a_default_client_mounts_the_environment_proxy() -> None:
+    client = httpx2.AsyncClient()
+    try:
+        assert "all://" in _mounted_proxies(client)
+    finally:
+        _close(client)
+
+
+def test_ssl_cert_file_from_the_environment_is_not_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "absent-ca-bundle.pem"))
+
+    _close(build_http_client())
+
+    with pytest.raises(FileNotFoundError):
+        httpx2.AsyncClient()
 
 
 # --- Exhausted-error rendering --------------------------------------------------------------------

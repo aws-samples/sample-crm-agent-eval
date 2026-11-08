@@ -37,8 +37,16 @@ export interface AuthSession {
   getIdentity(): Identity;
   /** Returns a valid, non-expired Cognito ID token, refreshing first if necessary. */
   getAccessToken(): Promise<string>;
-  /** Signs the user out and clears all cached Cognito state for this pool. */
+  /**
+   * Signs the user out: starts revoking the refresh token, and clears all cached Cognito state for
+   * this pool before returning.
+   */
   signOut(): void;
+}
+
+/** `CognitoUser.revokeTokens`, present at runtime but missing from the library's type declarations. */
+interface RevocableUser {
+  revokeTokens(callback: (err?: Error) => void): void;
 }
 
 export class CognitoAuthSession implements AuthSession {
@@ -125,7 +133,15 @@ export class CognitoAuthSession implements AuthSession {
     return this.session.getIdToken().getJwtToken();
   }
 
+  /**
+   * Start revoking the refresh token, then clear every cached Cognito token synchronously. The
+   * revocation runs in the background; a token without `origin_jti` is not revocable and makes no
+   * network call, and a failed revocation is reported to the console only.
+   */
   signOut(): void {
+    (this.user as unknown as RevocableUser).revokeTokens((err?: Error) => {
+      if (err) console.warn("Could not revoke the refresh token at sign-out", err.name);
+    });
     this.user.signOut();
   }
 }

@@ -25,6 +25,7 @@ describes what it asserts and its declared limits.
 | `18-approval-rebase` | An unrelated `log_activity` write does not block approval; a write to a touched field shows the three-way conflict view, and "Refresh and review current state" rebases it so approval succeeds |
 | `19-account-opportunities` | An account's detail page lists its opportunities in the shared table; an account with none shows "No opportunities yet." and no table |
 | `20-chat-cost` | Each reply shows its cost with a per-tier breakdown and the header totals the conversation; the withheld text appears only when `config/pricing.yaml` is `provisional: true` |
+| `21-tier-comparison` | A stub sweep's tier comparison summary renders three tables (Supervisor, Subagent, ToolCall), each headed `Metric` plus one column per arm with fixed row labels and the notes beneath; every cell equals the run status's `tier_comparison_table`, and the downloaded `matrix.md`'s tier section carries the same cells and notes. No verdict or winner term appears in either |
 
 Journeys 14–20 sit in one directory each.
 

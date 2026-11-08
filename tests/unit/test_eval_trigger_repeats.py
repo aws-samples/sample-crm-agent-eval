@@ -50,13 +50,15 @@ def test_a_stub_submit_records_its_repeats_and_counts_every_item(
     (row,) = _job_rows(store)
     stored = store.get_item("eval_runs", {"run_id": str(row["run_id"])})
     assert stored is not None and stored["repeats"] == repeats
-    status, polled = _call(store, sfn, _event({"action": "status", "run_id": run["run_id"]}))
+    status, polled = _call(
+        store, sfn, _event({"action": "status", "run_id": run["run_id"]}, full=True)
+    )
     assert status == 200 and polled["repeats"] == repeats
 
 
 def test_the_estimate_scales_with_repeats(store: Store, sfn: Sfn) -> None:
-    status_one, one = _call(store, sfn, _event({"action": "estimate"}))
-    status_three, three = _call(store, sfn, _event({"action": "estimate", "repeats": 3}))
+    status_one, one = _call(store, sfn, _event({"action": "estimate"}, full=True))
+    status_three, three = _call(store, sfn, _event({"action": "estimate", "repeats": 3}, full=True))
     assert (status_one, status_three) == (200, 200)
     assert (one["repeats"], three["repeats"]) == (1, 3)
     assert one["task_count"] == three["task_count"]

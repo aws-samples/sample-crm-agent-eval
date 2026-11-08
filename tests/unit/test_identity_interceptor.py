@@ -10,6 +10,7 @@ code path against a real signed token without reaching Cognito.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 from unittest.mock import patch
@@ -566,6 +567,108 @@ def test_denial_never_contains_the_raw_token_text() -> None:
 
     denial_text = str(result["mcp"]["transformedGatewayResponse"]["body"])
     assert token not in denial_text
+
+
+def _assert_denied(result: dict[str, Any]) -> dict[str, Any]:
+    assert "transformedGatewayRequest" not in result["mcp"]
+    denial: dict[str, Any] = result["mcp"]["transformedGatewayResponse"]["body"]
+    assert denial["error"]["code"] == -32001
+    assert denial["error"]["message"] == "Authentication failed. Sign in again to continue."
+    return denial
+
+
+def _event_with_body(body: object, *, token: str | None) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {token}"} if token is not None else {}
+    return {"mcp": {"gatewayRequest": {"headers": headers, "body": body}}}
+
+
+@pytest.mark.parametrize("body", [[{"method": "tools/list"}], ["tools/call"], "tools/call", 7])
+def test_a_non_object_body_is_denied_even_with_a_valid_token(body: object) -> None:
+    """A JSON-RPC batch (array) or scalar body is refused before any field of it is read."""
+    result = _invoke(_event_with_body(body, token=_sign(_valid_claims())), _config())
+
+    denial = _assert_denied(result)
+    assert denial["id"] is None
+
+
+@pytest.mark.parametrize("params", ["x", ["ab"], ["ab", "cd"], 3])
+def test_a_non_object_params_is_denied_even_with_a_valid_token(params: object) -> None:
+    """`params` that is not an object can carry no `arguments._identity`, so it is refused."""
+    body = {"jsonrpc": "2.0", "id": "p-1", "method": "tools/call", "params": params}
+
+    result = _invoke(_event_with_body(body, token=_sign(_valid_claims())), _config())
+
+    denial = _assert_denied(result)
+    assert denial["id"] == "p-1"
+
+
+def test_an_absent_params_still_reaches_token_verification() -> None:
+    """Only a present, non-object `params` is malformed; an omitted one is not denied for shape."""
+    body = {"jsonrpc": "2.0", "id": "p-2", "method": "initialize"}
+
+    result = _invoke(_event_with_body(body, token=_sign(_valid_claims())), _config())
+
+    rewritten = result["mcp"]["transformedGatewayRequest"]["body"]
+    assert rewritten["params"]["arguments"][IDENTITY_KEY]["rep_id"] == "rep-1"
+
+
+def test_an_unexpected_exception_is_denied_with_one_structured_log_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Any exception inside the handler becomes a denial, logged without a traceback or token."""
+    token = _sign(_valid_claims())
+    event = _gateway_request(token=token, arguments={"opportunity_id": "opp-1"}, tool_id="u-1")
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="gateway.identity_interceptor"),
+        patch(
+            "gateway.identity_interceptor._build_verified_identity",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        result = _invoke(event, _config())
+
+    denial = _assert_denied(result)
+    assert denial["id"] == "u-1"
+    denied = [
+        record
+        for record in caplog.records
+        if json.loads(record.getMessage()).get("event") == "gateway_auth_denied"
+    ]
+    assert len(denied) == 1
+    assert json.loads(denied[0].getMessage())["reason"] == "unexpected_error:RuntimeError"
+    assert denied[0].exc_info is None
+    assert all(token not in record.getMessage() for record in caplog.records)
+    assert "boom" not in caplog.text
+
+
+def test_a_configuration_error_is_denied_and_logs_which_setting_is_wrong(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A Lambda with missing configuration fails closed, and the denial names the bad setting."""
+    token = _sign(_valid_claims())
+    event = _gateway_request(token=token, arguments={}, tool_id="c-1")
+
+    with (
+        caplog.at_level(logging.DEBUG, logger="gateway.identity_interceptor"),
+        patch(
+            "gateway.identity_interceptor._load_config",
+            side_effect=InterceptorConfigError("discovery_url must be non-empty"),
+        ),
+    ):
+        result = lambda_handler(event, object())
+
+    assert _assert_denied(result)["id"] == "c-1"
+    reasons = [json.loads(record.getMessage())["reason"] for record in caplog.records]
+    assert reasons == ["config_error:discovery_url must be non-empty"]
+    assert token not in caplog.text
+
+
+@pytest.mark.parametrize("event", [{}, {"mcp": []}, {"mcp": {"gatewayRequest": "x"}}, []])
+def test_a_malformed_event_envelope_is_denied(event: Any) -> None:
+    result = _invoke(event, _config())
+
+    assert _assert_denied(result)["id"] is None
 
 
 def test_denial_never_contains_an_account_identifier() -> None:

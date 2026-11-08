@@ -21,6 +21,7 @@ from agents.tool_actor import ToolDispatch
 from crm.dispatch import invoke_action
 from crm.envelope import (
     AGENT_IDENTITY_KEY,
+    AGENT_PRINCIPAL_TYPE_KEY,
     CLAIM_BOOK,
     CLAIM_FULL_VISIBILITY,
     CLAIM_REP_ID,
@@ -51,8 +52,8 @@ def action_function_name(tool_name: str) -> str:
 def agent_identity_event(identity: Identity, tool_input: dict[str, object]) -> dict[str, Any]:
     """Build the action-Lambda event an in-app agent sends, on the ``agent`` channel.
 
-    :data:`crm.envelope.AGENT_IDENTITY_KEY` carries the invoking user's claims, with the tool's
-    arguments as sibling keys. ``tool_input`` is untrusted and is stripped of every identity channel
+    :data:`crm.envelope.AGENT_IDENTITY_KEY` carries the invoking user's claims and principal type,
+    with the tool's arguments as sibling keys. ``tool_input`` is untrusted and is stripped of every identity channel
     by :func:`crm.envelope.identity_event` before the trusted block is written.
 
     Args:
@@ -72,6 +73,7 @@ def agent_identity_event(identity: Identity, tool_input: dict[str, object]) -> d
                 CLAIM_TENANT: identity.tenant,
             },
             "session_id": identity.session_id,
+            AGENT_PRINCIPAL_TYPE_KEY: identity.principal_type,
         },
         tool_input,
     )

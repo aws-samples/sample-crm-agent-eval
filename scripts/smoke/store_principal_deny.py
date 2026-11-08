@@ -40,6 +40,16 @@ Rows:
 * `logs_probe_denied`: the probe's `FilterLogEvents` on the probed log group is refused with an
   explicit resource-based deny (pass); an implicit deny fails; a successful read defers as
   `logs_read_not_key_gated`; any other refusal defers with its message.
+* `probe_denied:cursor_key:kms_encrypt_with_context`: the pagination-cursor CMK, read from the
+  `CRM_CURSOR_KMS_KEY_ARN` of the deployed `search_opportunities` function. The probe role holds an
+  identity Allow for `kms:Encrypt` on it, and its `Encrypt` under the valid `crm-cursor` context is
+  refused with an explicit resource-based deny, classified like every other probe row.
+* `cursor_key_simulated:<subject>`: simulations of the live cursor key policy, each naming
+  `aws:PrincipalArn` and the valid encryption context: `Encrypt`/`Decrypt` are `explicitDeny` for
+  the probe role (`probe_denied`) and not for the `search_opportunities` role
+  (`allowlisted_role_admitted`) or the operator (`operator_admitted`); `PutKeyPolicy`,
+  `ScheduleKeyDeletion` and `DisableKeyRotation` are `explicitDeny` for that role
+  (`allowlisted_role_admin_denied`).
 * `probe_role_setup` (only on failure) and `probe_role_deleted`: the probe role is deleted in a
   `finally`.
 * `cloudtrail_delivery_current` and `cloudtrail_logs_delivery_current`: `get-trail-status` shows an
@@ -120,6 +130,7 @@ from scripts.smoke.harness import (
     SmokeContext,
     Status,
     error_code,
+    key_policy_for_simulation,
     open_https,
     run_main,
 )
@@ -349,6 +360,31 @@ LOOKUP_PAGE_PAUSE_SECONDS: Final[float] = 0.5
 LAYER_FETCH_TIMEOUT_SECONDS: Final[float] = 20.0
 ASSUME_TIMEOUT_SECONDS: Final[float] = 60.0
 
+CURSOR_KEY: Final[str] = "cursor_key"
+CURSOR_KEY_FUNCTION: Final[str] = f"{FUNCTION_PREFIX}search_opportunities"
+CURSOR_KEY_ENV_VAR: Final[str] = "CRM_CURSOR_KMS_KEY_ARN"
+CURSOR_KEY_PURPOSE: Final[str] = "crm-cursor"
+CURSOR_KEY_CONTEXT_KEYS: Final[tuple[str, ...]] = ("purpose", "tenant", "rep_id", "operation")
+CURSOR_KEY_USE_ACTIONS: Final[tuple[str, ...]] = ("kms:Encrypt", "kms:Decrypt")
+CURSOR_KEY_ADMIN_ACTIONS: Final[tuple[str, ...]] = (
+    "kms:PutKeyPolicy",
+    "kms:ScheduleKeyDeletion",
+    "kms:DisableKeyRotation",
+)
+PROBE_CURSOR_ENCRYPT: Final[str] = "kms_encrypt_with_context"
+CHECK_CURSOR_PROBE: Final[str] = f"probe_denied:{CURSOR_KEY}:{PROBE_CURSOR_ENCRYPT}"
+CHECK_CURSOR_SIM_PROBE: Final[str] = "cursor_key_simulated:probe_denied"
+CHECK_CURSOR_SIM_ROLE: Final[str] = "cursor_key_simulated:allowlisted_role_admitted"
+CHECK_CURSOR_SIM_OPERATOR: Final[str] = "cursor_key_simulated:operator_admitted"
+CHECK_CURSOR_SIM_ADMIN: Final[str] = "cursor_key_simulated:allowlisted_role_admin_denied"
+CURSOR_KEY_CHECKS: Final[tuple[str, ...]] = (
+    CHECK_CURSOR_PROBE,
+    CHECK_CURSOR_SIM_PROBE,
+    CHECK_CURSOR_SIM_ROLE,
+    CHECK_CURSOR_SIM_OPERATOR,
+    CHECK_CURSOR_SIM_ADMIN,
+)
+
 DEFER_BACKEND_CONFIG_ABSENT: Final[str] = "backend_config_absent"
 DEFER_STACK_OUTPUT_ABSENT: Final[str] = "stack_output_absent"
 DEFER_DELIVERY_NOT_CURRENT: Final[str] = "cloudtrail_delivery_not_current"
@@ -411,6 +447,151 @@ class Allowlists:
     root: str
     logs_key_roles: frozenset[str] | Unavailable
     eval_artifacts_roles: frozenset[str] | Unavailable
+
+
+@dataclass(frozen=True)
+class CursorKey:
+    """The pagination-cursor CMK, one role its policy admits, and its live key policy."""
+
+    store: Store
+    allowlisted_role_arn: str
+    policy_text: str | None
+
+
+def discover_cursor_key(ctx: SmokeContext) -> CursorKey | Unavailable:
+    """The cursor CMK named by `search_opportunities`' environment, with that function's role."""
+    try:
+        config = ctx.client("lambda").get_function_configuration(FunctionName=CURSOR_KEY_FUNCTION)
+    except Exception as exc:  # noqa: BLE001 - every cursor-key row fails naming the cause
+        return Unavailable(
+            "fail", _raised(f"get-function-configuration {CURSOR_KEY_FUNCTION}", exc)
+        )
+    variables = (config.get("Environment") or {}).get("Variables") or {}
+    key_arn = str(variables.get(CURSOR_KEY_ENV_VAR) or "")
+    role_arn = str(config.get("Role") or "")
+    if not key_arn.startswith("arn:") or not role_arn:
+        return Unavailable(
+            "fail",
+            f"{CURSOR_KEY_FUNCTION} carries no {CURSOR_KEY_ENV_VAR} key ARN or no role "
+            f"({CURSOR_KEY_ENV_VAR}={key_arn!r})",
+        )
+    try:
+        policy_text: str | None = str(
+            ctx.client("kms").get_key_policy(KeyId=key_arn, PolicyName="default")["Policy"]
+        )
+    except Exception:  # noqa: BLE001 - the simulation rows report the unreadable policy
+        policy_text = None
+    return CursorKey(
+        store=Store(name=CURSOR_KEY, kind="key", arn=key_arn, physical=key_arn),
+        allowlisted_role_arn=role_arn,
+        policy_text=policy_text,
+    )
+
+
+def cursor_key_context(principal_arn: str) -> list[dict[str, Any]]:
+    """Simulation context: the principal, a non-service caller, and the valid cursor context."""
+    return [
+        {
+            "ContextKeyName": PRINCIPAL_ARN_KEY,
+            "ContextKeyValues": [principal_arn],
+            "ContextKeyType": "string",
+        },
+        {
+            "ContextKeyName": PRINCIPAL_IS_SERVICE_KEY,
+            "ContextKeyValues": ["false"],
+            "ContextKeyType": "boolean",
+        },
+        {
+            "ContextKeyName": "kms:EncryptionContext:purpose",
+            "ContextKeyValues": [CURSOR_KEY_PURPOSE],
+            "ContextKeyType": "string",
+        },
+        {
+            "ContextKeyName": "kms:EncryptionContextKeys",
+            "ContextKeyValues": list(CURSOR_KEY_CONTEXT_KEYS),
+            "ContextKeyType": "stringList",
+        },
+    ]
+
+
+def _simulate_cursor_key(
+    ctx: SmokeContext,
+    principal_arn: str,
+    cursor: CursorKey,
+    actions: Sequence[str],
+    root_arn: str,
+) -> dict[str, str]:
+    if cursor.policy_text is None:
+        raise ValueError("the cursor key policy could not be read")
+    response = ctx.client("iam").simulate_principal_policy(
+        PolicySourceArn=principal_arn,
+        ActionNames=list(actions),
+        ResourceArns=[cursor.store.arn],
+        ResourcePolicy=key_policy_for_simulation(cursor.policy_text, cursor.store.arn),
+        ResourceOwner=root_arn,
+        ContextEntries=cursor_key_context(principal_arn),
+    )
+    if response.get("IsTruncated"):
+        raise ValueError("the simulation result is truncated")
+    return {
+        str(r.get("EvalActionName")): str(r.get("EvalDecision"))
+        for r in response.get("EvaluationResults", [])
+    }
+
+
+def cursor_key_simulation_rows(
+    ctx: SmokeContext, cursor: CursorKey, probe_arn: str, operator_arn: str, root_arn: str
+) -> Iterator[CheckResult]:
+    """Four simulations of the live cursor key policy under the valid encryption context."""
+    cases: tuple[tuple[str, str, Sequence[str], bool], ...] = (
+        (CHECK_CURSOR_SIM_PROBE, probe_arn, CURSOR_KEY_USE_ACTIONS, True),
+        (CHECK_CURSOR_SIM_ROLE, cursor.allowlisted_role_arn, CURSOR_KEY_USE_ACTIONS, False),
+        (CHECK_CURSOR_SIM_OPERATOR, operator_arn, CURSOR_KEY_USE_ACTIONS, False),
+        (CHECK_CURSOR_SIM_ADMIN, cursor.allowlisted_role_arn, CURSOR_KEY_ADMIN_ACTIONS, True),
+    )
+    for check, principal, actions, expect_deny in cases:
+        try:
+            decisions = _simulate_cursor_key(ctx, principal, cursor, actions, root_arn)
+        except Exception as exc:  # noqa: BLE001 - reported as a failing row
+            yield _fail(cursor.store.physical, check, _raised("simulate-principal-policy", exc))
+            continue
+        problems = [
+            f"{action}={decisions.get(action, 'not evaluated')}"
+            for action in actions
+            if (decisions.get(action) == "explicitDeny") != expect_deny
+        ]
+        wanted = "explicitDeny" if expect_deny else "not explicitDeny"
+        yield CheckResult(
+            resource=cursor.store.physical,
+            check=check,
+            status="fail" if problems else "pass",
+            detail=(
+                "simulation of the live key policy, not a call: "
+                + (
+                    f"expected {wanted}: " + "; ".join(problems)
+                    if problems
+                    else f"{', '.join(actions)} {wanted}"
+                )
+            ),
+        )
+
+
+def cursor_probe_request(cursor: CursorKey, run_id: str) -> tuple[str, str, dict[str, Any]]:
+    """The probe's `Encrypt` under the valid cursor context; the ciphertext is discarded."""
+    return (
+        "kms",
+        "encrypt",
+        {
+            "KeyId": cursor.store.arn,
+            "Plaintext": b"probe",
+            "EncryptionContext": {
+                "purpose": CURSOR_KEY_PURPOSE,
+                "tenant": f"probe-{run_id}",
+                "rep_id": f"probe-{run_id}",
+                "operation": "search_opportunities",
+            },
+        },
+    )
 
 
 def redact(text: str) -> str:
@@ -1487,8 +1668,10 @@ def probe_identity_policy(
     stores: Mapping[str, Discovered],
     log_group: Mapping[str, Any] | None,
     image: RuntimeImage | Unavailable,
+    cursor: CursorKey | Unavailable | None = None,
 ) -> dict[str, Any]:
-    """Allow exactly the probed actions on the discovered stores, log group and image repository."""
+    """Allow exactly the probed actions on the discovered stores, log group, image repository and
+    cursor key."""
     found = {name: s for name, s in stores.items() if isinstance(s, Store)}
     keys = sorted(found[n].arn for n in KEY_STORES if n in found)
     admin_keys = sorted(s.arn for s in found.values() if s.kind == "key")
@@ -1555,6 +1738,15 @@ def probe_identity_policy(
                 "Effect": "Allow",
                 "Action": ["logs:FilterLogEvents"],
                 "Resource": [str(log_group["arn"])],
+            }
+        )
+    if isinstance(cursor, CursorKey):
+        statements.append(
+            {
+                "Sid": "ProbeCursorKmsEncrypt",
+                "Effect": "Allow",
+                "Action": ["kms:Encrypt"],
+                "Resource": [cursor.store.arn],
             }
         )
     if isinstance(image, RuntimeImage):
@@ -1791,7 +1983,9 @@ def _not_probed(name: str, store: Discovered, check: str, detail: str) -> CheckR
 
 
 def _pending_probe_checks(
-    stores: Mapping[str, Discovered], image: RuntimeImage | Unavailable
+    stores: Mapping[str, Discovered],
+    image: RuntimeImage | Unavailable,
+    cursor: CursorKey | Unavailable,
 ) -> list[tuple[str, str, Discovered]]:
     pending = [
         (name, f"probe_denied:{name}:{call}", stores[name])
@@ -1808,6 +2002,8 @@ def _pending_probe_checks(
         )
     )
     pending.append(("ecr", CHECK_ECR_LAYER_FETCH, ecr_target))
+    cursor_target: Discovered = cursor if isinstance(cursor, Unavailable) else cursor.store
+    pending.extend((CURSOR_KEY, check, cursor_target) for check in CURSOR_KEY_CHECKS)
     return pending
 
 
@@ -1898,6 +2094,7 @@ def _probe_rows(
     policies: Mapping[str, str | None],
     log_group: Mapping[str, Any] | None,
     image: RuntimeImage | Unavailable,
+    cursor: CursorKey | Unavailable,
     identity: CallerIdentity,
     root_arn: str,
     run_id: str,
@@ -1906,8 +2103,8 @@ def _probe_rows(
     sleeper: Callable[[float], None],
     assume_timeout_seconds: float,
 ) -> Iterator[CheckResult]:
-    pending = _pending_probe_checks(stores, image)
-    identity_policy = probe_identity_policy(stores, log_group, image)
+    pending = _pending_probe_checks(stores, image, cursor)
+    identity_policy = probe_identity_policy(stores, log_group, image, cursor)
     role_name = probe_role_name(run_id)
     if not identity_policy["Statement"]:
         for name, check, store in pending:
@@ -1969,6 +2166,26 @@ def _probe_rows(
             )
         rows.append(logs_probe_row(clients["logs"], log_group, stores[LOGS_KEY], role_name))
         rows.append(ecr_layer_fetch_row(clients["ecr"], image, layer_fetcher))
+        if isinstance(cursor, Unavailable):
+            rows.extend(cursor.row(CURSOR_KEY, check) for check in CURSOR_KEY_CHECKS)
+        else:
+            _service, operation, params = cursor_probe_request(cursor, run_id)
+            outcome: BaseException | None = None
+            try:
+                getattr(clients["kms"], operation)(**params)
+            except Exception as exc:  # noqa: BLE001 - every outcome is classified
+                outcome = exc
+            rows.append(
+                classify_store_probe(
+                    f"{CURSOR_KEY}:{PROBE_CURSOR_ENCRYPT}",
+                    cursor.store.physical,
+                    outcome,
+                    role_name,
+                )
+            )
+            rows.extend(
+                cursor_key_simulation_rows(ctx, cursor, role_arn, identity.principal_arn, root_arn)
+            )
     except Exception as exc:  # noqa: BLE001 - reported as failing rows; teardown still runs
         rows.append(
             _fail(
@@ -2062,6 +2279,7 @@ def _rows(
         policies=policies,
         log_group=log_group,
         image=resolve_runtime_image(ctx, identity),
+        cursor=discover_cursor_key(ctx),
         identity=identity,
         root_arn=root_arn,
         run_id=run_id,
@@ -2089,6 +2307,7 @@ def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
     probes = sum(len(probe_calls(name)) for name in PROBED_STORES)
     admitted = len(BUCKET_STORES) + 1
     singletons = (
+        *CURSOR_KEY_CHECKS,
         CHECK_STATE_OPERATORS,
         CHECK_ECR_LAYER_FETCH,
         CHECK_LOGS_PROBE,

@@ -1638,12 +1638,82 @@ def _tier_comparison_rows(
     return rows
 
 
+def _summary_list(summary: Mapping[str, object], key: str) -> list[object]:
+    """Return ``summary[key]`` when it is a list; raise ``ValueError`` otherwise."""
+    value = summary.get(key)
+    if not isinstance(value, list):
+        raise ValueError(f"tier comparison summary field {key!r} is not a list")
+    return cast(list[object], value)
+
+
+def _require_entry_lists(tier: str, entry: Mapping[str, object]) -> None:
+    """Raise ``ValueError`` unless ``entry``'s ``model_ids`` and ``efforts`` lists can be joined.
+
+    ``model_ids`` must be absent, ``None`` or a list of strings; ``efforts`` absent, ``None``, a
+    non-list (rendered ``—``) or a list of strings and ``None``.
+    """
+    model_ids = entry.get("model_ids")
+    if model_ids is not None and (
+        not isinstance(model_ids, list) or not all(isinstance(m, str) for m in model_ids)
+    ):
+        raise ValueError(f"tier comparison summary tier {tier!r} has a non-string model id")
+    efforts = entry.get("efforts")
+    if isinstance(efforts, list) and not all(e is None or isinstance(e, str) for e in efforts):
+        raise ValueError(f"tier comparison summary tier {tier!r} has a non-string effort")
+
+
+def tier_comparison_table(summary: Mapping[str, object]) -> dict[str, object]:
+    """Format a :func:`tier_comparison` summary as display tables of cell strings.
+
+    Pure and deterministic; accepts the summary as built or after a JSON round-trip. The
+    ``## Tier comparison summary`` section of ``matrix.md`` is rendered from this result.
+
+    Args:
+        summary: A :func:`tier_comparison` mapping (``columns``, ``tiers``, ``notes``).
+
+    Returns:
+        ``{"headers": ["Metric", <column label>...], "sections": [{"tier", "heading",
+        "rows": [[label, *cells]]}], "notes": [...]}``, sections in Supervisor, Subagent,
+        ToolCall order.
+
+    Raises:
+        ValueError: ``summary`` is not in the :func:`tier_comparison` shape.
+    """
+    columns = _summary_list(summary, "columns")
+    if not all(isinstance(column, Mapping) for column in columns):
+        raise ValueError("tier comparison summary column is not an object")
+    typed_columns = cast(list[Mapping[str, object]], columns)
+    tiers = summary.get("tiers")
+    if not isinstance(tiers, Mapping):
+        raise ValueError("tier comparison summary field 'tiers' is not an object")
+    notes = _summary_list(summary, "notes")
+    if not all(isinstance(note, str) for note in notes):
+        raise ValueError("tier comparison summary note is not a string")
+    sections: list[dict[str, object]] = []
+    for tier, heading in _TIER_COMPARISON_SECTIONS:
+        entries = tiers.get(tier)
+        if (
+            not isinstance(entries, list)
+            or len(entries) != len(typed_columns)
+            or not all(isinstance(entry, Mapping) for entry in entries)
+        ):
+            raise ValueError(f"tier comparison summary tier {tier!r} does not match its columns")
+        typed_entries = cast(list[Mapping[str, object]], entries)
+        for entry in typed_entries:
+            _require_entry_lists(tier, entry)
+        rows = _tier_comparison_rows(tier, typed_entries, typed_columns)
+        sections.append({"tier": tier, "heading": heading, "rows": [list(row) for row in rows]})
+    return {
+        "headers": ["Metric", *(str(column.get("label")) for column in typed_columns)],
+        "sections": sections,
+        "notes": list(cast(list[str], notes)),
+    }
+
+
 def _render_tier_comparison_markdown(matrix: MatrixResult) -> str:
     """Render the ``## Tier comparison summary`` block that follows the ``matrix.md`` title."""
-    summary = tier_comparison(matrix)
-    columns = cast(list[dict[str, object]], summary["columns"])
-    tiers = cast(dict[str, list[dict[str, object]]], summary["tiers"])
-    headers = ("Metric", *(str(column["label"]) for column in columns))
+    table = tier_comparison_table(tier_comparison(matrix))
+    headers = tuple(cast(list[str], table["headers"]))
     lines = [
         "## Tier comparison summary",
         "",
@@ -1651,17 +1721,11 @@ def _render_tier_comparison_markdown(matrix: MatrixResult) -> str:
         "tables define each row.",
         "",
     ]
-    for tier, heading in _TIER_COMPARISON_SECTIONS:
-        lines.extend(
-            [
-                f"### {heading}",
-                "",
-                _markdown_table(headers, _tier_comparison_rows(tier, tiers[tier], columns)),
-                "",
-            ]
-        )
+    for section in cast(list[dict[str, object]], table["sections"]):
+        rows = [tuple(row) for row in cast(list[list[str]], section["rows"])]
+        lines.extend([f"### {section['heading']}", "", _markdown_table(headers, rows), ""])
     lines.extend(["Notes:", ""])
-    lines.extend(f"- {note}" for note in cast(list[str], summary["notes"]))
+    lines.extend(f"- {note}" for note in cast(list[str], table["notes"]))
     lines.append("")
     return "\n".join(lines)
 

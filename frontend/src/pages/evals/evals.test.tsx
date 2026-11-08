@@ -187,7 +187,7 @@ describe("EvalDashboardPage — progress and results rendering", () => {
 
     // All four artifact kinds present, each opened through a presigned URL rather than a raw path
     // (`evals.artefacts.test.tsx`).
-    for (const name of [/matrix\.json/i, /matrix\.md/i, /matrix\.csv/i, "/results/raw/run-1-anthropic.json"]) {
+    for (const name of [/matrix\.json/i, /^matrix\.md/i, /matrix\.csv/i, "/results/raw/run-1-anthropic.json"]) {
       expect(screen.getByRole("button", { name })).toBeEnabled();
     }
     expect(screen.queryByRole("link", { name: /matrix\.json/i })).not.toBeInTheDocument();

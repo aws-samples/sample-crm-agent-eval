@@ -69,10 +69,22 @@ _SWEEP_OPTIONAL: frozenset[str] = _EVAL_TRIGGER_OPTIONAL | {"EVAL_STATE_MACHINE_
 _SWEEP_TASK_CONFIG = frozenset({"AGENT_RUNTIME_ARN", "AGENT_RUNTIME_QUALIFIER"})
 _SWEEP_CONTROL_CONFIG = frozenset({"EVAL_ARTIFACTS_BUCKET", "EVAL_ARTIFACTS_PREFIX"})
 
+#: `crm.envelope` reads the API client-allowlist parameter name only on the API Gateway channel, which
+#: these functions never serve.
+_NOT_API_CHANNEL: frozenset[str] = frozenset({"CRM_API_ALLOWED_CLIENT_IDS_PARAMETER"})
+
 _FUNCTIONS: tuple[_Function, ...] = (
-    _Function("lambda_action_sweep_control", "eval_sfn.tf", _SWEEP_OPTIONAL | _SWEEP_TASK_CONFIG),
-    _Function("lambda_action_sweep_task", "eval_sfn.tf", _SWEEP_OPTIONAL | _SWEEP_CONTROL_CONFIG),
-    _Function("lambda_action_chat_target", "mcp_chat_gateway.tf"),
+    _Function(
+        "lambda_action_sweep_control",
+        "eval_sfn.tf",
+        _SWEEP_OPTIONAL | _SWEEP_TASK_CONFIG | _NOT_API_CHANNEL,
+    ),
+    _Function(
+        "lambda_action_sweep_task",
+        "eval_sfn.tf",
+        _SWEEP_OPTIONAL | _SWEEP_CONTROL_CONFIG | _NOT_API_CHANNEL,
+    ),
+    _Function("lambda_action_chat_target", "mcp_chat_gateway.tf", _NOT_API_CHANNEL),
     _Function("lambda_action_user_settings", "user_settings.tf"),
     _Function("lambda_action_eval_trigger", "main.tf", _EVAL_TRIGGER_OPTIONAL),
 )

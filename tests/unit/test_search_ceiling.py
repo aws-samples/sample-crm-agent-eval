@@ -6,6 +6,7 @@ Runs against moto so budget crossing exercises the real `query_gsi` pagination.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Iterator
 
 import boto3
@@ -13,8 +14,9 @@ import pytest
 from moto import mock_aws
 
 from crm.authz import Identity
+from crm.cursor import bound_operation, decode_cursor, encode_cursor
 from crm.errors import ScopeDenied, ValidationFailed
-from crm.search import EXAMINATION_BUDGET, decode_cursor, encode_cursor, search_opportunities
+from crm.search import EXAMINATION_BUDGET, search_opportunities
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 
@@ -79,6 +81,11 @@ def _seed_opportunity(
 def _seed_many(store: Store, count: int, **kwargs: object) -> None:
     for i in range(count):
         _seed_opportunity(store, opportunity_id=f"opp-{i:05d}", **kwargs)  # type: ignore[arg-type]
+
+
+def _seed_many_named(store: Store, count: int, *, prefix: str, name: str) -> None:
+    for i in range(count):
+        _seed_opportunity(store, opportunity_id=f"{prefix}-{i:05d}", name=name)
 
 
 # -- basic contract ------------------------------------------------------------------------------
@@ -246,18 +253,59 @@ def test_limit_reached_before_budget_still_marks_truncated_when_index_not_exhaus
     assert result.truncated is True
 
 
-def test_limit_truncation_with_no_cursor_is_still_never_silent(
+def test_a_limit_cut_on_an_exhausted_index_still_issues_a_cursor_to_the_withheld_matches(
     store: Store, identity: Identity
 ) -> None:
-    """A limit-truncated page from an exhausted index has ``next_cursor`` None and ``truncated``
-    True."""
+    """A limit-truncated page from an exhausted index is ``truncated`` and carries a cursor."""
     _seed_many(store, 20, name="Acme Renewal")
 
     result = search_opportunities(store, identity, query="acme", limit=5)
 
     assert result.truncated is True
-    assert result.next_cursor is None
+    assert result.next_cursor is not None
     assert len(result.items) == 5
+
+
+@pytest.mark.parametrize("limit", [1, 3, 7, 199, 201])
+def test_limited_paging_returns_every_match_exactly_once(
+    store: Store, identity: Identity, limit: int
+) -> None:
+    _seed_many(store, 230, name="Acme Renewal")
+    _seed_many_named(store, 40, prefix="other", name="Globex Expansion")
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(300):
+        result = search_opportunities(store, identity, query="acme", limit=limit, cursor=cursor)
+        assert len(result.items) <= limit
+        seen.extend(str(item["opportunity_id"]) for item in result.items)
+        cursor = result.next_cursor
+        if cursor is None:
+            break
+
+    assert cursor is None
+    assert len(seen) == len(set(seen))
+    assert sorted(seen) == [f"opp-{i:05d}" for i in range(230)]
+
+
+def test_limited_paging_with_out_of_book_rows_returns_every_in_scope_match_once(
+    store: Store,
+) -> None:
+    for index in range(12):
+        account = _IN_BOOK if index % 3 == 0 else _OUT_OF_BOOK
+        _seed_opportunity(store, opportunity_id=f"opp-mix-{index:02d}", account_id=account)
+    scoped = Identity(rep_id=_OWNER, book=frozenset({_IN_BOOK}), tenant=_TENANT)
+
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(50):
+        result = search_opportunities(store, scoped, limit=1, cursor=cursor)
+        seen.extend(str(item["opportunity_id"]) for item in result.items)
+        cursor = result.next_cursor
+        if cursor is None:
+            break
+
+    assert sorted(seen) == [f"opp-mix-{index:02d}" for index in range(0, 12, 3)]
 
 
 def test_limit_not_reached_and_index_exhausted_is_not_truncated(
@@ -272,40 +320,145 @@ def test_limit_not_reached_and_index_exhausted_is_not_truncated(
     assert result.next_cursor is None
 
 
-# -- cursor encoding ------------------------------------------------------------------------------
-
-
-def test_encode_and_decode_cursor_round_trip() -> None:
-    page_key: dict[str, object] = {
-        "opportunity_id": {"S": "opp-1"},
-        "tenant_stage": {"S": "demo#Discovery"},
-    }
-
-    token = encode_cursor(page_key)
-    decoded = decode_cursor(token)
-
-    assert decoded == page_key
-
-
-def test_decode_cursor_rejects_a_malformed_token() -> None:
-    with pytest.raises(ValidationFailed) as exc_info:
-        decode_cursor("not-a-valid-cursor!!!")
-
-    assert exc_info.value.source == "cursor"
-
-
-def test_decode_cursor_rejects_a_token_that_decodes_to_a_non_mapping() -> None:
-    import base64
-
-    token = base64.urlsafe_b64encode(b'"just a string"').decode("ascii")
-
-    with pytest.raises(ValidationFailed):
-        decode_cursor(token)
+# -- cursor binding -------------------------------------------------------------------------------
 
 
 def test_search_rejects_a_malformed_cursor_argument(store: Store, identity: Identity) -> None:
-    with pytest.raises(ValidationFailed):
+    with pytest.raises(ValidationFailed) as refused:
         search_opportunities(store, identity, cursor="garbage")
+
+    assert refused.value.source == "cursor"
+
+
+def test_a_next_cursor_does_not_carry_the_page_key_in_the_clear(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
+
+    first = search_opportunities(store, identity, query="acme")
+
+    assert first.next_cursor is not None
+    decoded = decode_cursor(
+        first.next_cursor,
+        identity=identity,
+        operation=bound_operation("search_opportunities", "gsi_tenant", _TENANT),
+    )
+    assert decoded is not None
+    raw = base64.urlsafe_b64decode(first.next_cursor.encode("ascii"))
+    for attribute in decoded.values():
+        for value in attribute.values():
+            assert str(value).encode("utf-8") not in raw
+
+
+@pytest.mark.parametrize(
+    "replayer",
+    [
+        Identity(rep_id="rep-2", full_visibility=True, tenant=_TENANT),
+        Identity(rep_id=_OWNER, full_visibility=True, tenant="eval-other"),
+    ],
+    ids=["other-rep", "other-tenant"],
+)
+def test_a_cursor_replayed_by_another_caller_is_a_cursor_validation_failure(
+    store: Store, identity: Identity, replayer: Identity
+) -> None:
+    _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
+    first = search_opportunities(store, identity, query="acme")
+    assert first.next_cursor is not None
+
+    with pytest.raises(ValidationFailed) as refused:
+        search_opportunities(store, replayer, query="acme", cursor=first.next_cursor)
+
+    assert refused.value.source == "cursor"
+
+
+def test_a_cursor_from_another_operation_is_a_cursor_validation_failure(
+    store: Store, identity: Identity
+) -> None:
+    foreign = encode_cursor(
+        {"opportunity_id": {"S": "opp-00001"}, "tenant": {"S": _TENANT}},
+        identity=identity,
+        operation="search_accounts",
+    )
+
+    with pytest.raises(ValidationFailed) as refused:
+        search_opportunities(store, identity, cursor=foreign)
+
+    assert refused.value.source == "cursor"
+
+
+@pytest.mark.parametrize(
+    "replay_filters",
+    [{}, {"stage": "Negotiation"}, {"owner_rep_id": "rep-2"}, {"account_id": "acct-2"}],
+    ids=["no-filter", "other-stage", "owner-index", "account-index"],
+)
+def test_a_cursor_replayed_with_different_index_selecting_filters_is_refused(
+    store: Store, identity: Identity, replay_filters: dict[str, str]
+) -> None:
+    _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
+    first = search_opportunities(store, identity, query="acme", stage="Discovery")
+    assert first.next_cursor is not None
+
+    with pytest.raises(ValidationFailed) as refused:
+        search_opportunities(
+            store,
+            identity,
+            query="acme",
+            cursor=first.next_cursor,
+            stage=replay_filters.get("stage"),
+            owner_rep_id=replay_filters.get("owner_rep_id"),
+            account_id=replay_filters.get("account_id"),
+        )
+
+    assert refused.value.source == "cursor"
+
+
+def test_a_cursor_replayed_with_the_same_filters_and_a_different_query_resumes(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
+    first = search_opportunities(store, identity, query="acme", stage="Discovery")
+    assert first.next_cursor is not None
+
+    second = search_opportunities(
+        store, identity, query="renewal", stage="Discovery", cursor=first.next_cursor
+    )
+
+    assert second.examined_count == 10
+
+
+# -- scope-filtered metadata ----------------------------------------------------------------------
+
+_IN_BOOK = "acct-in-book"
+_OUT_OF_BOOK = "acct-out-of-book"
+
+
+def test_out_of_book_rows_below_the_budget_are_neither_counted_nor_cause_truncation(
+    store: Store,
+) -> None:
+    for index in range(5):
+        _seed_opportunity(store, opportunity_id=f"opp-out-{index}", account_id=_OUT_OF_BOOK)
+    scoped = Identity(rep_id=_OWNER, book=frozenset({_IN_BOOK}), tenant=_TENANT)
+
+    result = search_opportunities(store, scoped, limit=1)
+
+    assert result.items == []
+    assert result.examined_count == 0
+    assert result.truncated is False
+    assert result.next_cursor is None
+
+
+def test_examined_count_counts_only_in_scope_rows(store: Store) -> None:
+    for index in range(5):
+        _seed_opportunity(store, opportunity_id=f"opp-out-{index}", account_id=_OUT_OF_BOOK)
+    for index in range(2):
+        _seed_opportunity(store, opportunity_id=f"opp-in-{index}", account_id=_IN_BOOK)
+    scoped = Identity(rep_id=_OWNER, book=frozenset({_IN_BOOK}), tenant=_TENANT)
+
+    result = search_opportunities(store, scoped, limit=1)
+
+    assert [item["account_id"] for item in result.items] == [_IN_BOOK]
+    assert result.examined_count == 2
+    assert result.truncated is True
 
 
 # -- the account filter and the returned fields -----------------------------
@@ -407,3 +560,52 @@ def test_an_empty_filter_is_a_validation_error_not_a_crash(
     with pytest.raises(ValidationFailed) as raised:
         search_opportunities(store, identity, **{field: ""})  # type: ignore[arg-type]
     assert raised.value.source == field
+
+
+# -- store: client-side SDK failures map into the taxonomy ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        lambda store, key: store.query_gsi(
+            "opportunities", "gsi_tenant", partition_value=_TENANT, exclusive_start_key=key
+        ),
+        lambda store, key: store.query_tenant_scan(
+            "opportunities", tenant=_TENANT, exclusive_start_key=key
+        ),
+    ],
+    ids=["query_gsi", "query_tenant_scan"],
+)
+def test_a_parameter_the_sdk_rejects_is_an_internal_error_not_a_raw_sdk_error_or_a_400(
+    store: Store, query: object
+) -> None:
+    from crm.errors import CrmError
+
+    with pytest.raises(CrmError) as failed:
+        query(store, {"x": "y"})  # type: ignore[operator]
+
+    assert type(failed.value) is CrmError
+    assert failed.value.http_status == 500
+
+
+@pytest.mark.parametrize("failure", ["unreachable", "read-timeout"])
+def test_an_unreachable_or_timed_out_endpoint_is_a_retryable_service_busy(
+    store: Store, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from botocore.exceptions import EndpointConnectionError, ReadTimeoutError
+
+    from crm.errors import ServiceBusy
+
+    def unreachable(**_: object) -> object:
+        if failure == "unreachable":
+            raise EndpointConnectionError(endpoint_url="https://dynamodb.invalid")
+        raise ReadTimeoutError(endpoint_url="https://dynamodb.invalid")
+
+    monkeypatch.setattr(store._client, "query", unreachable)
+
+    with pytest.raises(ServiceBusy) as failed:
+        store.query_tenant_scan("opportunities", tenant=_TENANT)
+
+    assert failed.value.next_step == "retry_later"
+    assert "dynamodb.invalid" not in failed.value.message

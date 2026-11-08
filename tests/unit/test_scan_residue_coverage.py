@@ -46,6 +46,10 @@ TYPE_TO_FAMILY: Final[dict[str, tuple[str, str]]] = {
         "cloudfront",
         f"arn:aws:cloudfront::{_ACCT}:origin-request-policy/p-1",
     ),
+    "aws_cloudfront_response_headers_policy": (
+        "cloudfront",
+        f"arn:aws:cloudfront::{_ACCT}:response-headers-policy/p-1",
+    ),
     "aws_cloudfront_vpc_origin": ("cloudfront", f"arn:aws:cloudfront::{_ACCT}:vpcorigin/vo-1"),
     "aws_cloudtrail": ("cloudtrail", f"arn:aws:cloudtrail:{_R}:{_ACCT}:trail/crm-agent-eval"),
     "aws_cloudwatch_log_group": (
@@ -139,6 +143,10 @@ ARN_TYPE_NOT_ENUMERATED: Final[dict[str, str]] = {
         "tagged-unscanned residue (fail-safe, never stale)"
     ),
     "aws_cloudfront_origin_request_policy": (
+        "listed by name with arn None, so not matchable by ARN; any tag hit stays "
+        "tagged-unscanned residue (fail-safe, never stale)"
+    ),
+    "aws_cloudfront_response_headers_policy": (
         "listed by name with arn None, so not matchable by ARN; any tag hit stays "
         "tagged-unscanned residue (fail-safe, never stale)"
     ),

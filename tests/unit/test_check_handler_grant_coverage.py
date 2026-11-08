@@ -1360,3 +1360,102 @@ def test_batch_put_items_is_attributed_batch_write_item_only() -> None:
     """Batched puts are PutRequest entries inside BatchWriteItem; no PutItem is issued."""
     method = gate.STORE_METHOD_ACTIONS["batch_put_items"]
     assert method.actions == frozenset({"dynamodb:BatchWriteItem"})
+
+
+# ---------------------------------------------------------------------------
+# The pagination-cursor key, compared as its own resource.
+# ---------------------------------------------------------------------------
+
+MODULE_TF = REPO_ROOT / "infra" / "modules" / "lambda_action" / "main.tf"
+CURSOR_TOOLS = frozenset(
+    {
+        "search_opportunities",
+        "search_accounts",
+        "list_activities",
+        "list_audit_records",
+        "list_proposals",
+    }
+)
+_CURSOR_TOOLS_LINE = re.compile(r"^(\s*cursor_tools\s*=\s*)\[[^\]]*\]", re.MULTILINE)
+
+
+def _known_functions(matrix_grants: Any) -> frozenset[str]:
+    return frozenset(function for function, _table in matrix_grants)
+
+
+def _cursor_findings(analysis: Any, main_tf: Path, known: frozenset[str]) -> list[str]:
+    kms_enabled = gate.load_kms_enabled_functions(main_tf, known)
+    cursor_enabled = gate.load_cursor_enabled_functions(main_tf, known)
+    functions = frozenset(function for function, _table in analysis.derived)
+    granted = gate.load_module_resource_grants(MODULE_TF, functions, kms_enabled, cursor_enabled)
+    implied = gate.derive_resource_grants(analysis.derived, kms_enabled, analysis.reached)
+    return [f for f in gate.compare(implied, granted, "lambda_action module") if "cursor" in f]
+
+
+def _with_cursor_tools(tmp_path: Path, tools: list[str]) -> Path:
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    for path in MAIN_TF.parent.glob("*.tf"):
+        shutil.copy(path, infra / path.name)
+    main = infra / "main.tf"
+    text = main.read_text(encoding="utf-8")
+    listed = "[" + ", ".join(f'"{tool}"' for tool in tools) + "]"
+    planted, count = _CURSOR_TOOLS_LINE.subn(lambda m: m.group(1) + listed, text)
+    assert count == 1
+    main.write_text(planted, encoding="utf-8")
+    return main
+
+
+def test_exactly_the_cursor_tools_hold_the_cursor_key_grant(matrix_grants: Any) -> None:
+    assert gate.load_cursor_enabled_functions(MAIN_TF, _known_functions(matrix_grants)) == (
+        CURSOR_TOOLS
+    )
+
+
+def test_exactly_the_cursor_tools_reach_the_codec(analysis: Any) -> None:
+    implied = gate.derive_resource_grants(analysis.derived, frozenset(), analysis.reached)
+    users = {f for f, resource in implied if resource == gate.CURSOR_KMS_RESOURCE_KEY}
+    assert users == CURSOR_TOOLS
+    for tool in CURSOR_TOOLS:
+        assert implied[(tool, gate.CURSOR_KMS_RESOURCE_KEY)] == {"kms:Encrypt", "kms:Decrypt"}
+
+
+def test_the_repository_cursor_grant_matches_the_codec_users(
+    analysis: Any, matrix_grants: Any
+) -> None:
+    assert _cursor_findings(analysis, MAIN_TF, _known_functions(matrix_grants)) == []
+
+
+def test_a_cursor_grant_on_a_non_cursor_function_is_surplus(
+    analysis: Any, matrix_grants: Any, tmp_path: Path
+) -> None:
+    main = _with_cursor_tools(tmp_path, [*sorted(CURSOR_TOOLS), "get_account"])
+    findings = _cursor_findings(analysis, main, _known_functions(matrix_grants))
+    assert findings, "a cursor grant on get_account went unreported"
+    assert all(f.startswith("SURPLUS GRANT") and " get_account " in f for f in findings), findings
+
+
+def test_a_codec_user_without_the_cursor_grant_is_missing(
+    analysis: Any, matrix_grants: Any, tmp_path: Path
+) -> None:
+    main = _with_cursor_tools(tmp_path, sorted(CURSOR_TOOLS - {"list_proposals"}))
+    findings = _cursor_findings(analysis, main, _known_functions(matrix_grants))
+    assert findings and all(
+        f.startswith("MISSING GRANT") and " list_proposals " in f for f in findings
+    ), findings
+
+
+def test_an_unreadable_cursor_flag_expression_is_refused(
+    matrix_grants: Any, tmp_path: Path
+) -> None:
+    infra = tmp_path / "infra"
+    infra.mkdir()
+    for path in MAIN_TF.parent.glob("*.tf"):
+        shutil.copy(path, infra / path.name)
+    main = infra / "main.tf"
+    text = main.read_text(encoding="utf-8")
+    old = "cursor_kms_grant_enabled = contains(local.cursor_tools, each.key)"
+    assert text.count(old) == 1
+    main.write_text(text.replace(old, "cursor_kms_grant_enabled = true"), encoding="utf-8")
+    with pytest.raises(ValueError, match="cursor_kms_grant_enabled"):
+        gate.load_cursor_enabled_functions(main, _known_functions(matrix_grants))

@@ -6,6 +6,10 @@ is read (:func:`crm.authz.require_proposal_decider`). Scope is checked against t
 recorded target with :func:`crm.authz.require_record_scope` before delegating to
 :func:`crm.proposals.approve_proposal`. The audit record is written in the same transaction through
 its ``record_audit`` callback, with its id derived from ``transaction_key``.
+
+While the proposal is pending, an account or contact delete re-runs the cascade checks in
+:mod:`crm.handlers.cascade_rules`, and an opportunity update re-checks its ``primary_contact_id``
+against the opportunity's account, before anything is written.
 """
 
 from __future__ import annotations
@@ -14,7 +18,12 @@ from typing import Any
 
 from crm.audit import build_audit_record
 from crm.authz import Identity, require_proposal_decider, require_record_scope
+from crm.domain.references import require_primary_contact_in_account
 from crm.handlers._common import build_handler, idempotent_id, now_iso
+from crm.handlers.cascade_rules import (
+    reject_account_delete_with_open_opportunities,
+    reject_contact_delete_if_referenced,
+)
 from crm.handlers.wire import put_operation
 from crm.proposals import ApprovalContext, AuditRecorder, approve_proposal, proposal_not_found
 from crm.store.store import Store
@@ -44,6 +53,35 @@ def _record_audit(identity: Identity, transaction_key: str) -> AuditRecorder:
     return _callback
 
 
+def _recheck_integrity(
+    store: Store, identity: Identity, proposal: dict[str, Any], target: dict[str, Any]
+) -> None:
+    target_table = str(proposal["target_table"])
+    target_id = str(proposal["target_id"])
+    operation = proposal.get("operation")
+    after_payload = proposal.get("after_payload")
+    if operation == "delete":
+        if target_table == "accounts":
+            reject_account_delete_with_open_opportunities(
+                store, tenant=identity.tenant, account_id=target_id
+            )
+        elif target_table == "contacts":
+            reject_contact_delete_if_referenced(store, tenant=identity.tenant, contact_id=target_id)
+    elif (
+        operation == "update"
+        and target_table == "opportunities"
+        and isinstance(after_payload, dict)
+        and "primary_contact_id" in after_payload
+    ):
+        require_primary_contact_in_account(
+            store,
+            identity,
+            str(target.get("account_id")),
+            after_payload["primary_contact_id"],
+            source="after_payload.primary_contact_id",
+        )
+
+
 def _approve_proposal(
     store: Store, identity: Identity, arguments: dict[str, Any]
 ) -> dict[str, Any]:
@@ -59,6 +97,9 @@ def _approve_proposal(
     target = store.get_item(target_table, {key_attr: target_id})
     scope_source = target if target is not None else proposal.get("before_snapshot")
     require_record_scope(identity, scope_source, operation="approve_proposal")
+
+    if proposal.get("status") == "pending" and target is not None:
+        _recheck_integrity(store, identity, proposal, target)
 
     transaction_key = str(arguments["transaction_key"])
     updated = approve_proposal(

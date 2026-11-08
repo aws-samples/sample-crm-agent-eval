@@ -315,22 +315,140 @@ def test_the_resource_policy_denies_every_other_vpc_endpoint(plan: Plan) -> None
     assert source_vpce == [VPC_ENDPOINT_ID]
 
 
-def test_the_audience_regression_is_visible_in_source_not_silently_absent() -> None:
-    """No `cognito_user_pool_client_ids` variable exists, and `main.tf` discloses the unchecked audience.
+_INFRA_DIR = Path(__file__).resolve().parents[2] / "infra"
+_ALLOWLIST_NAME = "local.api_allowed_client_ids_parameter_name"
+_ALLOWLIST_ARN = "local.api_allowed_client_ids_parameter_arn"
 
-    A `COGNITO_USER_POOLS` authorizer does not validate the app-client audience.
-    """
-    module_dir = Path(__file__).resolve().parents[2] / "infra" / "modules" / "api"
-    variables = (module_dir / "variables.tf").read_text(encoding="utf-8")
-    assert 'variable "cognito_user_pool_client_ids"' not in variables, (
-        "the audience variable is declared again; if the check was restored, update this test — if it "
-        "was not, an unread input implies an audience check that does not happen"
+
+def _uncommented(path: Path) -> str:
+    from scripts.hcl_text import blank_comments
+
+    return str(blank_comments(path.read_text(encoding="utf-8")))
+
+
+def _column0_block(text: str, start: int) -> str:
+    depth = 0
+    for index in range(text.index("{", start), len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    raise AssertionError(f"unterminated block at offset {start}")
+
+
+def _root_module_calls() -> dict[str, str]:
+    calls: dict[str, str] = {}
+    for path in sorted(_INFRA_DIR.glob("*.tf")):
+        text = _uncommented(path)
+        for match in re.finditer(r'^module "(\w+)" \{', text, re.MULTILINE):
+            calls[match.group(1)] = _column0_block(text, match.start())
+    return calls
+
+
+def _api_integrated_modules() -> set[str]:
+    """`lambda_action` (every tool) plus each module the root's `extra_routes` integrates."""
+    api = _root_module_calls()["api"]
+    tools = re.search(r"tool_lambda_invoke_arns\s*=\s*\{[^}]*module\.(\w+)\[name\]", api)
+    assert tools is not None and tools.group(1) == "lambda_action"
+    extra = re.search(r"extra_routes\s*=\s*\{(.*?)\n  \}", api, re.DOTALL)
+    assert extra is not None
+    singletons = set(re.findall(r"invoke_arn\s*=\s*module\.(\w+)\.invoke_arn", extra.group(1)))
+    assert singletons, "no module behind extra_routes was found"
+    return {"lambda_action", *singletons}
+
+
+def test_every_api_integrated_lambda_reads_the_client_allowlist_parameter() -> None:
+    """Each API-integrated function names the parameter and may read exactly that one ARN."""
+    from crm.envelope import API_ALLOWED_CLIENT_IDS_PARAMETER_ENV
+
+    calls = _root_module_calls()
+    modules = _api_integrated_modules()
+    assert {"lambda_action", "lambda_action_eval_trigger", "lambda_action_capabilities"} <= modules
+    for name in sorted(modules - {"lambda_action"}):
+        body = calls[name]
+        assert re.search(
+            rf"^\s+{API_ALLOWED_CLIENT_IDS_PARAMETER_ENV}\s*=\s*{re.escape(_ALLOWLIST_NAME)}$",
+            body,
+            re.MULTILINE,
+        ), f"module.{name} does not set {API_ALLOWED_CLIENT_IDS_PARAMETER_ENV}"
+        assert re.search(
+            rf"^  config_parameter_arns\s*=\s*\[{re.escape(_ALLOWLIST_ARN)}\]$", body, re.M
+        ), f"module.{name} is not granted the allowlist parameter"
+
+
+_ROUTED = r"contains\(local\.routed_tool_names, each\.key\)"
+
+
+def test_the_tool_lambdas_get_the_allowlist_only_when_routed() -> None:
+    """Every routed tool names and may read the parameter; an agent-only tool gets neither."""
+    from crm.envelope import API_ALLOWED_CLIENT_IDS_PARAMETER_ENV
+
+    calls = _root_module_calls()
+    api = calls["api"]
+    assert re.search(r"for name in local\.routed_tool_names : name => module\.lambda_action", api)
+    body = calls["lambda_action"]
+    assert re.search(
+        rf"^\s+{_ROUTED} \? \{{ {API_ALLOWED_CLIENT_IDS_PARAMETER_ENV} = "
+        rf"{re.escape(_ALLOWLIST_NAME)} \}} : \{{\}},$",
+        body,
+        re.M,
+    ), "lambda_action's allowlist env entry is not keyed on routed_tool_names"
+    assert re.search(
+        rf"^  config_parameter_arns\s*=\s*{_ROUTED} \? \[{re.escape(_ALLOWLIST_ARN)}\] : \[\]$",
+        body,
+        re.M,
+    ), "lambda_action's allowlist grant is not keyed on routed_tool_names"
+    assert body.count(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV) == 1
+    assert body.count(_ALLOWLIST_ARN) == 1
+
+
+def test_get_page_context_is_the_agent_only_tool_kept_off_the_allowlist() -> None:
+    text = _uncommented(_INFRA_DIR / "main.tf")
+    agent_only = re.search(r"^  agent_only_tools\s*=\s*\[(.*)\]$", text, re.M)
+    routed = re.search(r"^  routed_tool_names\s*=\s*(.+)$", text, re.M)
+    assert agent_only is not None and re.findall(r'"(\w+)"', agent_only.group(1)) == [
+        "get_page_context"
+    ]
+    assert routed is not None and routed.group(1) == (
+        "[for name in local.tool_names : name if !contains(local.agent_only_tools, name)]"
     )
-    main = (module_dir / "main.tf").read_text(encoding="utf-8")
-    assert "does not" in main and "audience" in main.lower(), (
-        "the module no longer discloses that the app-client audience is unchecked; a regression nobody "
-        "can read is worse than the regression"
+
+
+def test_no_function_outside_the_api_channel_receives_the_allowlist() -> None:
+    from crm.envelope import API_ALLOWED_CLIENT_IDS_PARAMETER_ENV
+
+    modules = _api_integrated_modules()
+    for name, body in _root_module_calls().items():
+        if name not in modules:
+            assert API_ALLOWED_CLIENT_IDS_PARAMETER_ENV not in body, name
+            assert _ALLOWLIST_ARN not in body, name
+
+
+def test_the_allowlist_parameter_holds_the_spa_client_id_under_the_named_path() -> None:
+    text = _uncommented(_INFRA_DIR / "main.tf")
+    match = re.search(r'^resource "aws_ssm_parameter" "api_allowed_client_ids" \{', text, re.M)
+    assert match is not None
+    block = _column0_block(text, match.start())
+    assert re.search(rf"^  name\s*=\s*{re.escape(_ALLOWLIST_NAME)}$", block, re.M)
+    assert re.search(r'^  type\s*=\s*"String"$', block, re.M)
+    assert re.search(r"^  value\s*=\s*module\.cognito\.spa_client_id$", block, re.M)
+    assert '"data-classification" = "internal"' in block
+    name = re.search(r'^  api_allowed_client_ids_parameter_name\s*=\s*"(.+)"$', text, re.M)
+    arn = re.search(r'^  api_allowed_client_ids_parameter_arn\s*=\s*"(.+)"$', text, re.M)
+    assert name is not None and name.group(1) == "/${local.name_prefix}/api/allowed-client-ids"
+    assert arn is not None and arn.group(1) == (
+        "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter"
+        "${local.api_allowed_client_ids_parameter_name}"
     )
+
+
+def test_no_function_attribute_references_the_spa_client_id() -> None:
+    """A Lambda attribute naming `module.cognito.spa_client_id` would cycle through the CDN."""
+    for name, body in _root_module_calls().items():
+        if name.startswith("lambda_action"):
+            assert "module.cognito.spa_client_id" not in body, name
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,31 @@ BROWSER_DIR = REPO_ROOT / "tests" / "e2e" / "browser"
 CONFIG = BROWSER_DIR / "playwright.config.ts"
 GLOBAL_SETUP = BROWSER_DIR / "fixtures" / "globalSetup.ts"
 AUTH_FIXTURE = BROWSER_DIR / "fixtures" / "auth.ts"
+CSP_TRAP_FIXTURE = BROWSER_DIR / "fixtures" / "cspTrap.ts"
+SSE_RECORDER_FIXTURE = BROWSER_DIR / "fixtures" / "sseRecorder.ts"
+
+#: The only fixture files allowed to call `addInitScript`: the CSP violation trap and the SSE frame
+#: recorder. Any other fixture, including one added later, is refused it.
+INIT_SCRIPT_ALLOWED_FIXTURES: Final = frozenset({CSP_TRAP_FIXTURE.name, SSE_RECORDER_FIXTURE.name})
+
+#: Lowercased identifiers naming browser storage or a credential; none may appear in the code of a
+#: fixture allowed an init script.
+CREDENTIAL_SURFACE_TERMS: Final = (
+    "localstorage",
+    "sessionstorage",
+    "indexeddb",
+    "cookie",
+    "storagestate",
+    "token",
+    "credential",
+    "password",
+    "secret",
+    "authorization",
+    "setextrahttpheaders",
+    "jwt",
+)
 SIGN_IN_FORM = REPO_ROOT / "frontend" / "src" / "auth" / "SignInForm.tsx"
+EVAL_ARTIFACT_LIST = REPO_ROOT / "frontend" / "src" / "pages" / "evals" / "EvalArtifactList.tsx"
 APP_SHELL = REPO_ROOT / "frontend" / "src" / "AppShell.tsx"
 SRP_SESSION = REPO_ROOT / "frontend" / "src" / "auth" / "CognitoAuthSession.ts"
 
@@ -482,10 +506,34 @@ def test_journey_08_opens_each_artefact_through_its_presigned_url_popup() -> Non
         (BROWSER_DIR / "journeys/08-eval-dashboard.spec.ts").read_text(encoding="utf-8")
     )
     assert 'artifactSection.getByRole("link")' not in code
-    assert 'artifactSection.getByRole("button")' in code
     assert 'page.waitForEvent("popup")' in code
     assert "toBe(200)" in code and "artefactContentType(" in code
     assert "runStubSweep(page)" in code
+    compact = re.sub(r"\s+", "", code)
+    assert (
+        'constcontrols=artifactSection.getByRole("button")'
+        '.and(artifactSection.locator(`:not([data-testid="${MATRIX_DOWNLOAD_TEST_ID}"])`));'
+    ) in compact, "the popup loop must cover every artefact button except the in-place download"
+    assert "controls.nth(index)" in code
+
+
+def test_journey_08_excludes_only_the_matrix_download_and_asserts_it_once() -> None:
+    """The one artefact control that downloads in place is named by the test id the SPA renders,
+    excluded from journey 08's popup loop, and asserted present exactly once."""
+    code = strip_comments(
+        (BROWSER_DIR / "journeys/08-eval-dashboard.spec.ts").read_text(encoding="utf-8")
+    )
+    compact = re.sub(r"\s+", "", code)
+    assert 'const MATRIX_DOWNLOAD_TEST_ID = "download-matrix-md";' in code
+    assert compact.count("MATRIX_DOWNLOAD_TEST_ID") == 3
+    assert (
+        "constdownloadControl=artifactSection.getByTestId(MATRIX_DOWNLOAD_TEST_ID);"
+        "awaitexpect(downloadControl,"
+    ) in compact
+    assert re.search(r"awaitexpect\(downloadControl,[^)]*\)\.toHaveCount\(1\)", compact)
+    artifact_list = (EVAL_ARTIFACT_LIST).read_text(encoding="utf-8")
+    assert 'data-testid="download-matrix-md"' in artifact_list
+    assert "window.location.assign(url)" in artifact_list
 
 
 def test_the_live_start_detector_reads_both_click_forms() -> None:
@@ -757,6 +805,44 @@ class TestAuthFixtureDrivesRealSignIn:
                 "must drive the real sign-in form: a fixture that bypasses sign-in cannot distinguish "
                 "'auth works' from 'auth is absent'."
             )
+
+    def test_no_fixture_outside_the_allowance_calls_add_init_script(self) -> None:
+        """Every fixture file, present or added later, is refused `addInitScript` unless it is in
+        the allowance, and auth.ts is never allowed it."""
+        fixtures = typescript_sources(BROWSER_DIR / "fixtures")
+        names = {path.name for path in fixtures}
+        assert AUTH_FIXTURE.name in names
+        assert AUTH_FIXTURE.name not in INIT_SCRIPT_ALLOWED_FIXTURES
+        assert names >= INIT_SCRIPT_ALLOWED_FIXTURES, "an allowance names no existing fixture"
+        offenders = [
+            path.name
+            for path in fixtures
+            if path.name not in INIT_SCRIPT_ALLOWED_FIXTURES
+            and "addInitScript" in strip_comments(path.read_text(encoding="utf-8"))
+        ]
+        assert offenders == [], (
+            f"{offenders} call addInitScript, which can seed a credential before the page runs; only "
+            f"{sorted(INIT_SCRIPT_ALLOWED_FIXTURES)} may."
+        )
+
+    def test_the_csp_trap_registers_one_violation_listener(self) -> None:
+        """The CSP trap's one init script is the `securitypolicyviolation` listener."""
+        code = strip_comments(CSP_TRAP_FIXTURE.read_text(encoding="utf-8"))
+        assert code.count("addInitScript(") == 1
+        assert '"securitypolicyviolation"' in code
+
+    @pytest.mark.parametrize("name", sorted(INIT_SCRIPT_ALLOWED_FIXTURES))
+    def test_an_init_script_fixture_names_no_storage_or_credential(self, name: str) -> None:
+        """A fixture allowed an init script names no storage, cookie or credential identifier
+        anywhere in its code."""
+        lowered = strip_comments(
+            (BROWSER_DIR / "fixtures" / name).read_text(encoding="utf-8")
+        ).lower()
+        found = [term for term in CREDENTIAL_SURFACE_TERMS if term in lowered]
+        assert found == [], (
+            f"{name} names {found}; its init script runs in every document before the app, so it "
+            "must not read or write storage, cookies or credentials."
+        )
 
     def test_it_reads_credentials_from_the_environment_and_fails_loudly(self) -> None:
         source = AUTH_FIXTURE.read_text(encoding="utf-8")

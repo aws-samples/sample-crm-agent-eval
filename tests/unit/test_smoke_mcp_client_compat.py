@@ -364,7 +364,6 @@ def test_the_sdk_performs_the_full_handshake_and_one_read_call_on_gateway1_only(
             "host": _G1_HOST,
             "name": f"crm-actions___{module.READ_TOOL}",
             "arguments": {"account_id": _ACCOUNT},
-            "_meta": {},
         }
     ]
 
@@ -805,8 +804,8 @@ def test_the_module_is_registered_in_layer_5() -> None:
 def test_the_sdk_is_a_pinned_dev_dependency() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     lock = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert '"mcp==2.1.1"' in pyproject
-    assert re.search(r"^mcp==2\.1\.1$", lock, re.MULTILINE)
+    assert '"mcp==2.3.0"' in pyproject
+    assert re.search(r"^mcp==2\.3\.0$", lock, re.MULTILINE)
 
 
 def test_the_cli_fails_loudly_on_missing_outputs(tmp_path: Path) -> None:

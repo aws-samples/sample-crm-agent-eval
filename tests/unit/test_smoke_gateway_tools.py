@@ -8,6 +8,7 @@ outcome-based `_identity` discard check in both directions, and user-safe token 
 from __future__ import annotations
 
 import copy
+import functools
 import json
 import time
 from collections.abc import Mapping
@@ -20,11 +21,12 @@ from scripts.smoke.gateway_tools import (
     _OUT_OF_BOOK_ACCOUNT_INDEX,
     _SERVICE_BOOK_SIZE,
     McpResult,
+    RawResult,
     ServicePrincipalFixture,
     _live_table_prefix,
     _require_disposable_tenant,
-    checks,
 )
+from scripts.smoke.gateway_tools import checks as _module_checks
 from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.verified_claims import (
     USE_ACCESS,
@@ -175,6 +177,22 @@ class _FakeCaller:
         full_visibility = bool(forged.get("full_visibility"))
         allowed = full_visibility or account_id in book
         return _tool_call_success(rep_id=_FORGED_REP_ID) if allowed else _scope_denied(account_id)
+
+
+class _FakeRawCaller:
+    """A raw-body Gateway fake: refuses a JSON-RPC array body the way the interceptor does."""
+
+    def __init__(self, reply: RawResult | None = None) -> None:
+        self.reply = reply if reply is not None else _rpc_refusal()
+        self.calls: list[tuple[str, str | None]] = []
+
+    def __call__(self, body: str, token: str | None) -> RawResult:
+        self.calls.append((body, token))
+        return self.reply
+
+
+#: `scripts.smoke.gateway_tools.checks` with the refusing raw-body fake unless one is given.
+checks = functools.partial(_module_checks, raw_caller=_FakeRawCaller())
 
 
 def _run(caller: _FakeCaller, **kwargs: Any) -> list[CheckResult]:
@@ -1685,3 +1703,173 @@ def test_an_empty_output_with_no_secret_file_never_reaches_the_token_endpoint(
     monkeypatch.setattr(gateway_tools, "open_https", refuse_open)
     with pytest.raises(RuntimeError, match=_SECRET_ENV):
         gateway_tools.mint_machine_token(_secret_ctx(""))
+
+
+# --------------------------------------------------------------------------------------
+# A JSON-RPC array body answers no tool call
+# --------------------------------------------------------------------------------------
+
+_ARRAY_ROW = "array_body_answers_no_tool_call"
+_ARRAY_ROWS = (_ARRAY_ROW, "array_body_reaches_no_tool")
+
+
+def _array_rows(raw: _FakeRawCaller, *, token: str | None = "tok") -> dict[str, CheckResult]:  # nosec B107  # test placeholder, not a credential
+    caller = _FakeCaller(tools_list=_tools_list_result())
+    results = _run(caller, token=token, raw_caller=raw)
+    rows = {
+        check: [r for r in results if r.resource == "gateway_tools" and r.check == check]
+        for check in _ARRAY_ROWS
+    }
+    for check, matches in rows.items():
+        assert len(matches) == 1, (check, matches)
+    return {check: matches[0] for check, matches in rows.items()}
+
+
+def test_the_old_interceptor_refusal_row_is_gone() -> None:
+    caller = _FakeCaller(tools_list=_tools_list_result())
+    results = _run(caller, token="tok", raw_caller=_FakeRawCaller())  # nosec B106  # test placeholder, not a credential
+    assert not [r for r in results if r.check == "array_body_refused_by_interceptor"]
+
+
+def test_an_error_reply_passes_records_its_code_and_no_tool_is_deferred() -> None:
+    rows = _array_rows(_FakeRawCaller())
+    assert rows[_ARRAY_ROW].status == "pass"
+    assert "error.code=-32001" in rows[_ARRAY_ROW].detail
+    assert rows["array_body_reaches_no_tool"].status == "defer"
+    assert rows["array_body_reaches_no_tool"].defer_reason == "no_per_request_invocation_signal"
+
+
+def test_the_array_body_is_one_well_formed_tool_call_sent_with_the_token() -> None:
+    raw = _FakeRawCaller()
+    _array_rows(raw)
+    assert len(raw.calls) == 1
+    body, token = raw.calls[0]
+    assert token == "tok"  # nosec B105  # test placeholder, not a credential
+    decoded = json.loads(body)
+    assert isinstance(decoded, list) and len(decoded) == 1
+    (call,) = decoded
+    assert call["method"] == "tools/call"
+    assert call["params"]["arguments"]["account_id"] == _IN_BOOK_ACCOUNT
+
+
+@pytest.mark.parametrize(
+    ("reply", "recorded"),
+    [
+        (
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}},
+            "error.code=-32600",
+        ),
+        ([_rpc_refusal()], "array[1]"),
+        ({"jsonrpc": "2.0", "id": "smoke-array-body", "result": {}}, "result:object{}"),
+        ([], "array[0]"),
+        (
+            {
+                "jsonrpc": "2.0",
+                "id": "smoke-array-body",
+                "result": {
+                    "isError": True,
+                    "content": [
+                        {"type": "text", "text": "InternalServerException - Tool execution failed"}
+                    ],
+                },
+            },
+            "result.isError=True",
+        ),
+        (
+            [
+                {"jsonrpc": "2.0", "id": "a", "result": {"isError": True, "content": []}},
+                _rpc_refusal(),
+            ],
+            "array[2]",
+        ),
+    ],
+    ids=[
+        "other-error-code",
+        "batch-of-errors",
+        "result-without-tool-output",
+        "empty-batch",
+        "gateway-tool-error",
+        "batch-tool-error-and-rpc-error",
+    ],
+)
+def test_a_reply_without_tool_output_passes_and_records_its_shape(
+    reply: RawResult, recorded: str
+) -> None:
+    rows = _array_rows(_FakeRawCaller(reply))
+    assert rows[_ARRAY_ROW].status == "pass", rows[_ARRAY_ROW].detail
+    assert recorded in rows[_ARRAY_ROW].detail
+
+
+@pytest.mark.parametrize(
+    ("reply", "fragment"),
+    [
+        ([_tool_call_success()], "tool-call output"),
+        (_tool_call_success(), "tool-call output"),
+        (
+            {"jsonrpc": "2.0", "id": "x", "result": {"structuredContent": {"a": 1}}},
+            "structuredContent",
+        ),
+        (
+            {"jsonrpc": "2.0", "id": "x", "result": {"isError": False, "content": []}},
+            "without `isError: true`",
+        ),
+        ({"jsonrpc": "2.0", "id": "x", "result": {"content": [{"type": "text"}]}}, "content"),
+        (
+            [
+                {"jsonrpc": "2.0", "id": "a", "result": {"isError": True, "content": []}},
+                _tool_call_success(),
+            ],
+            "tool-call output",
+        ),
+        ("transport error calling https://gateway.example.invalid/mcp: reset", "transport"),
+        (["not-an-object"], "not a JSON object"),
+    ],
+    ids=[
+        "batch-answered",
+        "answered",
+        "structured",
+        "is-error-false",
+        "content-without-is-error",
+        "batch-one-refused-one-answered",
+        "transport",
+        "scalar",
+    ],
+)
+def test_a_reply_with_tool_output_or_none_to_judge_fails_only_the_array_row(
+    reply: RawResult, fragment: str
+) -> None:
+    rows = _array_rows(_FakeRawCaller(reply))
+    assert rows[_ARRAY_ROW].status == "fail"
+    assert fragment in rows[_ARRAY_ROW].detail
+    assert rows["array_body_reaches_no_tool"].status == "defer"
+
+
+def test_a_gateway_tool_error_reply_records_no_error_text() -> None:
+    reply = {
+        "jsonrpc": "2.0",
+        "id": "smoke-array-body",
+        "result": {
+            "isError": True,
+            "content": [
+                {"type": "text", "text": "InternalServerException - Tool execution failed"}
+            ],
+        },
+    }
+    detail = _array_rows(_FakeRawCaller(reply))[_ARRAY_ROW].detail
+    assert "InternalServerException" not in detail
+    assert "Tool execution failed" not in detail
+
+
+def test_the_recorded_shape_carries_no_reply_values() -> None:
+    rows = _array_rows(_FakeRawCaller([_tool_call_success(rep_id="rep-secret-value")]))
+    detail = rows[_ARRAY_ROW].detail
+    assert "rep-secret-value" not in detail
+    assert _IN_BOOK_ACCOUNT not in detail
+    assert "Authentication failed" not in _array_rows(_FakeRawCaller())[_ARRAY_ROW].detail
+
+
+def test_no_token_fails_the_array_body_row_without_sending_it() -> None:
+    raw = _FakeRawCaller()
+    rows = _array_rows(raw, token=None)
+    assert rows[_ARRAY_ROW].status == "fail"
+    assert raw.calls == []

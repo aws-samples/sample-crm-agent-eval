@@ -85,6 +85,28 @@ def _compliant_pool(**overrides: Any) -> dict[str, Any]:
     return pool
 
 
+def _spa_client(*, enable_token_revocation: object = True) -> dict[str, Any]:
+    client: dict[str, Any] = {"UserPoolId": _USER_POOL_ID, "ClientId": _SPA_CLIENT_ID}
+    if enable_token_revocation is not _OMIT:
+        client["EnableTokenRevocation"] = enable_token_revocation
+    return {"UserPoolClient": client}
+
+
+_OMIT = object()
+
+
+def _add_pool(
+    stubber: Stubber, pool: Mapping[str, Any], *, spa_client: Mapping[str, Any] | None = None
+) -> None:
+    """Queue `describe_user_pool` then the SPA client's `describe_user_pool_client`, in call order."""
+    stubber.add_response("describe_user_pool", {"UserPool": dict(pool)}, {"UserPoolId": ANY})
+    stubber.add_response(
+        "describe_user_pool_client",
+        dict(spa_client) if spa_client is not None else _spa_client(),
+        {"UserPoolId": _USER_POOL_ID, "ClientId": _SPA_CLIENT_ID},
+    )
+
+
 def _outputs() -> dict[str, str]:
     return {"cognito_user_pool_id": _USER_POOL_ID, "cognito_spa_client_id": _SPA_CLIENT_ID}
 
@@ -93,7 +115,7 @@ def _run_checks_with_describe(
     pool: Mapping[str, Any], *, username: str = "", password: str = ""
 ) -> list[Any]:
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": dict(pool)}, {"UserPoolId": ANY})
+    _add_pool(stubber, dict(pool))
     with stubber:
         ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": client})
         return list(checks(ctx, username=username, password=password))
@@ -249,7 +271,7 @@ def _run_signup_probe(
     readback_error_code: str = "UserNotFoundException",
 ) -> list[Any]:
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
     if expect_cleanup:
         stubber.add_response(
             "admin_delete_user", {}, {"UserPoolId": _USER_POOL_ID, "Username": ANY}
@@ -337,7 +359,7 @@ def test_self_signup_readback_error_other_than_user_not_found_fails_naming_the_c
 def test_self_signup_other_error_code_is_a_fail_naming_the_code(code: str) -> None:
     """An unrelated error must never read as a refusal: that would pass for the wrong reason."""
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
     stubber.add_client_error(
         "admin_delete_user",
         service_error_code="UserNotFoundException",
@@ -365,7 +387,7 @@ def test_self_signup_non_client_error_is_a_fail_naming_the_exception() -> None:
             raise TimeoutError("read timed out")
 
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
     stubber.add_response("admin_delete_user", {}, {"UserPoolId": _USER_POOL_ID, "Username": ANY})
     stubber.add_client_error(
         "admin_get_user",
@@ -409,7 +431,7 @@ def _checks_with_token(
     expected_book: frozenset[str] = frozenset(),
 ) -> list[Any]:
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
     password = _password()
     stubber.add_response(
         "admin_initiate_auth",
@@ -544,7 +566,7 @@ def test_no_username_password_skips_token_checks_but_runs_pool_checks() -> None:
 
 def test_admin_initiate_auth_no_id_token_fails_with_actionable_detail() -> None:
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
     password = _password()
     stubber.add_response(
         "admin_initiate_auth",
@@ -706,6 +728,10 @@ def _provisioned_claims(**overrides: Any) -> dict[str, Any]:
     return claims
 
 
+#: A stand-in refresh token; the stubbed client never inspects it.
+_REFRESH_TOKEN = "refresh-" + "x" * 24
+
+
 class _FakeProvisioner:
     """A `SmokeUserProvisioner` double: configurable failure, and records that cleanup ran."""
 
@@ -715,10 +741,12 @@ class _FakeProvisioner:
         provision_error: Exception | None = None,
         claims: Mapping[str, Any] | None = None,
         cleanup_status: str = "pass",
+        refresh_token: str = _REFRESH_TOKEN,
     ) -> None:
         self._provision_error = provision_error
         self._claims = dict(claims) if claims is not None else _provisioned_claims()
         self._cleanup_status = cleanup_status
+        self._refresh_token = refresh_token
         self.cleaned_up = False
 
     def provision(self) -> ProvisionedSmokeUser:
@@ -731,6 +759,7 @@ class _FakeProvisioner:
             book=_PROVISIONED_BOOK,
             id_token=test_key.id_token(**self._claims),
             detail="MFA-completed ID token issued on attempt 1",
+            refresh_token=self._refresh_token,
         )
 
     def cleanup(self) -> Any:
@@ -743,9 +772,50 @@ class _FakeProvisioner:
         )
 
 
-def _checks_with_provisioner(provisioner: Any) -> list[Any]:
+def _queue_revocation(
+    stubber: Stubber,
+    *,
+    revoke_error: str | None = None,
+    refresh_outcome: str | None = "NotAuthorizedException",
+) -> None:
+    """Queue `revoke_token` then `initiate_auth REFRESH_TOKEN_AUTH`, as the provisioned path calls
+    them. `refresh_outcome=None` answers the refresh with fresh tokens (revocation did not hold)."""
+    revoke_params = {"Token": _REFRESH_TOKEN, "ClientId": _SPA_CLIENT_ID}
+    if revoke_error is not None:
+        stubber.add_client_error(
+            "revoke_token", service_error_code=revoke_error, expected_params=revoke_params
+        )
+        return
+    stubber.add_response("revoke_token", {}, revoke_params)
+    refresh_params = {
+        "AuthFlow": "REFRESH_TOKEN_AUTH",
+        "ClientId": _SPA_CLIENT_ID,
+        "AuthParameters": {"REFRESH_TOKEN": _REFRESH_TOKEN},
+    }
+    if refresh_outcome is None:
+        stubber.add_response(
+            "initiate_auth",
+            {"AuthenticationResult": {"IdToken": "still-valid", "AccessToken": "still-valid"}},
+            refresh_params,
+        )
+    else:
+        stubber.add_client_error(
+            "initiate_auth", service_error_code=refresh_outcome, expected_params=refresh_params
+        )
+
+
+def _checks_with_provisioner(
+    provisioner: Any,
+    *,
+    spa_client: Mapping[str, Any] | None = None,
+    revoke_error: str | None = None,
+    refresh_outcome: str | None = "NotAuthorizedException",
+    queue_revocation: bool = True,
+) -> list[Any]:
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool(), spa_client=spa_client)
+    if queue_revocation:
+        _queue_revocation(stubber, revoke_error=revoke_error, refresh_outcome=refresh_outcome)
     with stubber:
         ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": client})
         return list(
@@ -775,7 +845,7 @@ def test_provisioned_run_reports_issue_and_decode_as_a_real_pass_never_a_skip() 
 def test_provisioning_failure_is_a_fail_not_a_skip_and_still_cleans_up() -> None:
     """A provisioning failure fails `issue_and_decode` and cleanup still runs."""
     provisioner = _FakeProvisioner(provision_error=RuntimeError("MFA_SETUP never completed"))
-    results = _checks_with_provisioner(provisioner)
+    results = _checks_with_provisioner(provisioner, queue_revocation=False)
     by_check = {r.check: r for r in results}
     assert by_check["issue_and_decode"].status == "fail"
     assert "MFA_SETUP never completed" in by_check["issue_and_decode"].detail
@@ -811,7 +881,7 @@ def test_a_failing_cleanup_is_reported_as_a_failure_not_swallowed() -> None:
 def test_undecodable_token_fails_and_still_cleans_up() -> None:
     provisioner = _FakeProvisioner()
     client, stubber = _idp_client()
-    stubber.add_response("describe_user_pool", {"UserPool": _compliant_pool()}, {"UserPoolId": ANY})
+    _add_pool(stubber, _compliant_pool())
 
     def explode(_token: str) -> dict[str, Any]:
         raise ValueError("signature verification failed")
@@ -1092,3 +1162,84 @@ def test_two_provisioners_on_one_injected_tenant_create_distinct_users() -> None
     assert first != second
     for username in (first, second):
         assert username.startswith(f"smoke-{shared.run_id}-") and username.endswith("@example.test")
+
+
+# ---------------------------------------------------------------------------
+# SPA client token revocation: enabled on the client, and a revoked refresh token is refused.
+# ---------------------------------------------------------------------------
+
+_REVOCATION_ROWS = ("token_revocation_enabled", "revoked_refresh_token_refused")
+
+
+def _failing_revocation_rows(results: list[Any]) -> set[str]:
+    by_check = {r.check: r for r in results}
+    return {check for check in _REVOCATION_ROWS if by_check[check].status != "pass"}
+
+
+def test_a_revocation_enabled_client_and_a_refused_revoked_token_pass_both_rows() -> None:
+    results = _checks_with_provisioner(_FakeProvisioner())
+    assert _failing_revocation_rows(results) == set(), [
+        (r.check, r.detail) for r in results if r.check in _REVOCATION_ROWS
+    ]
+    by_check = {r.check: r for r in results}
+    assert by_check["issue_and_decode"].status == "pass"
+    assert by_check["cognito_user_deleted"].status == "pass"
+
+
+@pytest.mark.parametrize("value", [False, _OMIT], ids=["false", "absent"])
+def test_token_revocation_not_enabled_reds_exactly_its_row(value: object) -> None:
+    results = _checks_with_provisioner(
+        _FakeProvisioner(), spa_client=_spa_client(enable_token_revocation=value)
+    )
+    assert _failing_revocation_rows(results) == {"token_revocation_enabled"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "provisioner_kwargs"),
+    [
+        ({"refresh_outcome": None}, {}),
+        ({"refresh_outcome": "InvalidParameterException"}, {}),
+        ({"refresh_outcome": "TooManyRequestsException"}, {}),
+        ({"revoke_error": "UnsupportedTokenTypeException"}, {}),
+        ({"queue_revocation": False}, {"refresh_token": ""}),
+    ],
+    ids=["refresh-accepted", "other-error", "throttled", "revoke-failed", "no-refresh-token"],
+)
+def test_a_revocation_that_did_not_hold_reds_exactly_its_row(
+    kwargs: dict[str, Any], provisioner_kwargs: dict[str, Any]
+) -> None:
+    provisioner = _FakeProvisioner(**provisioner_kwargs)
+    results = _checks_with_provisioner(provisioner, **kwargs)
+    assert _failing_revocation_rows(results) == {"revoked_refresh_token_refused"}
+    assert provisioner.cleaned_up
+
+
+def test_the_revocation_probe_runs_before_cleanup() -> None:
+    results = _checks_with_provisioner(_FakeProvisioner())
+    order = [r.check for r in results]
+    assert order.index("revoked_refresh_token_refused") < order.index("cognito_user_deleted")
+
+
+def test_a_pre_provisioned_user_skips_the_revocation_probe_with_a_reason() -> None:
+    results = _checks_with_token(_COMPLETE_CLAIMS)
+    by_check = {r.check: r for r in results}
+    assert by_check["revoked_refresh_token_refused"].status == "skip"
+    assert "live entry point" in by_check["revoked_refresh_token_refused"].detail
+    assert by_check["token_revocation_enabled"].status == "pass"
+
+
+def test_the_live_provisioner_carries_the_issued_refresh_token() -> None:
+    provisioner = LiveSmokeUserProvisioner(context_for_test(outputs=_outputs()))
+    client, stubber = _idp_client()
+    stubber.add_response(
+        "admin_initiate_auth",
+        {"AuthenticationResult": {"IdToken": "id", "RefreshToken": _REFRESH_TOKEN}},
+        {"UserPoolId": ANY, "ClientId": ANY, "AuthFlow": ANY, "AuthParameters": ANY},
+    )
+    with stubber:
+        provisioner._ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": client})
+        id_token, _secret = provisioner._one_auth_attempt(
+            username="u", password=_password(), secret=None
+        )
+    assert id_token == "id"
+    assert provisioner._refresh_token == _REFRESH_TOKEN

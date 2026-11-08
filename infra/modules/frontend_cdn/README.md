@@ -15,7 +15,7 @@ baseline](../../../docs/security-baseline.md#h-5). Modules named here:
 |---|---|
 | `kms.tf` | customer-managed KMS key (CMK) and alias encrypting the origin bucket |
 | `s3.tf` | the origin bucket (private, versioned, SSE-KMS, TLS-deny + OAC-only policy, S3 access logging) and a dedicated access-log bucket receiving S3, CloudFront and ALB access logs |
-| `cloudfront.tf` | two OACs (S3 and `lambda`-type for the relay), the two distribution-scoped Lambda permissions for the relay, the managed cache/origin-request policies read by data source, `/agent/*`'s own origin-request policy, two viewer-request functions, and the distribution |
+| `cloudfront.tf` | two OACs (S3 and `lambda`-type for the relay), the two distribution-scoped Lambda permissions for the relay, the managed cache/origin-request policies read by data source, `/agent/*`'s own origin-request policy, the security-headers response-headers policy (with the CSP), two viewer-request functions, and the distribution |
 | `functions/api_path_rewrite.js` | `/api/*` viewer-request function, rendered with the stage name by `templatefile` |
 | `functions/spa_history_fallback.js` | default-behaviour viewer-request function rewriting extensionless paths to the SPA entry point |
 
@@ -36,6 +36,8 @@ baseline](../../../docs/security-baseline.md#h-5). Modules named here:
 | `operator_principal_arns` | required | IAM role or user ARNs: the only non-service principals allowed frontend-key use and writes into the origin bucket. Non-empty; no `*`, `?` or account root |
 | `administrator_principal_arns` | required | IAM role or user ARNs, or the account root, allowed to administer the frontend key and the origin bucket. Non-empty; no `*` or `?` |
 | `caller_principal_arn` | required | role or user ARN of the principal running the plan; the key and origin policies refuse to plan unless it is a listed administrator other than the root |
+| `csp_script_hashes` | required | CSP hashes (`sha256-<base64>`, unquoted) of the SPA's inline scripts, added to `script-src`. The root derives them at plan time from the attribute-less `<script>` elements in `frontend/index.html`; `tests/unit/test_infra_csp.py` checks the derived value against the hash a browser computes |
+| `csp_connect_src_extra` | required | bare `https://<host>` origins added to `connect-src`: the regional `cognito-idp` endpoint and the hosted-UI domain. No path, port or wildcard |
 
 ## Outputs
 
@@ -53,9 +55,26 @@ baseline](../../../docs/security-baseline.md#h-5). Modules named here:
 Both identity-bearing behaviours pair "forward the identity header" with "cache disabled": a cached
 response keyed on a per-caller header would be replayed to a different caller.
 
-All three behaviours attach the AWS-managed `Managed-SecurityHeadersPolicy` response-headers policy
-(HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `X-XSS-Protection`). It only adds
-headers, so it does not buffer the `/agent/*` SSE stream. It sets no `Content-Security-Policy`.
+All three behaviours attach this module's `aws_cloudfront_response_headers_policy.security_headers`
+(named `<name_prefix>frontend-security-headers`). It carries the same headers as the AWS-managed
+`Managed-SecurityHeadersPolicy`, with `X-Frame-Options: DENY`, plus an enforced
+`Content-Security-Policy`. Every header overrides any value from the origin. The policy only adds
+headers, so it does not buffer the `/agent/*` SSE stream.
+
+The CSP is:
+
+```
+default-src 'self'; script-src 'self' '<csp_script_hashes>…'; style-src 'self' 'unsafe-inline';
+img-src 'self' data:; font-src 'self' data:; connect-src 'self' <csp_connect_src_extra>…;
+frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'self'
+```
+
+`'unsafe-inline'` appears only in `style-src`, because the UI library injects `<style>` elements at
+runtime. No directive allows `'unsafe-eval'`. The script hash follows `frontend/index.html`, so an
+edit to the inline script needs a `terraform apply` as well as a frontend upload. Until then browsers
+refuse the script, and the page renders in the default theme until the bundle loads. A new direct call from the SPA to another origin also needs that
+origin added to `csp_connect_src_extra`. Without it, the browser blocks the request and reports a CSP
+violation in the console.
 
 ### `/api/*` path rewrite
 

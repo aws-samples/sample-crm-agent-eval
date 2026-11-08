@@ -21,6 +21,18 @@ naming that account. ``update_contact`` on PD-01's departed contact is refused
 succeeds, and the contact is then set back to ``departed``. Every check reads the payload's error
 code, never the invoke status.
 
+The pagination-cursor checks (`cursor_checks`) cover the five paginating tools in
+:data:`CURSOR_TOOLS`. Page 2 through a real ``next_cursor`` succeeds; that cursor with one character
+flipped, replayed by another rep, or presented to another of the five tools is refused
+``validation_failed`` with ``source: cursor``. ``CRM_CURSOR_KMS_KEY_ARN`` is set on exactly those
+functions and names one key. The key rotates, is a single-Region symmetric encrypt/decrypt key,
+and carries a ``data-classification`` tag. Each of the five roles is simulated with
+``iam:SimulatePrincipalPolicy``: ``kms:Encrypt`` and ``kms:Decrypt`` are allowed only under the
+``crm-cursor`` encryption context, and every other key action is refused. Evaluated with the live
+key policy, administration is explicitly denied to those roles, and key use is explicitly denied
+to a role outside them. A ``create_note`` body one character over the toolspec's long-text cap is
+refused ``validation_failed``.
+
 Operates under its own smoke tenant (`scripts/smoke/tenant.py`), never ``demo``. With no
 ``--tenant`` it allocates and seeds that tenant and tears it down when ``checks()`` returns; with
 ``--tenant`` the tenant is used as-is and the orchestrator owns teardown.
@@ -34,7 +46,13 @@ import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final, Literal
 
-from scripts.smoke.harness import CheckResult, SmokeContext, run_main
+from scripts.smoke.harness import (
+    DEFER,
+    CheckResult,
+    SmokeContext,
+    key_policy_for_simulation,
+    run_main,
+)
 from scripts.smoke.tenant import (
     SmokeTenant,
     TenantTeardownError,
@@ -43,8 +61,9 @@ from scripts.smoke.tenant import (
     teardown_smoke_tenant,
 )
 
+from crm.cursor import CURSOR_KMS_KEY_ENV, CURSOR_PURPOSE
 from crm.store.store import Store
-from crm.toolspec.definitions import ALL_TOOLS, ToolDefinition
+from crm.toolspec.definitions import ALL_TOOLS, LONG_TEXT_MAX_LENGTH, ToolDefinition
 
 LAYER = 4
 RESOURCE_CLASS = "lambda_actions"
@@ -961,6 +980,767 @@ def _departed_contact_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[Chec
     )
 
 
+#: The tools whose `next_cursor` is sealed under the cursor key, the only functions that carry
+#: :data:`crm.cursor.CURSOR_KMS_KEY_ENV`.
+CURSOR_TOOLS: Final[tuple[str, ...]] = (
+    "search_opportunities",
+    "search_accounts",
+    "list_activities",
+    "list_audit_records",
+    "list_proposals",
+)
+
+#: The `resource` every key-level cursor row reports under.
+CURSOR_KEY_RESOURCE: Final[str] = "cursor_kms_key"
+
+#: The tool whose role stands in for every action role outside :data:`CURSOR_TOOLS`.
+NON_CURSOR_PROBE_TOOL: Final[str] = "get_account"
+
+#: A second seeded rep, distinct from the issuing rep, for the replay-by-another-caller row.
+_SECOND_REP_ID: Final[str] = "rep-brixton"
+
+#: The defer reason when the smoke tenant holds too few rows for a tool to issue a page 2.
+NO_SECOND_PAGE_DEFER_REASON: Final[str] = "smoke_tenant_has_no_second_page"
+
+CURSOR_PAGE_TWO_CHECK: Final[str] = "cursor_page_two"
+CURSOR_TAMPERED_CHECK: Final[str] = "cursor_tampered_refused"
+CURSOR_OTHER_REP_CHECK: Final[str] = "cursor_other_rep_refused"
+CURSOR_OTHER_OPERATION_CHECK: Final[str] = "cursor_other_operation_refused"
+CURSOR_ENV_CHECK: Final[str] = "cursor_key_env"
+CURSOR_KEY_ARN_CHECK: Final[str] = "cursor_key_arn_consistent"
+CURSOR_KEY_ROTATION_CHECK: Final[str] = "cursor_key_rotation_enabled"
+CURSOR_KEY_SHAPE_CHECK: Final[str] = "cursor_key_shape"
+CURSOR_KEY_TAG_CHECK: Final[str] = "cursor_key_classified"
+KMS_USE_ALLOWED_CHECK: Final[str] = "kms_cursor_use_allowed_with_context"
+KMS_OTHER_PURPOSE_CHECK: Final[str] = "kms_cursor_use_refused_other_purpose"
+KMS_NO_CONTEXT_CHECK: Final[str] = "kms_cursor_use_refused_without_context"
+KMS_OTHER_ACTIONS_CHECK: Final[str] = "kms_cursor_other_actions_refused"
+KMS_ADMIN_DENIED_CHECK: Final[str] = "kms_cursor_admin_explicitly_denied"
+KMS_OUTSIDE_IDENTITY_CHECK: Final[str] = "kms_cursor_use_refused_outside_allowlist"
+KMS_OUTSIDE_KEY_POLICY_CHECK: Final[str] = "kms_cursor_use_explicitly_denied_outside_allowlist"
+LONG_TEXT_CAP_CHECK: Final[str] = "long_text_cap_enforced"
+
+#: The tool and long-text field the cap row sends one character over the limit.
+_LONG_TEXT_TOOL: Final[str] = "create_note"
+_LONG_TEXT_FIELD: Final[str] = "body"
+
+_CURSOR_USE_ACTIONS: Final[tuple[str, ...]] = ("kms:Encrypt", "kms:Decrypt")
+_CURSOR_OTHER_ACTIONS: Final[tuple[str, ...]] = (
+    "kms:GenerateDataKey",
+    "kms:ReEncryptFrom",
+    "kms:CreateGrant",
+    "kms:DescribeKey",
+    "kms:ScheduleKeyDeletion",
+    "kms:PutKeyPolicy",
+)
+_CURSOR_ADMIN_ACTIONS: Final[tuple[str, ...]] = (
+    "kms:PutKeyPolicy",
+    "kms:ScheduleKeyDeletion",
+    "kms:DisableKeyRotation",
+)
+
+#: The encryption-context keys `crm.cursor` binds every cursor to.
+_CURSOR_CONTEXT_KEYS: Final[tuple[str, ...]] = ("purpose", "tenant", "rep_id", "operation")
+
+#: Page-1 arguments per cursor tool. `limit=1` forces a page 2 where the tool accepts a limit.
+_PAGE_ONE_LIMIT: Final[int] = 1
+
+
+def _page_one_arguments(tool_name: str, *, tenant: str) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+    if tool_name == "list_activities":
+        arguments["opportunity_id"] = seeded_entity_id(tenant, "opportunity_id")
+    if "limit" in _tool_named(tool_name).input_schema.get("properties", {}):
+        arguments["limit"] = _PAGE_ONE_LIMIT
+    return arguments
+
+
+def _tool_named(name: str) -> ToolDefinition:
+    for tool in ALL_TOOLS:
+        if tool.name == name:
+            return tool
+    raise KeyError(f"{name} is not in crm.toolspec.definitions.ALL_TOOLS")
+
+
+def cursor_event(
+    tool_name: str, *, tenant: str, cursor: str | None = None, rep_id: str | None = None
+) -> dict[str, Any]:
+    """Build a full-visibility listing call for `tool_name`, optionally resuming at `cursor`.
+
+    `rep_id` replaces the issuing rep, for the replay-by-another-caller row.
+    """
+    arguments = _page_one_arguments(tool_name, tenant=tenant)
+    if cursor is not None:
+        arguments["cursor"] = cursor
+    identity = _identity_envelope(
+        tenant=tenant, full_visibility=True, book=[seeded_in_scope_account_id(tenant)]
+    )
+    if rep_id is not None:
+        identity["rep_id"] = rep_id
+    return {**arguments, "_identity": identity}
+
+
+def tampered_cursor(cursor: str) -> str:
+    """Return `cursor` with its middle character replaced by another URL-safe base64 character."""
+    if not cursor:
+        raise ValueError("cannot tamper with an empty cursor")
+    index = len(cursor) // 2
+    replacement = "B" if cursor[index] == "A" else "A"
+    return cursor[:index] + replacement + cursor[index + 1 :]
+
+
+def _next_cursor(response: Mapping[str, Any]) -> str | None:
+    cursor = _success_body_of(response).get("next_cursor")
+    return cursor if isinstance(cursor, str) and cursor else None
+
+
+def _cursor_refusal(response: Mapping[str, Any]) -> str | None:
+    """Return `None` when `response` is a 400 `validation_failed` naming `source: cursor`.
+
+    Otherwise return why it is not.
+    """
+    error_block = response.get("error")
+    source = error_block.get("source") if isinstance(error_block, Mapping) else None
+    if (
+        response.get("statusCode") == 400
+        and _error_code(response) == "validation_failed"
+        and source == "cursor"
+    ):
+        if _leaks_detail(response):
+            return f"the refusal leaks an internal 'detail' key: {response!r}"
+        return None
+    return (
+        "expected statusCode 400, code 'validation_failed', source 'cursor'; got "
+        f"statusCode={response.get('statusCode')!r} code={_error_code(response)!r} "
+        f"source={source!r}: {response!r}"
+    )
+
+
+def _cursor_result(
+    tool_name: str, check: str, failure: str | None, *, passed: str = ""
+) -> CheckResult:
+    if failure is None:
+        return CheckResult(resource=tool_name, check=check, status="pass", detail=passed)
+    return CheckResult(resource=tool_name, check=check, status="fail", detail=failure)
+
+
+def _no_second_page(tool_name: str, check: str) -> CheckResult:
+    return CheckResult(
+        resource=tool_name,
+        check=check,
+        status=DEFER,
+        detail=(
+            f"{tool_name}'s page 1 in the smoke tenant carried no next_cursor, so no cursor of its "
+            "own exists to resume, tamper with or replay; its Decrypt path is still exercised by "
+            f"{CURSOR_OTHER_OPERATION_CHECK} and its key grant by the kms_* simulations"
+        ),
+        defer_reason=NO_SECOND_PAGE_DEFER_REASON,
+    )
+
+
+def _refused(
+    ctx: SmokeContext, tool_name: str, event: Mapping[str, Any], check: str
+) -> CheckResult:
+    try:
+        response = _invoke(ctx, function_name_for(_tool_named(tool_name)), event)
+    except ValueError as exc:
+        return _cursor_result(tool_name, check, str(exc))
+    return _cursor_result(tool_name, check, _cursor_refusal(response))
+
+
+def cursor_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[CheckResult]:
+    """Yield the page-2, tamper, other-rep and other-operation rows for every cursor tool.
+
+    Each tool's page 1 is fetched first. A tool whose page 1 issues no `next_cursor` reports its
+    own-cursor rows `defer`; the other-operation row uses another tool's cursor and always runs.
+    """
+    cursors: dict[str, str] = {}
+    page_one_failures: dict[str, str] = {}
+    for name in CURSOR_TOOLS:
+        try:
+            response = _invoke(
+                ctx, function_name_for(_tool_named(name)), cursor_event(name, tenant=tenant)
+            )
+        except ValueError as exc:
+            page_one_failures[name] = f"page 1 failed: {exc}"
+            continue
+        if _error_code(response) is not None:
+            page_one_failures[name] = f"page 1 returned an error: {response!r}"
+            continue
+        cursor = _next_cursor(response)
+        if cursor is not None:
+            cursors[name] = cursor
+
+    for name in CURSOR_TOOLS:
+        own_checks = (CURSOR_PAGE_TWO_CHECK, CURSOR_TAMPERED_CHECK, CURSOR_OTHER_REP_CHECK)
+        if name in page_one_failures:
+            for check in own_checks:
+                yield _cursor_result(name, check, page_one_failures[name])
+        elif name not in cursors:
+            for check in own_checks:
+                yield _no_second_page(name, check)
+        else:
+            cursor = cursors[name]
+            function_name = function_name_for(_tool_named(name))
+            try:
+                page_two = _invoke(
+                    ctx, function_name, cursor_event(name, tenant=tenant, cursor=cursor)
+                )
+            except ValueError as exc:
+                yield _cursor_result(name, CURSOR_PAGE_TWO_CHECK, str(exc))
+            else:
+                code = _error_code(page_two)
+                yield _cursor_result(
+                    name,
+                    CURSOR_PAGE_TWO_CHECK,
+                    None if code is None else f"page 2 returned an error: {page_two!r}",
+                )
+            yield _refused(
+                ctx,
+                name,
+                cursor_event(name, tenant=tenant, cursor=tampered_cursor(cursor)),
+                CURSOR_TAMPERED_CHECK,
+            )
+            yield _refused(
+                ctx,
+                name,
+                cursor_event(name, tenant=tenant, cursor=cursor, rep_id=_SECOND_REP_ID),
+                CURSOR_OTHER_REP_CHECK,
+            )
+
+        donor = next((other for other in CURSOR_TOOLS if other != name and other in cursors), None)
+        if donor is None:
+            yield _cursor_result(
+                name,
+                CURSOR_OTHER_OPERATION_CHECK,
+                "no other cursor tool issued a next_cursor to replay here",
+            )
+            continue
+        yield _refused(
+            ctx,
+            name,
+            cursor_event(name, tenant=tenant, cursor=cursors[donor]),
+            CURSOR_OTHER_OPERATION_CHECK,
+        )
+
+
+def _function_configuration(ctx: SmokeContext, tool_name: str) -> Mapping[str, Any]:
+    configuration = ctx.client("lambda").get_function_configuration(
+        FunctionName=function_name_for(_tool_named(tool_name))
+    )
+    if not isinstance(configuration, Mapping):
+        raise ValueError(f"get_function_configuration returned {configuration!r}")
+    return configuration
+
+
+def _environment(configuration: Mapping[str, Any]) -> Mapping[str, Any]:
+    variables = (configuration.get("Environment") or {}).get("Variables") or {}
+    return variables if isinstance(variables, Mapping) else {}
+
+
+def cursor_key_env_checks(
+    ctx: SmokeContext,
+) -> tuple[list[CheckResult], str | None, dict[str, str]]:
+    """Check `CURSOR_KMS_KEY_ENV` on every action Lambda and resolve the key and roles.
+
+    Returns `(rows, key_arn, role_arn_by_tool)`. `key_arn` is `None` when no consistent key could
+    be resolved; `role_arn_by_tool` covers every function whose configuration was read.
+    """
+    rows: list[CheckResult] = []
+    roles: dict[str, str] = {}
+    keys: dict[str, str] = {}
+    for tool in ALL_TOOLS:
+        try:
+            configuration = _function_configuration(ctx, tool.name)
+        except Exception as exc:  # noqa: BLE001 - any read failure is this row's failure
+            rows.append(
+                CheckResult(
+                    resource=tool.name,
+                    check=CURSOR_ENV_CHECK,
+                    status="fail",
+                    detail=f"get_function_configuration failed: {exc}",
+                )
+            )
+            continue
+        role = configuration.get("Role")
+        if isinstance(role, str) and role:
+            roles[tool.name] = role
+        value = _environment(configuration).get(CURSOR_KMS_KEY_ENV)
+        expected = tool.name in CURSOR_TOOLS
+        if expected and isinstance(value, str) and value:
+            keys[tool.name] = value
+            rows.append(
+                CheckResult(resource=tool.name, check=CURSOR_ENV_CHECK, status="pass", detail=value)
+            )
+        elif expected:
+            rows.append(
+                CheckResult(
+                    resource=tool.name,
+                    check=CURSOR_ENV_CHECK,
+                    status="fail",
+                    detail=f"{CURSOR_KMS_KEY_ENV} is absent or empty on a cursor tool",
+                )
+            )
+        elif value is not None:
+            rows.append(
+                CheckResult(
+                    resource=tool.name,
+                    check=CURSOR_ENV_CHECK,
+                    status="fail",
+                    detail=f"{CURSOR_KMS_KEY_ENV} is set on a tool that issues no cursor: {value!r}",
+                )
+            )
+        else:
+            rows.append(
+                CheckResult(
+                    resource=tool.name,
+                    check=CURSOR_ENV_CHECK,
+                    status="pass",
+                    detail=f"{CURSOR_KMS_KEY_ENV} absent, as for every non-cursor tool",
+                )
+            )
+
+    distinct = set(keys.values())
+    key_arn: str | None = None
+    if len(distinct) != 1:
+        detail = (
+            f"the cursor tools name {len(distinct)} key(s) across {len(keys)} function(s): {keys!r}"
+        )
+    else:
+        key_arn = next(iter(distinct))
+        detail = ""
+    if key_arn is None:
+        rows.append(
+            CheckResult(
+                resource=CURSOR_KEY_RESOURCE,
+                check=CURSOR_KEY_ARN_CHECK,
+                status="fail",
+                detail=detail,
+            )
+        )
+    else:
+        source = "the five cursor functions agree"
+        rows.append(
+            CheckResult(
+                resource=CURSOR_KEY_RESOURCE,
+                check=CURSOR_KEY_ARN_CHECK,
+                status="pass",
+                detail=f"{key_arn} ({source})",
+            )
+        )
+    return rows, key_arn, roles
+
+
+def cursor_key_property_checks(ctx: SmokeContext, key_arn: str) -> Iterable[CheckResult]:
+    """Yield the rotation, key-shape and classification-tag rows for the cursor key."""
+    kms = ctx.client("kms")
+
+    def row(check: str, failure: str | None, passed: str) -> CheckResult:
+        return CheckResult(
+            resource=CURSOR_KEY_RESOURCE,
+            check=check,
+            status="pass" if failure is None else "fail",
+            detail=passed if failure is None else failure,
+        )
+
+    try:
+        rotation = kms.get_key_rotation_status(KeyId=key_arn)
+        enabled = rotation.get("KeyRotationEnabled")
+        yield row(
+            CURSOR_KEY_ROTATION_CHECK,
+            None if enabled is True else f"KeyRotationEnabled={enabled!r}",
+            "KeyRotationEnabled=True",
+        )
+    except Exception as exc:  # noqa: BLE001
+        yield row(CURSOR_KEY_ROTATION_CHECK, f"get_key_rotation_status failed: {exc}", "")
+
+    try:
+        metadata = kms.describe_key(KeyId=key_arn).get("KeyMetadata") or {}
+        shape = (metadata.get("KeySpec"), metadata.get("KeyUsage"), metadata.get("MultiRegion"))
+        expected = ("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT", False)
+        yield row(
+            CURSOR_KEY_SHAPE_CHECK,
+            None
+            if shape == expected
+            else f"(KeySpec, KeyUsage, MultiRegion)={shape!r}, expected {expected!r}",
+            f"{shape!r}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        yield row(CURSOR_KEY_SHAPE_CHECK, f"describe_key failed: {exc}", "")
+
+    try:
+        tags = kms.list_resource_tags(KeyId=key_arn).get("Tags") or []
+        keys = {tag.get("TagKey") for tag in tags if isinstance(tag, Mapping)}
+        yield row(
+            CURSOR_KEY_TAG_CHECK,
+            None if "data-classification" in keys else f"tag keys {sorted(map(str, keys))!r}",
+            "data-classification tag present",
+        )
+    except Exception as exc:  # noqa: BLE001
+        yield row(CURSOR_KEY_TAG_CHECK, f"list_resource_tags failed: {exc}", "")
+
+
+def _context_entries(
+    purpose: str | None, *, principal_arn: str | None = None
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if purpose is not None:
+        entries.append(
+            {
+                "ContextKeyName": "kms:EncryptionContext:purpose",
+                "ContextKeyValues": [purpose],
+                "ContextKeyType": "string",
+            }
+        )
+        entries.append(
+            {
+                "ContextKeyName": "kms:EncryptionContextKeys",
+                "ContextKeyValues": list(_CURSOR_CONTEXT_KEYS),
+                "ContextKeyType": "stringList",
+            }
+        )
+    if principal_arn is not None:
+        entries.append(
+            {
+                "ContextKeyName": "aws:PrincipalArn",
+                "ContextKeyValues": [principal_arn],
+                "ContextKeyType": "string",
+            }
+        )
+        entries.append(
+            {
+                "ContextKeyName": "aws:PrincipalIsAWSService",
+                "ContextKeyValues": ["false"],
+                "ContextKeyType": "boolean",
+            }
+        )
+    return entries
+
+
+def _simulate(
+    ctx: SmokeContext,
+    role_arn: str,
+    actions: Sequence[str],
+    key_arn: str,
+    *,
+    context: list[dict[str, Any]],
+    resource_policy: str | None = None,
+) -> list[Mapping[str, Any]]:
+    request: dict[str, Any] = {
+        "PolicySourceArn": role_arn,
+        "ActionNames": list(actions),
+        "ResourceArns": [key_arn],
+        "ContextEntries": context,
+    }
+    if resource_policy is not None:
+        request["ResourcePolicy"] = key_policy_for_simulation(resource_policy, key_arn)
+    results: list[Mapping[str, Any]] = []
+    iam = ctx.client("iam")
+    while True:
+        response = iam.simulate_principal_policy(**request)
+        results.extend(response.get("EvaluationResults") or [])
+        if not response.get("IsTruncated"):
+            return results
+        request["Marker"] = response["Marker"]
+
+
+def _decisions(results: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    return {str(r.get("EvalActionName")): str(r.get("EvalDecision")) for r in results}
+
+
+def _decision_failure(
+    results: Sequence[Mapping[str, Any]],
+    actions: Sequence[str],
+    accept: Callable[[str], bool],
+    want: str,
+    *,
+    require_complete_context: bool = False,
+) -> str | None:
+    decisions = _decisions(results)
+    missing = sorted(set(actions) - set(decisions))
+    if missing:
+        return f"no evaluation result for {missing}: {decisions!r}"
+    wrong = {action: decisions[action] for action in actions if not accept(decisions[action])}
+    if wrong:
+        return f"expected {want}, got {wrong!r}"
+    if require_complete_context:
+        gaps = {
+            str(r.get("EvalActionName")): r.get("MissingContextValues")
+            for r in results
+            if r.get("MissingContextValues")
+        }
+        if gaps:
+            return f"MissingContextValues is not empty: {gaps!r}"
+    return None
+
+
+def _simulated_row(
+    ctx: SmokeContext,
+    *,
+    resource: str,
+    check: str,
+    role_arn: str,
+    actions: Sequence[str],
+    key_arn: str,
+    context: list[dict[str, Any]],
+    accept: Callable[[str], bool],
+    want: str,
+    resource_policy: str | None = None,
+    require_complete_context: bool = False,
+) -> CheckResult:
+    try:
+        results = _simulate(
+            ctx, role_arn, actions, key_arn, context=context, resource_policy=resource_policy
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult(
+            resource=resource, check=check, status="fail", detail=f"simulation failed: {exc}"
+        )
+    failure = _decision_failure(
+        results, actions, accept, want, require_complete_context=require_complete_context
+    )
+    if failure is not None:
+        return CheckResult(resource=resource, check=check, status="fail", detail=failure)
+    return CheckResult(
+        resource=resource, check=check, status="pass", detail=f"{_decisions(results)!r}"
+    )
+
+
+def cursor_key_simulation_checks(
+    ctx: SmokeContext, key_arn: str, roles: Mapping[str, str]
+) -> Iterable[CheckResult]:
+    """Yield the identity and key-policy simulations for the cursor roles and an outside role."""
+    try:
+        key_policy: str | None = str(
+            ctx.client("kms").get_key_policy(KeyId=key_arn, PolicyName="default")["Policy"]
+        )
+        policy_failure = ""
+    except Exception as exc:  # noqa: BLE001
+        key_policy = None
+        policy_failure = f"get_key_policy failed: {exc}"
+
+    def allowed(decision: str) -> bool:
+        return decision == "allowed"
+
+    def refused(decision: str) -> bool:
+        return decision != "allowed"
+
+    def implicit(decision: str) -> bool:
+        return decision == "implicitDeny"
+
+    def explicit(decision: str) -> bool:
+        return decision == "explicitDeny"
+
+    for name in CURSOR_TOOLS:
+        role = roles.get(name)
+        if role is None:
+            for check in (
+                KMS_USE_ALLOWED_CHECK,
+                KMS_OTHER_PURPOSE_CHECK,
+                KMS_NO_CONTEXT_CHECK,
+                KMS_OTHER_ACTIONS_CHECK,
+                KMS_ADMIN_DENIED_CHECK,
+            ):
+                yield CheckResult(
+                    resource=name,
+                    check=check,
+                    status="fail",
+                    detail="the function's Role is unknown",
+                )
+            continue
+        yield _simulated_row(
+            ctx,
+            check=KMS_USE_ALLOWED_CHECK,
+            actions=_CURSOR_USE_ACTIONS,
+            context=_context_entries(CURSOR_PURPOSE),
+            accept=allowed,
+            want="allowed",
+            require_complete_context=True,
+            resource=name,
+            role_arn=role,
+            key_arn=key_arn,
+        )
+        yield _simulated_row(
+            ctx,
+            check=KMS_OTHER_PURPOSE_CHECK,
+            actions=_CURSOR_USE_ACTIONS,
+            context=_context_entries("other"),
+            accept=implicit,
+            want="implicitDeny",
+            resource=name,
+            role_arn=role,
+            key_arn=key_arn,
+        )
+        yield _simulated_row(
+            ctx,
+            check=KMS_NO_CONTEXT_CHECK,
+            actions=_CURSOR_USE_ACTIONS,
+            context=_context_entries(None),
+            accept=refused,
+            want="not allowed",
+            resource=name,
+            role_arn=role,
+            key_arn=key_arn,
+        )
+        yield _simulated_row(
+            ctx,
+            check=KMS_OTHER_ACTIONS_CHECK,
+            actions=_CURSOR_OTHER_ACTIONS,
+            context=_context_entries(CURSOR_PURPOSE),
+            accept=refused,
+            want="not allowed",
+            resource=name,
+            role_arn=role,
+            key_arn=key_arn,
+        )
+        if key_policy is None:
+            yield CheckResult(
+                resource=name, check=KMS_ADMIN_DENIED_CHECK, status="fail", detail=policy_failure
+            )
+        else:
+            yield _simulated_row(
+                ctx,
+                check=KMS_ADMIN_DENIED_CHECK,
+                actions=_CURSOR_ADMIN_ACTIONS,
+                context=_context_entries(CURSOR_PURPOSE, principal_arn=role),
+                accept=explicit,
+                want="explicitDeny",
+                resource_policy=key_policy,
+                resource=name,
+                role_arn=role,
+                key_arn=key_arn,
+            )
+
+    outside = roles.get(NON_CURSOR_PROBE_TOOL)
+    if outside is None:
+        for check in (KMS_OUTSIDE_IDENTITY_CHECK, KMS_OUTSIDE_KEY_POLICY_CHECK):
+            yield CheckResult(
+                resource=NON_CURSOR_PROBE_TOOL,
+                check=check,
+                status="fail",
+                detail="the function's Role is unknown",
+            )
+        return
+    yield _simulated_row(
+        ctx,
+        check=KMS_OUTSIDE_IDENTITY_CHECK,
+        actions=_CURSOR_USE_ACTIONS,
+        context=_context_entries(CURSOR_PURPOSE),
+        accept=refused,
+        want="not allowed",
+        resource=NON_CURSOR_PROBE_TOOL,
+        role_arn=outside,
+        key_arn=key_arn,
+    )
+    if key_policy is None:
+        yield CheckResult(
+            resource=NON_CURSOR_PROBE_TOOL,
+            check=KMS_OUTSIDE_KEY_POLICY_CHECK,
+            status="fail",
+            detail=policy_failure,
+        )
+    else:
+        yield _simulated_row(
+            ctx,
+            check=KMS_OUTSIDE_KEY_POLICY_CHECK,
+            actions=_CURSOR_USE_ACTIONS,
+            context=_context_entries(CURSOR_PURPOSE, principal_arn=outside),
+            accept=explicit,
+            want="explicitDeny",
+            resource_policy=key_policy,
+            resource=NON_CURSOR_PROBE_TOOL,
+            role_arn=outside,
+            key_arn=key_arn,
+        )
+
+
+def _key_dependent_rows() -> list[tuple[str, str]]:
+    """Every `(resource, check)` row the key-property and simulation checks emit, in order."""
+    rows = [
+        (CURSOR_KEY_RESOURCE, CURSOR_KEY_ROTATION_CHECK),
+        (CURSOR_KEY_RESOURCE, CURSOR_KEY_SHAPE_CHECK),
+        (CURSOR_KEY_RESOURCE, CURSOR_KEY_TAG_CHECK),
+    ]
+    for name in CURSOR_TOOLS:
+        rows.extend(
+            (name, check)
+            for check in (
+                KMS_USE_ALLOWED_CHECK,
+                KMS_OTHER_PURPOSE_CHECK,
+                KMS_NO_CONTEXT_CHECK,
+                KMS_OTHER_ACTIONS_CHECK,
+                KMS_ADMIN_DENIED_CHECK,
+            )
+        )
+    rows.append((NON_CURSOR_PROBE_TOOL, KMS_OUTSIDE_IDENTITY_CHECK))
+    rows.append((NON_CURSOR_PROBE_TOOL, KMS_OUTSIDE_KEY_POLICY_CHECK))
+    return rows
+
+
+def cursor_key_checks(ctx: SmokeContext) -> Iterable[CheckResult]:
+    """Yield the env-var, key-property and simulation rows for the cursor key.
+
+    When no single key resolves, the key-dependent rows are reported `skip`, naming the failing
+    `CURSOR_KEY_ARN_CHECK` row, which carries the failure.
+    """
+    rows, key_arn, roles = cursor_key_env_checks(ctx)
+    yield from rows
+    if key_arn is None:
+        for resource, check in _key_dependent_rows():
+            yield CheckResult(
+                resource=resource,
+                check=check,
+                status="skip",
+                detail=f"no single cursor key resolved; {CURSOR_KEY_ARN_CHECK} fails the run",
+            )
+        return
+    yield from cursor_key_property_checks(ctx, key_arn)
+    yield from cursor_key_simulation_checks(ctx, key_arn, roles)
+
+
+def long_text_event(*, tenant: str) -> dict[str, Any]:
+    """Build an in-scope `create_note` whose `body` is one character over the long-text cap."""
+    tool = _tool_named(_LONG_TEXT_TOOL)
+    event = in_scope_event(tool, tenant=tenant)
+    event[_LONG_TEXT_FIELD] = "x" * (LONG_TEXT_MAX_LENGTH + 1)
+    event["transaction_key"] = _transaction_key(f"{tenant}-cap", tool.name)
+    return event
+
+
+def check_long_text_cap(ctx: SmokeContext, *, tenant: str) -> CheckResult:
+    """Assert an over-cap long-text field is refused `validation_failed` (HTTP 400)."""
+    tool = _tool_named(_LONG_TEXT_TOOL)
+    try:
+        response = _invoke(ctx, function_name_for(tool), long_text_event(tenant=tenant))
+    except ValueError as exc:
+        return CheckResult(
+            resource=tool.name, check=LONG_TEXT_CAP_CHECK, status="fail", detail=str(exc)
+        )
+    if response.get("statusCode") == 400 and _error_code(response) == "validation_failed":
+        return CheckResult(
+            resource=tool.name,
+            check=LONG_TEXT_CAP_CHECK,
+            status="pass",
+            detail=f"{_LONG_TEXT_FIELD} of {LONG_TEXT_MAX_LENGTH + 1} characters refused",
+        )
+    return CheckResult(
+        resource=tool.name,
+        check=LONG_TEXT_CAP_CHECK,
+        status="fail",
+        detail=(
+            f"expected statusCode 400 validation_failed for a {LONG_TEXT_MAX_LENGTH + 1}-character "
+            f"{_LONG_TEXT_FIELD}, got {response!r}"
+        ),
+    )
+
+
+def guarded_extra_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[CheckResult]:
+    """Yield the cursor, cursor-key and long-text-cap rows, in that order."""
+    yield from cursor_checks(ctx, tenant=tenant)
+    yield from cursor_key_checks(ctx)
+    yield check_long_text_cap(ctx, tenant=tenant)
+
+
 def checks(
     ctx: SmokeContext,
     *,
@@ -1061,6 +1841,7 @@ def _run_all_tool_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[CheckRes
         if tool.name == _EXPLICIT_FILTER_TOOL:
             yield _check_explicit_filter_denied(ctx, tool, tenant=tenant)
     yield from _departed_contact_checks(ctx, tenant=tenant)
+    yield from guarded_extra_checks(ctx, tenant=tenant)
 
 
 def _teardown_check(

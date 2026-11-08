@@ -7,7 +7,8 @@
   :class:`crm.errors.ValidationFailed`. Marking a contact ``departed`` is an ordinary update and
   leaves the reference in place.
 
-Both checks run in the ``submit_proposal`` handler, before a proposal is created.
+Both checks run in the ``submit_proposal`` handler before a proposal is created, and again in the
+``approve_proposal`` handler before a pending delete is applied.
 """
 
 from __future__ import annotations

@@ -2153,3 +2153,24 @@ def test_the_direct_urlopen_scan_control_finds_a_planted_call() -> None:
     planted = "import urllib.request\nurllib.request.urlopen('https://x', timeout=1)\n"
     assert _direct_urlopen_calls(planted) == [2]
     assert _direct_urlopen_calls("from urllib.request import urlopen\nurlopen('x')\n") == [2]
+
+
+def test_is_timeout_follows_the_cause_chain_of_a_re_raised_transport_error() -> None:
+    """A taxonomy error raised `from` a botocore transport error is still a timeout."""
+
+    class EndpointConnectionError(Exception):
+        """Named to match botocore's type, which is how `is_timeout` recognises it."""
+
+    class StoreBusyError(Exception):
+        """Stands in for the store layer's retryable taxonomy error."""
+
+    def _raise() -> None:
+        try:
+            raise EndpointConnectionError("unreachable")
+        except EndpointConnectionError as exc:
+            raise StoreBusyError("busy") from exc
+
+    with pytest.raises(StoreBusyError) as raised:
+        _raise()
+    assert harness.is_timeout(raised.value) is True
+    assert harness.is_timeout(StoreBusyError("busy")) is False

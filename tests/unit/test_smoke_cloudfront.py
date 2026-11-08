@@ -8,18 +8,23 @@ behaviour, the SPA history fallback, and what must be absent from the distributi
 
 from __future__ import annotations
 
+import base64
+import hashlib
+from collections.abc import Iterable
 from typing import Any
 
 import pytest
 from scripts.smoke.cloudfront import (
     _UNAUTHENTICATED_API_METHOD,
     _UNAUTHENTICATED_API_PATH,
+    HeaderCaller,
+    HeaderResult,
     HttpCaller,
     HttpMethodCaller,
     HttpResult,
     TlsProbeResult,
-    checks,
 )
+from scripts.smoke.cloudfront import checks as _module_checks
 from scripts.smoke.harness import CheckResult, ResourceClassResult, context_for_test
 
 DOMAIN_NAME = "d111111abcdef8.cloudfront.net"
@@ -37,6 +42,57 @@ AGENTCORE_URL = "https://bedrock-agentcore.us-east-1.amazonaws.com"
 RELAY_FUNCTION_URL = "https://abcdefghij1234567890.lambda-url.us-east-1.on.aws/"
 RELAY_FUNCTION_HOST = "abcdefghij1234567890.lambda-url.us-east-1.on.aws"
 OAC_ID = "E2QWERTYUIOP"
+
+#: The module's custom response-headers policy, attached to every behaviour.
+RESPONSE_HEADERS_POLICY_ID = "a1b2c3d4-0000-4000-8000-0000f00d0001"
+#: AWS-managed `Managed-SecurityHeadersPolicy`, which carries no CSP.
+MANAGED_SECURITY_HEADERS_POLICY_ID = "67f7725c-6f97-4210-82d7-5512b31e9d03"
+COGNITO_DOMAIN = "crm-agent-eval-fixture"
+REGION = "us-east-1"
+
+#: The inline theme script the served document carries, and its CSP hash source.
+THEME_SCRIPT = "\n      (function () { document.documentElement.setAttribute('data-theme', 'light'); })();\n    "
+THEME_SCRIPT_HASH = (
+    "'sha256-" + base64.b64encode(hashlib.sha256(THEME_SCRIPT.encode()).digest()).decode() + "'"
+)
+SERVED_INDEX = (
+    f"<!doctype html><html><head><script>{THEME_SCRIPT}</script></head>"
+    '<body><div id="root"></div><script type="module" src="/assets/index.js"></script></body></html>'
+)
+
+
+def _csp(
+    *,
+    script_src: Iterable[str] = ("'self'", THEME_SCRIPT_HASH),
+    connect_src: Iterable[str] = (
+        "'self'",
+        f"https://cognito-idp.{REGION}.amazonaws.com",
+        f"https://{COGNITO_DOMAIN}.auth.{REGION}.amazoncognito.com",
+    ),
+    replace: dict[str, str] | None = None,
+    drop: Iterable[str] = (),
+    extra: Iterable[str] = (),
+) -> str:
+    """The designed CSP, with any directive replaced (`name -> 'name sources'`) or dropped."""
+    directives = {
+        "default-src": "default-src 'self'",
+        "script-src": "script-src " + " ".join(script_src),
+        "style-src": "style-src 'self' 'unsafe-inline'",
+        "img-src": "img-src 'self' data:",
+        "font-src": "font-src 'self' data:",
+        "connect-src": "connect-src " + " ".join(connect_src),
+        "frame-ancestors": "frame-ancestors 'none'",
+        "base-uri": "base-uri 'none'",
+        "object-src": "object-src 'none'",
+        "form-action": "form-action 'self'",
+    }
+    directives.update(replace or {})
+    for name in drop:
+        del directives[name]
+    return "; ".join([*directives.values(), *extra])
+
+
+HEALTHY_CSP = _csp()
 
 CACHING_DISABLED_POLICY_ID = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 CACHING_OPTIMIZED_POLICY_ID = "658327ea-f89d-4fab-a63d-7e88639e58f6"
@@ -96,6 +152,7 @@ def _default_behavior(target_origin_id: str = "s3-frontend-origin") -> dict[str,
     return {
         "TargetOriginId": target_origin_id,
         "CachePolicyId": CACHING_OPTIMIZED_POLICY_ID,
+        "ResponseHeadersPolicyId": RESPONSE_HEADERS_POLICY_ID,
     }
 
 
@@ -112,6 +169,7 @@ def _custom_behavior(
         "PathPattern": path_pattern,
         "TargetOriginId": target_origin_id,
         "CachePolicyId": cache_policy_id,
+        "ResponseHeadersPolicyId": RESPONSE_HEADERS_POLICY_ID,
     }
     if origin_request_policy_id is not None:
         behavior["OriginRequestPolicyId"] = origin_request_policy_id
@@ -175,10 +233,48 @@ class FakeCloudFrontClient:
     """Minimal stand-in for a boto3 `cloudfront` client, keyed to what `checks()` calls."""
 
     def __init__(
-        self, *, distribution_config: dict[str, Any], domain_name: str = DOMAIN_NAME
+        self,
+        *,
+        distribution_config: dict[str, Any],
+        domain_name: str = DOMAIN_NAME,
+        policy_csp: str | None = HEALTHY_CSP,
+        csp_override: bool = True,
+        frame_option: str = "DENY",
+        custom_policy_ids: tuple[str, ...] = (RESPONSE_HEADERS_POLICY_ID,),
     ) -> None:
         self._distribution_config = distribution_config
         self._domain_name = domain_name
+        self._policy_csp = policy_csp
+        self._csp_override = csp_override
+        self._frame_option = frame_option
+        self._custom_policy_ids = custom_policy_ids
+
+    def list_response_headers_policies(self, **kwargs: Any) -> dict[str, Any]:
+        assert kwargs.get("Type") == "custom"
+        return {
+            "ResponseHeadersPolicyList": {
+                "Items": [
+                    {"Type": "custom", "ResponseHeadersPolicy": {"Id": policy_id}}
+                    for policy_id in self._custom_policy_ids
+                ]
+            }
+        }
+
+    def get_response_headers_policy(self, **kwargs: Any) -> dict[str, Any]:
+        security: dict[str, Any] = {
+            "FrameOptions": {"FrameOption": self._frame_option, "Override": True},
+        }
+        if self._policy_csp is not None:
+            security["ContentSecurityPolicy"] = {
+                "ContentSecurityPolicy": self._policy_csp,
+                "Override": self._csp_override,
+            }
+        return {
+            "ResponseHeadersPolicy": {
+                "Id": kwargs["Id"],
+                "ResponseHeadersPolicyConfig": {"SecurityHeadersConfig": security},
+            }
+        }
 
     def list_distributions(self, **_kwargs: Any) -> dict[str, Any]:
         return {
@@ -197,6 +293,7 @@ def _outputs() -> dict[str, str]:
         "api_endpoint": API_ENDPOINT,
         "agentcore_gateway_url": AGENTCORE_URL,
         "agent_relay_function_url": RELAY_FUNCTION_URL,
+        "cognito_domain": COGNITO_DOMAIN,
     }
 
 
@@ -220,10 +317,15 @@ def _as_method_caller(caller: HttpCaller) -> HttpMethodCaller:
     return method_caller
 
 
-def _make_ctx(distribution_config: dict[str, Any]) -> Any:
+def _make_ctx(distribution_config: dict[str, Any], **client_kwargs: Any) -> Any:
     return context_for_test(
         outputs=_outputs(),
-        clients={"cloudfront": FakeCloudFrontClient(distribution_config=distribution_config)},
+        clients={
+            "cloudfront": FakeCloudFrontClient(
+                distribution_config=distribution_config, **client_kwargs
+            )
+        },
+        region=REGION,
     )
 
 
@@ -248,6 +350,54 @@ def _healthy_caller(url: str) -> HttpResult:
 
 def _refused_probe(_domain_name: str) -> TlsProbeResult:
     return True
+
+
+def _header_caller(
+    *,
+    csp_by_path: dict[str, str | None] | None = None,
+    report_only_by_path: dict[str, str] | None = None,
+    status_by_path: dict[str, int] | None = None,
+    transport_failure_paths: Iterable[str] = (),
+    index_body: str = SERVED_INDEX,
+) -> HeaderCaller:
+    """A served-header fake: `/` is the SPA, `/api/*` 401 and `/agent/*` 401, each with the CSP."""
+    from urllib.parse import urlsplit
+
+    failing = set(transport_failure_paths)
+
+    def caller(url: str, method: str) -> HeaderResult:
+        path = urlsplit(url).path
+        if path in failing:
+            return f"transport error calling {method} {url}: connection reset"
+        if path == "/":
+            status, body = 200, index_body
+        elif path.startswith("/api/"):
+            assert method == _UNAUTHENTICATED_API_METHOD
+            status, body = 401, '{"message":"Unauthorized"}'
+        elif path.startswith("/agent/"):
+            status, body = 401, '{"error":"unauthorized"}'
+        else:
+            raise AssertionError(f"unexpected header probe {method} {url}")
+        status = (status_by_path or {}).get(path, status)
+        headers: dict[str, str] = {}
+        csp = (csp_by_path or {}).get(path, HEALTHY_CSP)
+        if csp is not None:
+            headers["content-security-policy"] = csp
+        report_only = (report_only_by_path or {}).get(path)
+        if report_only is not None:
+            headers["content-security-policy-report-only"] = report_only
+        return status, headers, body
+
+    return caller
+
+
+_healthy_header_caller = _header_caller()
+
+
+def checks(ctx: Any, **kwargs: Any) -> Iterable[CheckResult]:
+    """`scripts.smoke.cloudfront.checks` with the healthy served-header fake unless one is given."""
+    kwargs.setdefault("http_header_caller", _healthy_header_caller)
+    return _module_checks(ctx, **kwargs)
 
 
 def test_oac_only_origin_passes_with_oac_configured() -> None:
@@ -869,6 +1019,10 @@ def test_api_behavior_routed_to_wrong_origin_is_detected() -> None:
     assert findings[0].status == "fail"
 
 
+#: Behaviour-scoped checks that read the served response rather than the distribution config.
+_LIVE_RESPONSE_CHECKS = frozenset({"unauthenticated_api_still_refused", "csp_header_enforced"})
+
+
 def test_missing_api_behavior_fails_naming_the_path_pattern() -> None:
     """A missing behaviour must fail, naming the path pattern, across all three checks."""
     config = _distribution_config(include_api_behavior=False)
@@ -883,11 +1037,11 @@ def test_missing_api_behavior_fails_naming_the_path_pattern() -> None:
         )
     )
 
-    # `unauthenticated_api_still_refused` reads the live response, not the config.
+    # `unauthenticated_api_still_refused` and `csp_header_enforced` read the live response.
     behavior_checks = [
         r
         for r in results
-        if r.resource == "behavior:/api/*" and r.check != "unauthenticated_api_still_refused"
+        if r.resource == "behavior:/api/*" and r.check not in _LIVE_RESPONSE_CHECKS
     ]
     assert len(behavior_checks) == 3
     assert all(r.status == "fail" for r in behavior_checks)
@@ -907,7 +1061,11 @@ def test_missing_agent_behavior_fails_naming_the_path_pattern() -> None:
         )
     )
 
-    behavior_checks = [r for r in results if r.resource == "behavior:/agent/*"]
+    behavior_checks = [
+        r
+        for r in results
+        if r.resource == "behavior:/agent/*" and r.check not in _LIVE_RESPONSE_CHECKS
+    ]
     # Origin, caching, Authorization, no path-rewrite function, and compression off.
     assert len(behavior_checks) == 5
     assert all(r.status == "fail" for r in behavior_checks)
@@ -1405,3 +1563,254 @@ def test_an_absent_compress_field_fails_rather_than_reading_as_disabled() -> Non
     )
 
     assert _one(results, "behavior:/agent/*", "compression_disabled").status == "fail"
+
+
+# ---------------------------------------------------------------------------
+# The response-headers policy and the served Content-Security-Policy.
+# ---------------------------------------------------------------------------
+
+#: Every row the CSP and response-headers-policy checks emit, as `(resource, check)`.
+CSP_ROWS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("distribution", "one_response_headers_policy_on_every_behaviour"),
+        ("distribution", "response_headers_policy_enforces_csp"),
+        ("behavior:/*", "csp_header_enforced"),
+        ("behavior:/api/*", "csp_header_enforced"),
+        ("behavior:/agent/*", "csp_header_enforced"),
+        ("distribution", "served_csp_identical_and_equal_to_policy"),
+        ("distribution", "served_csp_matches_design"),
+        ("distribution", "served_csp_connect_src_allows_cognito"),
+        ("distribution", "served_csp_allows_every_inline_script"),
+    }
+)
+
+
+def _csp_results(
+    *,
+    config: dict[str, Any] | None = None,
+    header_caller: HeaderCaller | None = None,
+    **client_kwargs: Any,
+) -> dict[tuple[str, str], CheckResult]:
+    """Run `checks()` and return the CSP rows, asserting each appears exactly once."""
+    ctx = _make_ctx(config if config is not None else _distribution_config(), **client_kwargs)
+    results = list(
+        checks(
+            ctx,
+            http_caller=_healthy_caller,
+            http_method_caller=_as_method_caller(_healthy_caller),
+            tls_probe=_refused_probe,
+            http_header_caller=header_caller or _healthy_header_caller,
+        )
+    )
+    return {key: _one(results, *key) for key in CSP_ROWS}
+
+
+def _failing(rows: dict[tuple[str, str], CheckResult]) -> set[tuple[str, str]]:
+    return {key for key, result in rows.items() if result.status != "pass"}
+
+
+def test_a_healthy_distribution_passes_every_csp_row() -> None:
+    rows = _csp_results()
+    assert _failing(rows) == set(), {k: r.detail for k, r in rows.items() if r.status != "pass"}
+
+
+def test_every_csp_probe_reads_the_header_from_the_behaviour_it_names() -> None:
+    """`/`, an unauthenticated `/api/*` call and an unauthenticated `/agent/*` call are probed."""
+    seen: list[tuple[str, str]] = []
+
+    def recording(url: str, method: str) -> HeaderResult:
+        seen.append((url, method))
+        return _healthy_header_caller(url, method)
+
+    _csp_results(header_caller=recording)
+    paths = [url.removeprefix(f"https://{DOMAIN_NAME}") for url, _ in seen]
+    assert paths[0] == "/"
+    assert paths[1] == _UNAUTHENTICATED_API_PATH and seen[1][1] == _UNAUTHENTICATED_API_METHOD
+    assert paths[2].startswith("/agent/")
+    assert len(seen) == 3
+
+
+@pytest.mark.parametrize(
+    ("path", "resource"),
+    [
+        ("/", "behavior:/*"),
+        (_UNAUTHENTICATED_API_PATH, "behavior:/api/*"),
+        ("/agent/csp-probe", "behavior:/agent/*"),
+    ],
+)
+def test_a_behaviour_serving_no_csp_fails_exactly_its_own_row(path: str, resource: str) -> None:
+    rows = _csp_results(header_caller=_header_caller(csp_by_path={path: None}))
+    expected = {(resource, "csp_header_enforced")}
+    if resource == "behavior:/*":
+        # Every distribution-level row reads the `/` header, so each reports it absent.
+        expected |= {key for key in CSP_ROWS if key[0] == "distribution" and "served" in key[1]}
+    assert _failing(rows) == expected
+
+
+def test_a_report_only_header_is_not_an_enforced_csp() -> None:
+    caller = _header_caller(
+        csp_by_path={"/agent/csp-probe": None},
+        report_only_by_path={"/agent/csp-probe": HEALTHY_CSP},
+    )
+    rows = _csp_results(header_caller=caller)
+    assert _failing(rows) == {("behavior:/agent/*", "csp_header_enforced")}
+    assert "Report-Only" in rows[("behavior:/agent/*", "csp_header_enforced")].detail
+
+
+def test_an_unauthenticated_probe_that_succeeds_fails_its_row() -> None:
+    rows = _csp_results(
+        header_caller=_header_caller(status_by_path={_UNAUTHENTICATED_API_PATH: 200})
+    )
+    assert _failing(rows) == {("behavior:/api/*", "csp_header_enforced")}
+
+
+def test_a_transport_failure_on_a_probe_is_reported_not_raised() -> None:
+    rows = _csp_results(header_caller=_header_caller(transport_failure_paths=["/agent/csp-probe"]))
+    assert _failing(rows) == {("behavior:/agent/*", "csp_header_enforced")}
+    assert "transport error" in rows[("behavior:/agent/*", "csp_header_enforced")].detail
+
+
+def test_a_behaviour_serving_a_different_csp_fails_the_identity_row() -> None:
+    other = _csp(replace={"img-src": "img-src 'self'"})
+    rows = _csp_results(header_caller=_header_caller(csp_by_path={"/agent/csp-probe": other}))
+    assert _failing(rows) == {("distribution", "served_csp_identical_and_equal_to_policy")}
+
+
+def test_a_served_csp_that_differs_from_the_policy_fails_the_identity_row() -> None:
+    rows = _csp_results(policy_csp=_csp(replace={"img-src": "img-src 'self'"}))
+    assert _failing(rows) == {("distribution", "served_csp_identical_and_equal_to_policy")}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        _csp(script_src=("'self'", THEME_SCRIPT_HASH, "'unsafe-eval'")),
+        _csp(script_src=("'self'", THEME_SCRIPT_HASH, "'unsafe-inline'")),
+        _csp(replace={"default-src": "default-src 'self' 'unsafe-eval'"}),
+        _csp(drop=["frame-ancestors"]),
+        _csp(replace={"object-src": "object-src 'self'"}),
+        _csp(extra=["worker-src 'self'"]),
+        _csp(connect_src=("'self'", "https://*.amazonaws.com")),
+        _csp(script_src=("'self'", THEME_SCRIPT_HASH, "https://cdn.example.test")),
+        _csp(extra=["default-src 'self'"]),
+    ],
+    ids=[
+        "unsafe-eval",
+        "unsafe-inline-in-script-src",
+        "unsafe-eval-elsewhere",
+        "missing-frame-ancestors",
+        "object-src-not-none",
+        "extra-directive",
+        "wildcard-connect-origin",
+        "script-src-host-source",
+        "repeated-directive",
+    ],
+)
+def test_a_served_csp_off_the_design_fails_exactly_the_design_row(broken: str) -> None:
+    rows = _csp_results(
+        header_caller=_header_caller(
+            csp_by_path=dict.fromkeys(["/", _UNAUTHENTICATED_API_PATH, "/agent/csp-probe"], broken)
+        ),
+        policy_csp=broken,
+    )
+    failing = _failing(rows)
+    assert ("distribution", "served_csp_matches_design") in failing
+    if "unsafe-eval" in broken:
+        assert "allows 'unsafe-eval'" in rows[("distribution", "served_csp_matches_design")].detail
+    # A wildcard origin also drops the Cognito origins; a script host leaves the hash intact.
+    assert (
+        failing
+        - {
+            ("distribution", "served_csp_matches_design"),
+            ("distribution", "served_csp_connect_src_allows_cognito"),
+        }
+        == set()
+    ), failing
+
+
+@pytest.mark.parametrize(
+    "connect_src",
+    [
+        ("'self'", f"https://{COGNITO_DOMAIN}.auth.{REGION}.amazoncognito.com"),
+        ("'self'", f"https://cognito-idp.{REGION}.amazonaws.com"),
+        (
+            "'self'",
+            "https://cognito-idp.us-west-2.amazonaws.com",
+            f"https://{COGNITO_DOMAIN}.auth.{REGION}.amazoncognito.com",
+        ),
+    ],
+    ids=["no-user-pool-endpoint", "no-hosted-ui-domain", "wrong-region"],
+)
+def test_a_connect_src_without_a_cognito_origin_fails_exactly_that_row(
+    connect_src: tuple[str, ...],
+) -> None:
+    broken = _csp(connect_src=connect_src)
+    caller = _header_caller(
+        csp_by_path=dict.fromkeys(["/", _UNAUTHENTICATED_API_PATH, "/agent/csp-probe"], broken)
+    )
+    rows = _csp_results(header_caller=caller, policy_csp=broken)
+    assert _failing(rows) == {("distribution", "served_csp_connect_src_allows_cognito")}
+
+
+def test_a_served_inline_script_whose_hash_is_not_in_script_src_fails() -> None:
+    edited = SERVED_INDEX.replace("'light'", "'dark'")
+    rows = _csp_results(header_caller=_header_caller(index_body=edited))
+    assert _failing(rows) == {("distribution", "served_csp_allows_every_inline_script")}
+    assert (
+        "browsers refuse" in rows[("distribution", "served_csp_allows_every_inline_script")].detail
+    )
+
+
+def test_a_second_inline_script_without_a_hash_fails() -> None:
+    extra = SERVED_INDEX.replace("</head>", "<script>window.x = 1;</script></head>")
+    rows = _csp_results(header_caller=_header_caller(index_body=extra))
+    assert _failing(rows) == {("distribution", "served_csp_allows_every_inline_script")}
+
+
+def test_a_document_with_no_inline_script_fails_rather_than_passing_vacuously() -> None:
+    bare = SERVED_INDEX.replace(f"<script>{THEME_SCRIPT}</script>", "")
+    rows = _csp_results(header_caller=_header_caller(index_body=bare))
+    assert _failing(rows) == {("distribution", "served_csp_allows_every_inline_script")}
+
+
+def test_a_behaviour_without_the_shared_policy_fails_the_policy_rows() -> None:
+    config = _distribution_config(
+        agent_behavior={
+            **_custom_behavior("/agent/*", "agent-relay-origin", compress=False),
+            "ResponseHeadersPolicyId": MANAGED_SECURITY_HEADERS_POLICY_ID,
+        }
+    )
+    rows = _csp_results(config=config)
+    assert _failing(rows) == {
+        ("distribution", "one_response_headers_policy_on_every_behaviour"),
+        ("distribution", "response_headers_policy_enforces_csp"),
+    }
+    assert (
+        "/agent/*"
+        in rows[("distribution", "one_response_headers_policy_on_every_behaviour")].detail
+    )
+
+
+def test_a_behaviour_with_no_response_headers_policy_fails_the_policy_rows() -> None:
+    behaviour = _custom_behavior("/api/*", "api-gateway-origin")
+    del behaviour["ResponseHeadersPolicyId"]
+    rows = _csp_results(config=_distribution_config(api_behavior=behaviour))
+    assert ("distribution", "one_response_headers_policy_on_every_behaviour") in _failing(rows)
+
+
+@pytest.mark.parametrize(
+    ("client_kwargs", "fragment"),
+    [
+        ({"custom_policy_ids": ()}, "not a custom policy"),
+        ({"policy_csp": None}, "no Content-Security-Policy"),
+        ({"csp_override": False}, "Override"),
+        ({"frame_option": "SAMEORIGIN"}, "DENY"),
+    ],
+    ids=["managed-policy", "no-csp", "override-off", "frame-sameorigin"],
+)
+def test_a_policy_property_broken_fails_exactly_the_policy_row(
+    client_kwargs: dict[str, Any], fragment: str
+) -> None:
+    rows = _csp_results(**client_kwargs)
+    assert _failing(rows) == {("distribution", "response_headers_policy_enforces_csp")}
+    assert fragment in rows[("distribution", "response_headers_policy_enforces_csp")].detail
