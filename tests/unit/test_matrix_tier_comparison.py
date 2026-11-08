@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import hashlib
 import io
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -761,3 +763,162 @@ def test_a_pre_spec_archive_renders_the_retry_row_as_dashes() -> None:
     arms = [arm_from_report_fields(fields) for fields in payload["arms"]]
     markdown = render_markdown(build_matrix_result(arms))
     assert _md_table_rows(markdown, "Supervisor")["Self-corrected retries"] == ["—"] * len(arms)
+
+
+# ---------------------------------------------------------------------------------------------
+# Display table (tier_comparison_table)
+# ---------------------------------------------------------------------------------------------
+
+#: sha256 of each fixture's ``## Tier comparison summary`` block as rendered before the display
+#: table was extracted; the Markdown must stay byte-identical.
+_SUMMARY_BLOCK_SHA256 = {
+    "three_arm": "5af7d03b8ddbf603dabb48636889a8eea663aabb57820782f4ee4b27ebc0d3b1",
+    "single_anthropic": "bffeca592f98807ecc8fee4d8779b1a6d744d1feb864a8c5c7c9e3665e07b883",
+    "single_openai_stub": "e3e915c624ad656c7981066c5aab02364c828648ed12b8e4b44268f53148b08f",
+    "legacy": "a1c515b7ba2506b83344a363149992b798f9e06da7bd06ee4fe2ad4379398c61",
+}
+
+
+def _legacy_matrix() -> MatrixResult:
+    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
+    return build_matrix_result([arm_from_report_fields(fields) for fields in payload["arms"]])
+
+
+def _fixture_matrices() -> dict[str, MatrixResult]:
+    return {
+        "three_arm": _three_arm_matrix(),
+        "single_anthropic": build_matrix_result([_anthropic_arm()]),
+        "single_openai_stub": build_matrix_result([_openai_arm(SOL, mode="stub", effort="low")]),
+        "legacy": _legacy_matrix(),
+    }
+
+
+def _table_as_markdown(table: dict[str, object]) -> str:
+    """Format a display table the way ``matrix.md`` lays it out, independently of the module."""
+    headers = cast(list[str], table["headers"])
+
+    def _line(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [
+        "## Tier comparison summary",
+        "",
+        "Per-tier figures for each arm, one column per arm in run order; the notes below the "
+        "tables define each row.",
+        "",
+    ]
+    for section in cast(list[dict[str, object]], table["sections"]):
+        lines.extend([f"### {section['heading']}", "", _line(headers)])
+        lines.append(_line(["---"] * len(headers)))
+        lines.extend(_line(row) for row in cast(list[list[str]], section["rows"]))
+        lines.append("")
+    lines.extend(["Notes:", ""])
+    lines.extend(f"- {note}" for note in cast(list[str], table["notes"]))
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _table(matrix_result: MatrixResult) -> dict[str, object]:
+    return matrix.tier_comparison_table(tier_comparison(matrix_result))
+
+
+def _section_rows(table: dict[str, object], tier: str) -> dict[str, list[str]]:
+    for section in cast(list[dict[str, object]], table["sections"]):
+        if section["tier"] == tier:
+            return {row[0]: row[1:] for row in cast(list[list[str]], section["rows"])}
+    raise AssertionError(f"no section for {tier}")
+
+
+@pytest.mark.parametrize("name", sorted(_SUMMARY_BLOCK_SHA256))
+def test_the_summary_markdown_is_byte_identical_to_the_pre_extraction_render(name: str) -> None:
+    block = _summary_block(render_markdown(_fixture_matrices()[name]))
+    assert hashlib.sha256(block.encode("utf-8")).hexdigest() == _SUMMARY_BLOCK_SHA256[name]
+
+
+@pytest.mark.parametrize("name", sorted(_SUMMARY_BLOCK_SHA256))
+def test_the_json_round_tripped_table_formats_to_the_matrix_md_section(name: str) -> None:
+    matrix_result = _fixture_matrices()[name]
+    round_tripped = json.loads(render_json(matrix_result))["tier_comparison"]
+    table = matrix.tier_comparison_table(round_tripped)
+    assert table == _table(matrix_result)
+    assert _table_as_markdown(table) == _summary_block(render_markdown(matrix_result))
+
+
+def test_the_table_has_headers_three_sections_in_order_and_the_notes() -> None:
+    matrix_result = _three_arm_matrix()
+    table = _table(matrix_result)
+    assert list(table) == ["headers", "sections", "notes"]
+    assert table["headers"] == [
+        "Metric",
+        "anthropic",
+        f"openai ({ASTRA}, effort medium)",
+        f"openai ({SOL}, effort low)",
+    ]
+    sections = cast(list[dict[str, object]], table["sections"])
+    assert [(s["tier"], s["heading"]) for s in sections] == [
+        ("supervisor", "Supervisor"),
+        ("subagent", "Subagent"),
+        ("tool", "ToolCall"),
+    ]
+    assert [list(s) for s in sections] == [["tier", "heading", "rows"]] * 3
+    for section in sections:
+        rows = cast(list[list[str]], section["rows"])
+        assert [row[0] for row in rows[: len(_ROW_LABELS)]] == _ROW_LABELS
+        assert all(len(row) == 4 and all(isinstance(c, str) for c in row) for row in rows)
+    assert table["notes"] == tier_comparison(matrix_result)["notes"]
+
+
+def test_table_cells_render_null_withheld_and_not_applicable() -> None:
+    table = _table(_three_arm_matrix())
+    supervisor = _section_rows(table, "supervisor")
+    assert supervisor["Cost per completed task"] == ["0.200000", "withheld", "withheld"]
+    assert supervisor["Self-corrected retries"] == ["2", "—", "—"]
+    subagent = _section_rows(table, "subagent")
+    assert subagent["Task completion rate"][1:] == ["not applicable", "not applicable"]
+    assert subagent["Task accuracy"][1:] == ["not applicable", "not applicable"]
+    tool = _section_rows(table, "tool")
+    assert tool["Cost per completed task"][0] == "—"
+    assert tool["Self-corrected retries"] == ["not applicable"] * 3
+
+
+def test_a_pre_spec_archive_table_renders_absent_figures_as_dashes() -> None:
+    matrix_result = _legacy_matrix()
+    supervisor = _section_rows(_table(matrix_result), "supervisor")
+    columns = len(matrix_result.arms)
+    assert supervisor["Effort"] == ["—"] * columns
+    assert supervisor["Task completion rate"] == ["—"] * columns
+
+
+def test_a_single_arm_table_has_one_cell_per_row() -> None:
+    table = _table(build_matrix_result([_anthropic_arm()]))
+    assert table["headers"] == ["Metric", "anthropic"]
+    for section in cast(list[dict[str, object]], table["sections"]):
+        assert all(len(row) == 2 for row in cast(list[list[str]], section["rows"]))
+
+
+def test_an_unexercised_tier_still_renders_its_section() -> None:
+    subagent = _section_rows(_table(build_matrix_result([_openai_arm()])), "subagent")
+    assert subagent["Task completion rate"] == ["not applicable"]
+    assert subagent["Model"] == [SOL]
+    assert subagent["Delegation outcome: none"] == ["2"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda s: s.pop("columns"),
+        lambda s: s.update(columns="x"),
+        lambda s: s.update(columns=["x"]),
+        lambda s: s.update(tiers=[]),
+        lambda s: s["tiers"].pop("tool"),
+        lambda s: s["tiers"].update(subagent=s["tiers"]["subagent"][:1]),
+        lambda s: s["tiers"].update(supervisor=["x"] * len(s["columns"])),
+        lambda s: s.update(notes=[1]),
+        lambda s: s.pop("notes"),
+    ],
+)
+def test_a_malformed_summary_is_refused(mutate: Callable[[dict[str, Any]], object]) -> None:
+    summary: dict[str, Any] = json.loads(json.dumps(tier_comparison(_three_arm_matrix())))
+    mutate(summary)
+    with pytest.raises(ValueError, match="tier comparison summary"):
+        matrix.tier_comparison_table(summary)

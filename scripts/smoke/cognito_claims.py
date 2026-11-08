@@ -9,6 +9,10 @@ checks that the pre-token-generation trigger is wired as `LambdaVersion`
 user, decodes the real issued ID token, and asserts `custom:rep_id`, `custom:book`, and
 `custom:full_visibility` are present in it.
 
+The SPA client must have token revocation enabled (`describe_user_pool_client`). For the provisioned
+smoke user, the refresh token its sign-in issued is revoked with `RevokeToken`, and a following
+`InitiateAuth REFRESH_TOKEN_AUTH` with it must be refused with `NotAuthorizedException`.
+
 Every token read is signature-verified against the pool's JWKS by
 `scripts.smoke.verified_claims`; tests point `jwks_url` at a local JWKS document.
 
@@ -438,6 +442,7 @@ class ProvisionedSmokeUser:
         book: The account ids the seeded `reps` row grants, all of which exist in the seeded corpus.
         id_token: The real ID token the pool issued, after whichever challenge it asked for.
         detail: How the token was obtained, for the inventory's `issue_and_decode` detail.
+        refresh_token: The refresh token the same sign-in issued, or `""` when none was issued.
     """
 
     username: str
@@ -446,6 +451,7 @@ class ProvisionedSmokeUser:
     book: frozenset[str]
     id_token: str
     detail: str
+    refresh_token: str = ""
 
 
 class SmokeUserProvisioner(Protocol):
@@ -496,6 +502,7 @@ class LiveSmokeUserProvisioner:
         self._username: str | None = None
         self._email: str | None = None
         self._jwks_url = jwks_url
+        self._refresh_token = ""
 
     # -- wiring ----------------------------------------------------------------------------
 
@@ -599,6 +606,7 @@ class LiveSmokeUserProvisioner:
             book=book,
             id_token=id_token,
             detail=detail,
+            refresh_token=self._refresh_token,
         )
 
     def _seeded_book(self, store: Store, tenant: str) -> frozenset[str]:
@@ -710,12 +718,14 @@ class LiveSmokeUserProvisioner:
                 "MFA_SETUP and SOFTWARE_TOKEN_MFA only and never weakens the pool to avoid one"
             )
 
-        id_token = (response.get("AuthenticationResult") or {}).get("IdToken")
+        result = response.get("AuthenticationResult") or {}
+        id_token = result.get("IdToken")
         if not id_token:
             raise RuntimeError(
                 f"no IdToken issued for {username!r} "
                 f"(ChallengeName={response.get('ChallengeName')!r})"
             )
+        self._refresh_token = str(result.get("RefreshToken") or "")
         return str(id_token), secret or ""
 
     def _wait_for_next_totp_step(self) -> None:
@@ -1008,6 +1018,81 @@ def _authenticate_smoke_user(
     return str(id_token)
 
 
+#: The error code `InitiateAuth REFRESH_TOKEN_AUTH` must raise for a revoked refresh token.
+_REVOKED_REFRESH_CODE: Final[str] = "NotAuthorizedException"
+
+
+def _check_token_revocation_enabled(idp: Any, *, user_pool_id: str, client_id: str) -> CheckResult:
+    """The SPA app client has `EnableTokenRevocation` set to `true`."""
+    try:
+        described = idp.describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a single actionable failing check
+        return CheckResult(
+            resource="spa_client",
+            check="token_revocation_enabled",
+            status="fail",
+            detail=f"describe_user_pool_client failed: {error_code(exc) or type(exc).__name__}",
+        )
+    client = described.get("UserPoolClient") if isinstance(described, Mapping) else None
+    enabled = client.get("EnableTokenRevocation") if isinstance(client, Mapping) else None
+    return CheckResult(
+        resource="spa_client",
+        check="token_revocation_enabled",
+        status="pass" if enabled is True else "fail",
+        detail=f"EnableTokenRevocation={enabled!r}",
+    )
+
+
+def _check_revoked_refresh_token_refused(
+    idp: Any, *, client_id: str, refresh_token: str
+) -> CheckResult:
+    """Revoke `refresh_token`, then assert `REFRESH_TOKEN_AUTH` with it is refused.
+
+    Passes only on `NotAuthorizedException`; a failed revoke, an accepted refresh, or any other
+    error fails the row.
+    """
+    check = "revoked_refresh_token_refused"
+    if not refresh_token:
+        return CheckResult(
+            resource="spa_client",
+            check=check,
+            status="fail",
+            detail="the smoke user's sign-in issued no refresh token, so revocation is unproven",
+        )
+    try:
+        idp.revoke_token(Token=refresh_token, ClientId=client_id)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a single actionable failing check
+        return CheckResult(
+            resource="spa_client",
+            check=check,
+            status="fail",
+            detail=f"RevokeToken failed: {error_code(exc) or type(exc).__name__}",
+        )
+    try:
+        idp.initiate_auth(
+            AuthFlow="REFRESH_TOKEN_AUTH",
+            ClientId=client_id,
+            AuthParameters={"REFRESH_TOKEN": refresh_token},
+        )
+    except Exception as exc:  # noqa: BLE001 - classified by error code below
+        code = error_code(exc)
+        return CheckResult(
+            resource="spa_client",
+            check=check,
+            status="pass" if code == _REVOKED_REFRESH_CODE else "fail",
+            detail=(
+                f"REFRESH_TOKEN_AUTH after RevokeToken raised {code or type(exc).__name__}, "
+                f"expected {_REVOKED_REFRESH_CODE}"
+            ),
+        )
+    return CheckResult(
+        resource="spa_client",
+        check=check,
+        status="fail",
+        detail="REFRESH_TOKEN_AUTH with the revoked refresh token was ACCEPTED",
+    )
+
+
 def checks(
     ctx: SmokeContext,
     *,
@@ -1046,12 +1131,14 @@ def checks(
     user_pool_id = ctx.outputs.require_str("cognito_user_pool_id")
 
     pool = idp.describe_user_pool(UserPoolId=user_pool_id).get("UserPool") or {}
+    spa_client_id = ctx.outputs.require_str("cognito_spa_client_id")
 
     yield _check_mfa_configuration(pool)
     yield _check_password_policy(pool)
     yield _check_account_recovery(pool)
     yield _check_pre_token_generation_v2(pool)
     yield _check_admin_create_user_only(pool)
+    yield _check_token_revocation_enabled(idp, user_pool_id=user_pool_id, client_id=spa_client_id)
 
     if signup_client is None:
         yield CheckResult(
@@ -1079,7 +1166,9 @@ def checks(
                 detail="no smoke-tenant test user credentials supplied",
             )
             return
-        yield from _provisioned_token_checks(provisioner, decoder=decoder)
+        yield from _provisioned_token_checks(
+            provisioner, decoder=decoder, idp=idp, client_id=spa_client_id
+        )
         return
 
     client_id = ctx.outputs.require_str("cognito_spa_client_id")
@@ -1098,6 +1187,15 @@ def checks(
 
     yield CheckResult(
         resource="id_token", check="authenticate", status="pass", detail=f"issued for {username!r}"
+    )
+    yield CheckResult(
+        resource="spa_client",
+        check="revoked_refresh_token_refused",
+        status="skip",
+        detail=(
+            "a pre-provisioned user's refresh token is not revoked; the live entry point "
+            "provisions its own user, whose refresh token is revoked and probed"
+        ),
     )
 
     try:
@@ -1137,9 +1235,10 @@ def _claim_checks(
 
 
 def _provisioned_token_checks(
-    provisioner: SmokeUserProvisioner, *, decoder: Any
+    provisioner: SmokeUserProvisioner, *, decoder: Any, idp: Any, client_id: str
 ) -> Iterable[CheckResult]:
-    """Provision an MFA-enrolled user, assert the claims in its real token, then always clean up.
+    """Provision an MFA-enrolled user, assert the claims in its real token, prove its refresh token
+    is refused once revoked, then always clean up.
 
     `issue_and_decode` is reported as `pass`/`fail`, never `skip`. Cleanup runs from a `finally`
     block, and each removal is reported as its own check.
@@ -1179,6 +1278,9 @@ def _provisioned_token_checks(
         yield _check_tenant_claim_is_disposable(claims, expected=provisioned.tenant)
         yield from _claim_checks(
             claims, expected_rep_id=provisioned.rep_id, expected_book=provisioned.book
+        )
+        yield _check_revoked_refresh_token_refused(
+            idp, client_id=client_id, refresh_token=provisioned.refresh_token
         )
     finally:
         yield from provisioner.cleanup()

@@ -255,3 +255,26 @@ export interface EvalArtifactLinks {
 export function runRepeats(run: { readonly repeats?: number }): number {
   return run.repeats ?? 1;
 }
+
+/** The tier sections of {@link EvalTierComparisonTable}, in the order the backend renders them. */
+export const TIER_COMPARISON_TIERS = ["supervisor", "subagent", "tool"] as const;
+
+export type EvalComparisonTier = (typeof TIER_COMPARISON_TIERS)[number];
+
+/** One tier's table: `rows` are `[label, ...one cell per arm]`, every cell a display string. */
+export interface EvalTierComparisonSection {
+  readonly tier: EvalComparisonTier;
+  readonly heading: string;
+  readonly rows: readonly (readonly string[])[];
+}
+
+/**
+ * The run payload's `tier_comparison_table` (`eval.matrix.tier_comparison_table`): the
+ * `## Tier comparison summary` section of `matrix.md` as cell strings. `headers` is `Metric` then one
+ * label per arm in run order. Rendered verbatim; the page formats none of it.
+ */
+export interface EvalTierComparisonTable {
+  readonly headers: readonly string[];
+  readonly sections: readonly EvalTierComparisonSection[];
+  readonly notes: readonly string[];
+}

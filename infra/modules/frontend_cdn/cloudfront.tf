@@ -81,11 +81,60 @@ resource "aws_cloudfront_origin_request_policy" "agent_relay" {
   }
 }
 
-# AWS managed response-headers policy "SecurityHeadersPolicy" (67f7725c-6f97-4210-82d7-5512b31e9d03):
-# HSTS, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy` and `X-XSS-Protection` on every
-# behaviour. It adds headers only, so the `/agent/*` SSE stream is not buffered.
-data "aws_cloudfront_response_headers_policy" "security_headers" {
-  name = "Managed-SecurityHeadersPolicy"
+locals {
+  content_security_policy = join("; ", [
+    "default-src 'self'",
+    join(" ", concat(["script-src", "'self'"], [for hash in var.csp_script_hashes : "'${hash}'"])),
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    join(" ", concat(["connect-src", "'self'"], var.csp_connect_src_extra)),
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "form-action 'self'",
+  ])
+}
+
+# Attached to every behaviour: the managed SecurityHeadersPolicy's headers plus an enforced
+# `Content-Security-Policy`. It adds headers only, so the `/agent/*` SSE stream is not buffered.
+resource "aws_cloudfront_response_headers_policy" "security_headers" {
+  name    = "${var.name_prefix}frontend-security-headers"
+  comment = "Security headers and an enforced Content-Security-Policy for the CRM frontend"
+
+  security_headers_config {
+    content_security_policy {
+      content_security_policy = local.content_security_policy
+      override                = true
+    }
+
+    content_type_options {
+      override = true
+    }
+
+    frame_options {
+      frame_option = "DENY"
+      override     = true
+    }
+
+    referrer_policy {
+      referrer_policy = "strict-origin-when-cross-origin"
+      override        = true
+    }
+
+    strict_transport_security {
+      access_control_max_age_sec = 31536000
+      include_subdomains         = false
+      preload                    = false
+      override                   = true
+    }
+
+    xss_protection {
+      mode_block = true
+      protection = true
+      override   = true
+    }
+  }
 }
 
 # AWS managed cache policy "CachingOptimized" for the default (static asset) behaviour.
@@ -172,7 +221,7 @@ resource "aws_cloudfront_distribution" "frontend" {
     compress               = true
     cache_policy_id        = data.aws_cloudfront_cache_policy.caching_optimized.id
 
-    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
 
     # Serves `/index.html` for client-side routes. A distribution-wide `custom_error_response` would
     # also rewrite `/api/*`'s 403s into 200s.
@@ -193,7 +242,7 @@ resource "aws_cloudfront_distribution" "frontend" {
     cache_policy_id          = data.aws_cloudfront_cache_policy.caching_disabled.id
     origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
 
-    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
 
     # See `aws_cloudfront_function.api_path_rewrite`.
     function_association {
@@ -215,7 +264,7 @@ resource "aws_cloudfront_distribution" "frontend" {
     cache_policy_id          = data.aws_cloudfront_cache_policy.caching_disabled.id
     origin_request_policy_id = aws_cloudfront_origin_request_policy.agent_relay.id
 
-    response_headers_policy_id = data.aws_cloudfront_response_headers_policy.security_headers.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security_headers.id
   }
 
   restrictions {

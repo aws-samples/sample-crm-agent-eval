@@ -75,7 +75,7 @@ MAIN_TF = REPO_ROOT / "infra" / "main.tf"
 EXPECTED_KEYWORD_INSTANCES = {
     "additionalProperties": len(ALL_TOOLS),
     "enum": 9,
-    "maxLength": 14,
+    "maxLength": 68,
     "minLength": 45,
     "minimum": 5,
     "maximum": 3,

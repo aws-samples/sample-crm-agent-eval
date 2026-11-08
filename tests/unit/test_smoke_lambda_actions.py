@@ -12,7 +12,7 @@ from typing import Any, NoReturn
 import boto3
 import pytest
 from botocore.stub import ANY, Stubber
-from scripts.smoke.harness import context_for_test
+from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.lambda_actions import (
     _EMPTY_BOOK_DENIAL_TOOLS,
     _EXPLICIT_FILTER_TOOL,
@@ -23,6 +23,17 @@ from scripts.smoke.lambda_actions import (
     _PRIMARY_CONTACT_TOOL,
     _T3_PENDING_TOOLS,
     CONTACT_DEPARTED_MISSING_SCOPE,
+    CURSOR_ENV_CHECK,
+    CURSOR_KEY_ARN_CHECK,
+    CURSOR_KEY_RESOURCE,
+    CURSOR_KEY_ROTATION_CHECK,
+    CURSOR_KEY_SHAPE_CHECK,
+    CURSOR_KEY_TAG_CHECK,
+    CURSOR_OTHER_OPERATION_CHECK,
+    CURSOR_OTHER_REP_CHECK,
+    CURSOR_PAGE_TWO_CHECK,
+    CURSOR_TAMPERED_CHECK,
+    CURSOR_TOOLS,
     DEPARTED_CONTACT_CHECKS,
     DEPARTED_REACTIVATED_CHECK,
     DEPARTED_REFUSED_CHECK,
@@ -30,7 +41,17 @@ from scripts.smoke.lambda_actions import (
     EMPTY_BOOK_MISSING_SCOPE,
     EXPLICIT_FILTER_CHECK,
     FUNCTION_NAME_PREFIX,
+    KMS_ADMIN_DENIED_CHECK,
+    KMS_NO_CONTEXT_CHECK,
+    KMS_OTHER_ACTIONS_CHECK,
+    KMS_OTHER_PURPOSE_CHECK,
+    KMS_OUTSIDE_IDENTITY_CHECK,
+    KMS_OUTSIDE_KEY_POLICY_CHECK,
+    KMS_USE_ALLOWED_CHECK,
+    LONG_TEXT_CAP_CHECK,
     MALFORMED_PAGE_CONTEXT_CHECK,
+    NO_SECOND_PAGE_DEFER_REASON,
+    NON_CURSOR_PROBE_TOOL,
     SMOKE_PHONE,
     _check_explicit_filter_denied,
     _check_foreign_primary_contact_refused,
@@ -39,10 +60,13 @@ from scripts.smoke.lambda_actions import (
     _check_primary_contact_accepted,
     _departed_contact_checks,
     checks,
+    cursor_event,
     empty_book_listing_event,
     explicit_filter_event,
     function_name_for,
+    guarded_extra_checks,
     in_scope_event,
+    long_text_event,
     out_of_scope_event,
     page_context_tools,
     primary_contact_event,
@@ -52,10 +76,12 @@ from scripts.smoke.lambda_actions import (
     seeded_in_scope_account_id,
     seeded_other_account_contact_id,
     seeded_out_of_scope_account_id,
+    tampered_cursor,
 )
 from scripts.smoke.tenant import SmokeTenant, TenantTeardownError
 
-from crm.toolspec.definitions import ALL_TOOLS, ToolDefinition
+from crm.cursor import CURSOR_KMS_KEY_ENV, CURSOR_PURPOSE
+from crm.toolspec.definitions import ALL_TOOLS, LONG_TEXT_MAX_LENGTH, ToolDefinition
 
 _TEST_TENANT = "eval-smoke-testfixedrunid"
 #: Placeholder credential for a client whose calls never leave the process; not a secret.
@@ -64,6 +90,20 @@ _TEST_SMOKE_TENANT = SmokeTenant(run_id="smoke-testfixedrunid", tenant=_TEST_TEN
 #: Minimal `dynamodb_table_names` output `checks()` needs to build a `Store` when `ctx.tenant`
 #: is None.
 _TEST_OUTPUTS = {"dynamodb_table_names": {"eval_runs": "crm-agent-eval-testeval_runs"}}
+
+
+@pytest.fixture(autouse=True)
+def _no_extra_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the per-tool orchestration tests to the per-tool rows.
+
+    The cursor, cursor-key and long-text rows are tested through `guarded_extra_checks` directly,
+    and `test_the_tool_checks_end_with_the_extra_rows` asserts they are wired in.
+    """
+
+    def none(ctx: Any, *, tenant: str) -> Any:
+        return iter(())
+
+    monkeypatch.setattr("scripts.smoke.lambda_actions.guarded_extra_checks", none)
 
 
 def _fake_lifecycle(
@@ -1386,3 +1426,558 @@ def test_a_function_error_on_the_refused_update_fails_never_reads_as_a_pass() ->
     results = {r.check: r for r in _departed_contact_checks(ctx, tenant=_TEST_TENANT)}
     assert results[DEPARTED_REFUSED_CHECK].status == "fail"
     assert "FunctionError" in results[DEPARTED_REFUSED_CHECK].detail
+
+
+# ---------------------------------------------------------------------------
+# Pagination cursors, the cursor key and the long-text cap
+# ---------------------------------------------------------------------------
+
+_KEY_ARN = "arn:aws:kms:us-east-1:123456789012:key/11111111-2222-3333-4444-5555aaaa5555"
+_OTHER_KEY_ARN = "arn:aws:kms:us-east-1:123456789012:key/99999999-2222-3333-4444-5555bbbb5555"
+_UNRELATED_RESOURCE = "arn:aws:kms:us-east-1:123456789012:alias/unrelated"
+#: A key policy as KMS stores it, every statement on `Resource "*"`, plus a non-key list element.
+_KEY_POLICY = json.dumps(
+    {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "EnableIAMUserPermissions",
+                "Effect": "Allow",
+                "Action": "kms:*",
+                "Resource": "*",
+            },
+            {
+                "Sid": "Mixed",
+                "Effect": "Deny",
+                "Action": "kms:*",
+                "Resource": ["*", _UNRELATED_RESOURCE],
+            },
+        ],
+    }
+)
+
+
+def _role_arn(tool_name: str) -> str:
+    return f"arn:aws:iam::123456789012:role/crm-agent-eval-{tool_name}-role"
+
+
+def _issued_cursor(tool_name: str) -> str:
+    return f"QUJDRA{tool_name.replace('_', '')}cursorQUJDRA"
+
+
+def _tool_of(function_name: str) -> str:
+    return function_name.removeprefix(FUNCTION_NAME_PREFIX)
+
+
+def _cursor_refusal_body() -> dict[str, Any]:
+    return {
+        "statusCode": 400,
+        "error": {
+            "code": "validation_failed",
+            "message": "The cursor is not valid.",
+            "next_step": "fix_arguments",
+            "source": "cursor",
+        },
+    }
+
+
+class _CursorLambda:
+    """A `lambda` double modelling the deployed cursor tools and every function's configuration.
+
+    A cursor is accepted only by the tool that issued it, unaltered, for the issuing rep. Each
+    `accept_*` set names tools that wrongly accept that kind of bad cursor.
+    """
+
+    def __init__(
+        self,
+        *,
+        issuing: Sequence[str] = CURSOR_TOOLS,
+        page_two_error: Sequence[str] = (),
+        accept_tampered: Sequence[str] = (),
+        accept_other_rep: Sequence[str] = (),
+        accept_other_operation: Sequence[str] = (),
+        refusal_body: dict[str, Any] | None = None,
+        env_overrides: dict[str, str | None] | None = None,
+        long_text_body: dict[str, Any] | None = None,
+    ) -> None:
+        self.issuing = set(issuing)
+        self.page_two_error = set(page_two_error)
+        self.accept_tampered = set(accept_tampered)
+        self.accept_other_rep = set(accept_other_rep)
+        self.accept_other_operation = set(accept_other_operation)
+        self.refusal_body = refusal_body or _cursor_refusal_body()
+        self.env_overrides = env_overrides or {}
+        self.long_text_body = long_text_body or _validation_failed_body()
+        self.events: list[tuple[str, dict[str, Any]]] = []
+
+    def invoke(self, **kwargs: Any) -> dict[str, Any]:
+        tool = _tool_of(str(kwargs["FunctionName"]))
+        event = json.loads(kwargs["Payload"])
+        self.events.append((tool, event))
+        return _payload_response(self._answer(tool, event))
+
+    def _answer(self, tool: str, event: dict[str, Any]) -> dict[str, Any]:
+        if tool == "create_note":
+            return self.long_text_body
+        cursor = event.get("cursor")
+        if cursor is None:
+            body: dict[str, Any] = {"items": [{"id": "x"}]}
+            if tool in self.issuing:
+                body["next_cursor"] = _issued_cursor(tool)
+            return {"statusCode": 200, "body": body}
+        owner = next((name for name in CURSOR_TOOLS if _issued_cursor(name) == cursor), None)
+        rep = event["_identity"]["rep_id"]
+        if owner is None:
+            accepted = tool in self.accept_tampered
+        elif owner != tool:
+            accepted = tool in self.accept_other_operation
+        elif rep != "rep-ashford":
+            accepted = tool in self.accept_other_rep
+        elif tool in self.page_two_error:
+            return _internal_error_body()
+        else:
+            accepted = True
+        return {"statusCode": 200, "body": {"items": []}} if accepted else self.refusal_body
+
+    def get_function_configuration(self, *, FunctionName: str) -> dict[str, Any]:  # noqa: N803
+        tool = _tool_of(FunctionName)
+        default = _KEY_ARN if tool in CURSOR_TOOLS else None
+        value = self.env_overrides.get(tool, default)
+        variables = {"LOG_LEVEL": "INFO"}
+        if value is not None:
+            variables[CURSOR_KMS_KEY_ENV] = value
+        return {"Role": _role_arn(tool), "Environment": {"Variables": variables}}
+
+
+class _Kms:
+    def __init__(
+        self,
+        *,
+        rotation: bool = True,
+        metadata: dict[str, Any] | None = None,
+        tags: list[dict[str, str]] | None = None,
+        policy_error: bool = False,
+    ) -> None:
+        self.rotation = rotation
+        self.metadata = metadata or {
+            "KeySpec": "SYMMETRIC_DEFAULT",
+            "KeyUsage": "ENCRYPT_DECRYPT",
+            "MultiRegion": False,
+        }
+        self.tags = (
+            tags
+            if tags is not None
+            else [{"TagKey": "data-classification", "TagValue": "internal"}]
+        )
+        self.policy_error = policy_error
+
+    def get_key_rotation_status(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        assert KeyId == _KEY_ARN
+        return {"KeyRotationEnabled": self.rotation}
+
+    def describe_key(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        return {"KeyMetadata": self.metadata}
+
+    def list_resource_tags(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        return {"Tags": self.tags}
+
+    def get_key_policy(self, *, KeyId: str, PolicyName: str) -> dict[str, Any]:  # noqa: N803
+        if self.policy_error:
+            raise RuntimeError("AccessDeniedException")
+        assert PolicyName == "default"
+        return {"Policy": _KEY_POLICY}
+
+
+class _Iam:
+    """Simulates the intended policy: the five roles may Encrypt/Decrypt under the cursor purpose,
+    the key policy explicitly denies administration and every outside principal.
+
+    `overrides[(role tool, action, purpose-or-None, with_policy)]` replaces one decision;
+    `missing_context` names roles whose allowed results report missing context values.
+    """
+
+    def __init__(
+        self,
+        *,
+        overrides: dict[tuple[str, str, str | None, bool], str] | None = None,
+        missing_context: Sequence[str] = (),
+    ) -> None:
+        self.overrides = overrides or {}
+        self.missing_context = set(missing_context)
+        self.requests: list[dict[str, Any]] = []
+
+    def simulate_principal_policy(self, **request: Any) -> dict[str, Any]:
+        self.requests.append(request)
+        role_tool = (
+            str(request["PolicySourceArn"]).split("crm-agent-eval-", 1)[1].removesuffix("-role")
+        )
+        purpose = next(
+            (
+                entry["ContextKeyValues"][0]
+                for entry in request["ContextEntries"]
+                if entry["ContextKeyName"] == "kms:EncryptionContext:purpose"
+            ),
+            None,
+        )
+        with_policy = "ResourcePolicy" in request
+        results = []
+        for action in request["ActionNames"]:
+            decision = self._decide(role_tool, action, purpose, with_policy)
+            decision = self.overrides.get((role_tool, action, purpose, with_policy), decision)
+            result: dict[str, Any] = {"EvalActionName": action, "EvalDecision": decision}
+            if decision == "allowed" and role_tool in self.missing_context:
+                result["MissingContextValues"] = ["kms:EncryptionContext:tenant"]
+            results.append(result)
+        return {"EvaluationResults": results, "IsTruncated": False}
+
+    @staticmethod
+    def _decide(role_tool: str, action: str, purpose: str | None, with_policy: bool) -> str:
+        if with_policy and (
+            action in {"kms:PutKeyPolicy", "kms:ScheduleKeyDeletion", "kms:DisableKeyRotation"}
+            or role_tool not in CURSOR_TOOLS
+        ):
+            return "explicitDeny"
+        if (
+            role_tool in CURSOR_TOOLS
+            and action in {"kms:Encrypt", "kms:Decrypt"}
+            and purpose == CURSOR_PURPOSE
+        ):
+            return "allowed"
+        return "implicitDeny"
+
+
+def _extra_ctx(
+    lam: _CursorLambda | None = None,
+    kms: _Kms | None = None,
+    iam: _Iam | None = None,
+    outputs: dict[str, Any] | None = None,
+) -> Any:
+    return context_for_test(
+        clients={"lambda": lam or _CursorLambda(), "kms": kms or _Kms(), "iam": iam or _Iam()},
+        outputs=outputs,
+        tenant=_TEST_TENANT,
+    )
+
+
+def _rows(ctx: Any) -> list[Any]:
+    return list(guarded_extra_checks(ctx, tenant=_TEST_TENANT))
+
+
+def _failing(rows: Sequence[Any]) -> set[tuple[str, str]]:
+    return {(r.resource, r.check) for r in rows if r.status == "fail"}
+
+
+def test_every_extra_row_passes_against_the_intended_deployment() -> None:
+    rows = _rows(_extra_ctx())
+    assert _failing(rows) == set()
+    assert {r.status for r in rows} == {"pass"}
+    checks_by_resource: dict[str, set[str]] = {}
+    for row in rows:
+        checks_by_resource.setdefault(row.resource, set()).add(row.check)
+    for name in CURSOR_TOOLS:
+        assert {
+            CURSOR_PAGE_TWO_CHECK,
+            CURSOR_TAMPERED_CHECK,
+            CURSOR_OTHER_REP_CHECK,
+            CURSOR_OTHER_OPERATION_CHECK,
+            CURSOR_ENV_CHECK,
+            KMS_USE_ALLOWED_CHECK,
+            KMS_OTHER_PURPOSE_CHECK,
+            KMS_NO_CONTEXT_CHECK,
+            KMS_OTHER_ACTIONS_CHECK,
+            KMS_ADMIN_DENIED_CHECK,
+        } <= checks_by_resource[name]
+    assert {
+        CURSOR_KEY_ARN_CHECK,
+        CURSOR_KEY_ROTATION_CHECK,
+        CURSOR_KEY_SHAPE_CHECK,
+        CURSOR_KEY_TAG_CHECK,
+    } == checks_by_resource[CURSOR_KEY_RESOURCE]
+    assert {
+        CURSOR_ENV_CHECK,
+        KMS_OUTSIDE_IDENTITY_CHECK,
+        KMS_OUTSIDE_KEY_POLICY_CHECK,
+    } == checks_by_resource[NON_CURSOR_PROBE_TOOL]
+    assert LONG_TEXT_CAP_CHECK in checks_by_resource["create_note"]
+    every_tool = {tool.name for tool in ALL_TOOLS}
+    assert {r.resource for r in rows if r.check == CURSOR_ENV_CHECK} == every_tool, (
+        "the env row must cover every action Lambda"
+    )
+
+
+@pytest.mark.parametrize(
+    ("lam", "expected"),
+    [
+        (
+            _CursorLambda(page_two_error=["search_accounts"]),
+            {("search_accounts", "cursor_page_two")},
+        ),
+        (
+            _CursorLambda(accept_tampered=["list_activities"]),
+            {("list_activities", "cursor_tampered_refused")},
+        ),
+        (
+            _CursorLambda(accept_other_rep=["search_opportunities"]),
+            {("search_opportunities", "cursor_other_rep_refused")},
+        ),
+        (
+            _CursorLambda(accept_other_operation=["list_proposals"]),
+            {("list_proposals", "cursor_other_operation_refused")},
+        ),
+        (
+            _CursorLambda(env_overrides={"list_audit_records": None}),
+            {("list_audit_records", "cursor_key_env")},
+        ),
+        (
+            _CursorLambda(env_overrides={"get_account": _KEY_ARN}),
+            {("get_account", "cursor_key_env")},
+        ),
+        (
+            _CursorLambda(long_text_body=_success_body()),
+            {("create_note", "long_text_cap_enforced")},
+        ),
+    ],
+    ids=[
+        "page-two-error",
+        "tampered-accepted",
+        "other-rep-accepted",
+        "other-operation-accepted",
+        "env-missing-on-cursor-tool",
+        "env-set-on-other-tool",
+        "over-cap-accepted",
+    ],
+)
+def test_a_broken_function_property_fails_exactly_its_row(
+    lam: _CursorLambda, expected: set[tuple[str, str]]
+) -> None:
+    assert _failing(_rows(_extra_ctx(lam=lam))) == expected
+
+
+def test_a_5xx_refusal_is_not_a_clean_cursor_refusal() -> None:
+    lam = _CursorLambda(refusal_body=_internal_error_body())
+    failing = _failing(_rows(_extra_ctx(lam=lam)))
+    refusal_checks = {
+        CURSOR_TAMPERED_CHECK,
+        CURSOR_OTHER_REP_CHECK,
+        CURSOR_OTHER_OPERATION_CHECK,
+    }
+    assert failing == {(name, check) for name in CURSOR_TOOLS for check in refusal_checks}
+
+
+def test_a_refusal_without_source_cursor_fails() -> None:
+    body = _cursor_refusal_body()
+    del body["error"]["source"]
+    failing = _failing(_rows(_extra_ctx(lam=_CursorLambda(refusal_body=body))))
+    assert ("search_opportunities", CURSOR_TAMPERED_CHECK) in failing
+
+
+@pytest.mark.parametrize(
+    ("kms", "expected"),
+    [
+        (_Kms(rotation=False), {(CURSOR_KEY_RESOURCE, "cursor_key_rotation_enabled")}),
+        (
+            _Kms(
+                metadata={
+                    "KeySpec": "SYMMETRIC_DEFAULT",
+                    "KeyUsage": "ENCRYPT_DECRYPT",
+                    "MultiRegion": True,
+                }
+            ),
+            {(CURSOR_KEY_RESOURCE, "cursor_key_shape")},
+        ),
+        (_Kms(tags=[]), {(CURSOR_KEY_RESOURCE, "cursor_key_classified")}),
+        (
+            _Kms(policy_error=True),
+            {(name, KMS_ADMIN_DENIED_CHECK) for name in CURSOR_TOOLS}
+            | {(NON_CURSOR_PROBE_TOOL, KMS_OUTSIDE_KEY_POLICY_CHECK)},
+        ),
+    ],
+    ids=["rotation-off", "multi-region", "untagged", "key-policy-unreadable"],
+)
+def test_a_broken_key_property_fails_exactly_its_row(
+    kms: _Kms, expected: set[tuple[str, str]]
+) -> None:
+    assert _failing(_rows(_extra_ctx(kms=kms))) == expected
+
+
+@pytest.mark.parametrize(
+    ("iam", "expected"),
+    [
+        (
+            _Iam(
+                overrides={
+                    ("search_accounts", "kms:Decrypt", CURSOR_PURPOSE, False): "implicitDeny"
+                }
+            ),
+            {("search_accounts", KMS_USE_ALLOWED_CHECK)},
+        ),
+        (_Iam(missing_context=["list_activities"]), {("list_activities", KMS_USE_ALLOWED_CHECK)}),
+        (
+            _Iam(overrides={("list_proposals", "kms:Encrypt", "other", False): "allowed"}),
+            {("list_proposals", KMS_OTHER_PURPOSE_CHECK)},
+        ),
+        (
+            _Iam(overrides={("list_audit_records", "kms:Encrypt", None, False): "allowed"}),
+            {("list_audit_records", KMS_NO_CONTEXT_CHECK)},
+        ),
+        (
+            _Iam(
+                overrides={
+                    (
+                        "search_opportunities",
+                        "kms:GenerateDataKey",
+                        CURSOR_PURPOSE,
+                        False,
+                    ): "allowed"
+                }
+            ),
+            {("search_opportunities", KMS_OTHER_ACTIONS_CHECK)},
+        ),
+        (
+            _Iam(
+                overrides={("search_accounts", "kms:PutKeyPolicy", CURSOR_PURPOSE, True): "allowed"}
+            ),
+            {("search_accounts", KMS_ADMIN_DENIED_CHECK)},
+        ),
+        (
+            _Iam(overrides={("get_account", "kms:Encrypt", CURSOR_PURPOSE, False): "allowed"}),
+            {("get_account", KMS_OUTSIDE_IDENTITY_CHECK)},
+        ),
+        (
+            _Iam(overrides={("get_account", "kms:Decrypt", CURSOR_PURPOSE, True): "implicitDeny"}),
+            {("get_account", KMS_OUTSIDE_KEY_POLICY_CHECK)},
+        ),
+    ],
+    ids=[
+        "use-not-allowed",
+        "missing-context",
+        "other-purpose-allowed",
+        "no-context-allowed",
+        "generate-data-key-allowed",
+        "admin-not-explicitly-denied",
+        "outside-role-allowed",
+        "outside-role-only-implicitly-denied",
+    ],
+)
+def test_a_broken_simulation_fails_exactly_its_row(
+    iam: _Iam, expected: set[tuple[str, str]]
+) -> None:
+    assert _failing(_rows(_extra_ctx(iam=iam))) == expected
+
+
+def test_the_simulations_use_the_deployed_roles_and_the_live_key_policy() -> None:
+    iam = _Iam()
+    _rows(_extra_ctx(iam=iam))
+    sources = {request["PolicySourceArn"] for request in iam.requests}
+    assert sources == {_role_arn(name) for name in (*CURSOR_TOOLS, NON_CURSOR_PROBE_TOOL)}
+    assert all(request["ResourceArns"] == [_KEY_ARN] for request in iam.requests)
+    with_policy = [request for request in iam.requests if "ResourcePolicy" in request]
+    assert with_policy
+    for request in with_policy:
+        sent = [s["Resource"] for s in json.loads(request["ResourcePolicy"])["Statement"]]
+        assert sent == [_KEY_ARN, [_KEY_ARN, _UNRELATED_RESOURCE]], sent
+    for request in with_policy:
+        principal = next(
+            e["ContextKeyValues"]
+            for e in request["ContextEntries"]
+            if e["ContextKeyName"] == "aws:PrincipalArn"
+        )
+        assert principal == [request["PolicySourceArn"]]
+
+
+def test_two_cursor_keys_fail_only_the_consistency_row_and_skip_the_dependents() -> None:
+    lam = _CursorLambda(env_overrides={"search_accounts": _OTHER_KEY_ARN})
+    rows = _rows(_extra_ctx(lam=lam))
+    assert _failing(rows) == {(CURSOR_KEY_RESOURCE, CURSOR_KEY_ARN_CHECK)}
+    skipped = {(r.resource, r.check) for r in rows if r.status == "skip"}
+    assert (CURSOR_KEY_RESOURCE, CURSOR_KEY_ROTATION_CHECK) in skipped
+    assert (NON_CURSOR_PROBE_TOOL, KMS_OUTSIDE_KEY_POLICY_CHECK) in skipped
+
+
+def test_a_tool_with_no_second_page_defers_its_own_rows_and_still_checks_foreign_cursors() -> None:
+    lam = _CursorLambda(issuing=["search_opportunities", "search_accounts", "list_activities"])
+    rows = _rows(_extra_ctx(lam=lam))
+    assert _failing(rows) == set()
+    deferred = {(r.resource, r.check) for r in rows if r.status == "defer"}
+    assert deferred == {
+        (name, check)
+        for name in ("list_audit_records", "list_proposals")
+        for check in (CURSOR_PAGE_TWO_CHECK, CURSOR_TAMPERED_CHECK, CURSOR_OTHER_REP_CHECK)
+    }
+    assert all(r.defer_reason == NO_SECOND_PAGE_DEFER_REASON for r in rows if r.status == "defer")
+    other_operation = {
+        r.resource: r.status for r in rows if r.check == CURSOR_OTHER_OPERATION_CHECK
+    }
+    assert other_operation == dict.fromkeys(CURSOR_TOOLS, "pass")
+
+
+def test_no_cursor_issued_anywhere_fails_every_other_operation_row() -> None:
+    rows = _rows(_extra_ctx(lam=_CursorLambda(issuing=[])))
+    assert _failing(rows) == {(name, CURSOR_OTHER_OPERATION_CHECK) for name in CURSOR_TOOLS}
+
+
+def test_the_replays_send_the_real_cursor_altered_only_as_each_row_says() -> None:
+    lam = _CursorLambda()
+    _rows(_extra_ctx(lam=lam))
+    resumed = [(tool, event) for tool, event in lam.events if "cursor" in event]
+    own = _issued_cursor("search_opportunities")
+    sent = [event for tool, event in resumed if tool == "search_opportunities"]
+    cursors = [event["cursor"] for event in sent]
+    reps = [event["_identity"]["rep_id"] for event in sent]
+    assert cursors[0] == own and reps[0] == "rep-ashford"
+    assert cursors[1] == tampered_cursor(own) and cursors[1] != own and len(cursors[1]) == len(own)
+    assert cursors[2] == own and reps[2] != "rep-ashford"
+    assert cursors[3] != own and cursors[3] in {_issued_cursor(n) for n in CURSOR_TOOLS}
+    page_one = [
+        event for tool, event in lam.events if "cursor" not in event and tool != "create_note"
+    ]
+    assert all(event["limit"] == 1 for event in page_one if "limit" in event)
+
+
+def test_the_page_one_calls_force_a_second_page_where_the_tool_takes_a_limit() -> None:
+    for name in CURSOR_TOOLS:
+        event = cursor_event(name, tenant=_TEST_TENANT)
+        tool = next(t for t in ALL_TOOLS if t.name == name)
+        assert ("limit" in event) == ("limit" in tool.input_schema["properties"])
+        assert "cursor" not in event
+        assert event["_identity"]["tenant"] == _TEST_TENANT
+    assert cursor_event("list_activities", tenant=_TEST_TENANT)["opportunity_id"]
+
+
+def test_tampering_changes_one_character_within_the_url_safe_alphabet() -> None:
+    for cursor in ("AAAA", "ABCD", "x-_y"):
+        tampered = tampered_cursor(cursor)
+        assert len(tampered) == len(cursor)
+        assert sum(a != b for a, b in zip(cursor, tampered, strict=True)) == 1
+    with pytest.raises(ValueError):
+        tampered_cursor("")
+
+
+def test_the_long_text_body_is_exactly_one_over_the_cap() -> None:
+    event = long_text_event(tenant=_TEST_TENANT)
+    assert len(event["body"]) == LONG_TEXT_MAX_LENGTH + 1
+    assert event["_identity"]["tenant"] == _TEST_TENANT
+
+
+def test_the_long_text_cap_row_fails_on_a_5xx() -> None:
+    lam = _CursorLambda(long_text_body=_internal_error_body())
+    assert _failing(_rows(_extra_ctx(lam=lam))) == {("create_note", LONG_TEXT_CAP_CHECK)}
+
+
+def test_the_tool_checks_end_with_the_extra_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_run_all_tool_checks` yields `guarded_extra_checks` last, under the same tenant."""
+    seen: list[str] = []
+
+    def recorder(ctx: Any, *, tenant: str) -> Any:
+        seen.append(tenant)
+        yield CheckResult(resource="sentinel", check="extra", status="pass")
+
+    monkeypatch.setattr("scripts.smoke.lambda_actions.guarded_extra_checks", recorder)
+    client = _lambda_client()
+    stubber = Stubber(client)
+    _stub_all_pass(stubber, ALL_TOOLS)
+    stubber.activate()
+    results = list(checks(context_for_test(clients={"lambda": client}, tenant=_TEST_TENANT)))
+    stubber.deactivate()
+    assert seen == [_TEST_TENANT]
+    assert (results[-1].resource, results[-1].check) == ("sentinel", "extra")

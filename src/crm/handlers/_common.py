@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -34,6 +35,11 @@ from crm.handlers.wire import put_operation
 from crm.store.keys import derive
 from crm.toolspec.definitions import ALL_TOOLS, ToolDefinition
 from crm.toolspec.validation import validate_arguments
+
+logger = logging.getLogger(__name__)
+
+#: Upper bound on the characters of an error's ``detail`` carried into its log line.
+ERROR_LOG_DETAIL_MAX_CHARS: Final[int] = 300
 
 #: Value of the format-2.0 proxy envelope's ``version`` field.
 PROXY_PAYLOAD_VERSION_V2: Final[str] = "2.0"
@@ -323,16 +329,34 @@ def run_handler(event: dict[str, Any], action: Any, *, tool: ToolDefinition) -> 
 
     Returns:
         ``ok(result)`` if ``action`` returns normally, or the error's own API response if validation
-        or ``action`` raises a :class:`CrmError`, each in the shape the event's channel requires.
+        or ``action`` raises a :class:`CrmError`, each in the shape the event's channel requires. A
+        :class:`CrmError` is first logged by :func:`log_crm_error`.
     """
     proxy = is_proxy_event(event)
+    identity: Identity | None = None
     try:
         identity, arguments = decode(event)
         validate_arguments(tool, arguments)
         result = action(identity, arguments)
     except CrmError as exc:
+        log_crm_error(exc, identity)
         return error_response(exc, proxy=proxy)
     return ok(result, proxy=proxy)
+
+
+def log_crm_error(exc: CrmError, identity: Identity | None) -> None:
+    """Emit one ``crm_error`` WARNING line: the error code and its bounded ``detail``.
+
+    ``rep_id`` is included when the caller's identity was decoded. Nothing from the event, its
+    headers or its arguments is logged.
+    """
+    reason = f"{exc.code}: {(exc.detail or '')[:ERROR_LOG_DETAIL_MAX_CHARS]}"
+    if identity is None:
+        logger.warning(json.dumps({"event": "crm_error", "reason": reason}))
+    else:
+        logger.warning(
+            json.dumps({"event": "crm_error", "reason": reason, "rep_id": identity.rep_id})
+        )
 
 
 def default_store() -> Any:

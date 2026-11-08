@@ -32,6 +32,7 @@ from crm.handlers import pipeline_aggregate, search_accounts, search_opportuniti
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval.tenancy import allocate_run_id, seed_tenant, tenant_for_run
+from tests.conftest import TEST_API_CLIENT_ID
 from tests.integration.conftest import _ENDPOINT_URL, _LOCAL_ENGINE_CRED, _drop_prefixed_tables
 
 _REP = "rep-listing-scope"
@@ -99,7 +100,12 @@ def _event(
             "version": "2.0",
             "routeKey": "POST /tools/listing",
             "rawPath": "/tools/listing",
-            "requestContext": {"requestId": "req-1", "authorizer": {"jwt": {"claims": claims}}},
+            "requestContext": {
+                "requestId": "req-1",
+                "authorizer": {
+                    "jwt": {"claims": {**claims, "token_use": "id", "aud": TEST_API_CLIENT_ID}}
+                },
+            },
             "body": json.dumps(args),
             "isBase64Encoded": False,
         }

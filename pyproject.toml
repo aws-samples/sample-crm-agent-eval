@@ -14,31 +14,31 @@ requires-python = "==3.13.*"
 # Direct dependencies only, exact-version pinned. The full transitive tree is frozen in
 # requirements.txt, which is the sole install authority.
 dependencies = [
-  "boto3==1.43.121",
-  "botocore==1.43.121",
+  "boto3==1.43.125",
+  "botocore==1.43.125",
   "PyYAML==6.0.3",
   "jsonschema==4.26.0",
   "PyJWT==2.15.1",
   "cryptography==50.0.2",
-  "strands-agents==1.62.0",
+  "strands-agents==1.64.0",
   "starlette==1.10.0",
-  "anthropic==2.3.0",
-  "openai==3.41.0",
+  "anthropic==2.6.0",
+  "openai==3.46.0",
   "httpx2==2.16.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "ruff==0.17.3",
+  "ruff==0.17.4",
   "mypy==2.4.1",
   "pytest==9.1.1",
   "pytest-cov==7.1.0",
   "pytest-xdist==3.8.0",
   "moto==5.2.5",
-  "types-PyYAML==6.0.12.20260906",
+  "types-PyYAML==6.0.12.20261103",
   "defusedxml==0.7.1",
   "types-defusedxml==0.7.0.20260504",
-  "mcp==2.1.1",
+  "mcp==2.3.0",
 ]
 
 [tool.setuptools.packages.find]

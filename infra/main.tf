@@ -145,7 +145,7 @@ locals {
       { table = "activities", actions = ["dynamodb:Query"] },
     ]
     pipeline_aggregate = [
-      { table = "opportunities", actions = ["dynamodb:Query", "dynamodb:GetItem"] },
+      { table = "opportunities", actions = ["dynamodb:Query", "dynamodb:BatchGetItem"] },
     ]
     # BatchGetItem re-reads the base items, because `gsi_status`/`gsi_tenant` do not project
     # `before_snapshot`, which the scope check reads.
@@ -222,6 +222,9 @@ locals {
       { table = "opportunities", actions = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"] },
       { table = "activities", actions = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"] },
       { table = "audit_records", actions = ["dynamodb:PutItem"] },
+      # The cascade re-check before approving an account delete; scoped to the indexes in
+      # `local.tool_query_indexes`, never the base table.
+      { table = "opportunities", actions = ["dynamodb:Query"] },
     ]
     reject_proposal = [
       { table = "proposals", actions = ["dynamodb:GetItem", "dynamodb:UpdateItem"] },
@@ -269,6 +272,9 @@ locals {
   # A Query-only grant listed here names exactly these GSIs and omits the table ARN; any other Query
   # grant covers all of its table's GSIs. Mirrors `crm.audit._CHILD_INDEXES`.
   tool_query_indexes = {
+    approve_proposal = {
+      opportunities = ["gsi_account"]
+    }
     revert_audit_record = {
       contacts      = ["gsi_account"]
       opportunities = ["gsi_account"]
@@ -644,10 +650,17 @@ module "lambda_action" {
   timeout_seconds = 30
   memory_size_mb  = 256
 
-  environment_variables = {
-    CRM_TABLE_PREFIX = local.name_prefix
-  }
+  environment_variables = merge(
+    { CRM_TABLE_PREFIX = local.name_prefix },
+    contains(local.routed_tool_names, each.key) ? { CRM_API_ALLOWED_CLIENT_IDS_PARAMETER = local.api_allowed_client_ids_parameter_name } : {},
+    contains(local.cursor_tools, each.key) ? { CRM_CURSOR_KMS_KEY_ARN = aws_kms_key.cursor.arn } : {},
+  )
   environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
+
+  config_parameter_arns = contains(local.routed_tool_names, each.key) ? [local.api_allowed_client_ids_parameter_arn] : []
+
+  cursor_kms_key_arn       = contains(local.cursor_tools, each.key) ? aws_kms_key.cursor.arn : null
+  cursor_kms_grant_enabled = contains(local.cursor_tools, each.key)
 
   reserved_concurrent_executions = local.reserved_concurrency[each.key]
 
@@ -862,7 +875,8 @@ module "lambda_action_eval_trigger" {
   memory_size_mb  = 512
 
   environment_variables = {
-    CRM_TABLE_PREFIX = local.name_prefix
+    CRM_TABLE_PREFIX                     = local.name_prefix
+    CRM_API_ALLOWED_CLIENT_IDS_PARAMETER = local.api_allowed_client_ids_parameter_name
     # Required for this zip's layout: the first-party packages live under `src/`.
     PYTHONPATH = "/var/task/src"
     # The state machine `submit_sweep` starts. Constructed: the resource reference is an
@@ -873,6 +887,7 @@ module "lambda_action_eval_trigger" {
     EVAL_ARTIFACTS_PREFIX = module.eval_artifacts.artifact_prefix
   }
   environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
 
   reserved_concurrent_executions = local.reserved_concurrency["eval_trigger"]
 
@@ -922,10 +937,12 @@ module "lambda_action_capabilities" {
   memory_size_mb  = 256
 
   environment_variables = {
+    CRM_API_ALLOWED_CLIENT_IDS_PARAMETER = local.api_allowed_client_ids_parameter_name
     # Required for this zip's layout: the first-party packages live under `src/`.
     PYTHONPATH = "/var/task/src"
   }
   environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
 
   reserved_concurrent_executions = local.reserved_concurrency["capabilities"]
 
@@ -1278,6 +1295,22 @@ module "frontend_cdn" {
   caller_principal_arn         = data.aws_iam_session_context.current.issuer_arn
   operator_principal_arns      = var.crm_operator_principal_arns
   administrator_principal_arns = concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"])
+
+  csp_script_hashes     = local.spa_inline_script_hashes
+  csp_connect_src_extra = local.spa_connect_src_extra
+}
+
+# The SPA's Content-Security-Policy sources: the hash of each attribute-less inline `<script>` in
+# `frontend/index.html`, and the Cognito origins the browser calls directly.
+locals {
+  spa_inline_script_hashes = [
+    for script in regexall("(?s)<script>(.*?)</script>", file("${path.module}/../frontend/index.html")) :
+    "sha256-${base64sha256(script[0])}"
+  ]
+  spa_connect_src_extra = [
+    "https://cognito-idp.${var.aws_region}.amazonaws.com",
+    "https://${module.cognito.domain}.auth.${var.aws_region}.amazoncognito.com",
+  ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1401,6 +1434,133 @@ module "eval_artifacts" {
 }
 
 # ---------------------------------------------------------------------------
+# cursor — the CMK sealing pagination cursors (KMS Encrypt/Decrypt under the
+# `purpose = crm-cursor` encryption context), used by the five paginating tools.
+# ---------------------------------------------------------------------------
+
+locals {
+  cursor_tools = ["search_opportunities", "search_accounts", "list_activities", "list_audit_records", "list_proposals"]
+
+  # Listed by static index, so the key policy does not wait on every `module.lambda_action` instance.
+  cursor_key_principal_arns = [
+    module.lambda_action["search_opportunities"].role_arn,
+    module.lambda_action["search_accounts"].role_arn,
+    module.lambda_action["list_activities"].role_arn,
+    module.lambda_action["list_audit_records"].role_arn,
+    module.lambda_action["list_proposals"].role_arn,
+  ]
+}
+
+resource "aws_kms_key" "cursor" {
+  # checkov:skip=CKV2_AWS_64: policy managed by aws_kms_key_policy.cursor
+  description             = "${local.name_prefix} pagination cursor sealing"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+
+  tags = {
+    "data-classification" = "internal"
+  }
+}
+
+resource "aws_kms_alias" "cursor" {
+  name          = "alias/${local.name_prefix}-cursor"
+  target_key_id = aws_kms_key.cursor.key_id
+}
+
+# Keeps the account-root statement, refuses any use outside the `crm-cursor` context and every
+# operation the cursor codec does not call, and denies key use and key administration outside the
+# lists.
+resource "aws_kms_key_policy" "cursor" {
+  key_id                             = aws_kms_key.cursor.id
+  bypass_policy_lockout_safety_check = false
+
+  lifecycle {
+    precondition {
+      condition     = contains(concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]), data.aws_iam_session_context.current.issuer_arn) && data.aws_iam_session_context.current.issuer_arn != "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      error_message = "The caller running this plan is not an operator. Add its role or user ARN to crm_operator_principal_arns in terraform.tfvars, or run as a listed operator; nothing was applied."
+    }
+  }
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableIAMUserPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "DenyCursorKeyUseOutsidePurpose"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+        ]
+        Resource = "*"
+        Condition = {
+          StringNotEquals = { "kms:EncryptionContext:purpose" = "crm-cursor" }
+        }
+      },
+      {
+        Sid       = "DenyCursorKeyUnusedOperations"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+          "kms:CreateGrant",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid       = "DenyKeyUseToNonProjectPrincipals"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+          "kms:CreateGrant",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnNotEquals = { "aws:PrincipalArn" = concat(local.cursor_key_principal_arns, var.crm_operator_principal_arns) }
+          Bool         = { "aws:PrincipalIsAWSService" = "false" }
+        }
+      },
+      {
+        Sid       = "DenyKeyAdministrationToNonOperators"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:PutKeyPolicy",
+          "kms:ScheduleKeyDeletion",
+          "kms:DisableKey",
+          "kms:RevokeGrant",
+          "kms:DisableKeyRotation",
+          "kms:CreateAlias",
+          "kms:UpdateAlias",
+          "kms:DeleteAlias",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:UpdateKeyDescription",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnNotEquals = { "aws:PrincipalArn" = concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]) }
+        }
+      },
+    ]
+  })
+}
+
+# ---------------------------------------------------------------------------
 # agent_relay — the browser's only agent endpoint: a Node.js Lambda with a
 # RESPONSE_STREAM Function URL, built by `scripts/package_relay.sh`.
 #
@@ -1414,6 +1574,25 @@ module "eval_artifacts" {
 # depend on the Cognito SPA client.
 locals {
   relay_cognito_audience_parameter_name = "/${local.name_prefix}/relay/cognito-audience"
+}
+
+# The app client ids `crm.envelope` admits on the API Gateway channel. Delivered through SSM, by a
+# constructed name and ARN, because a function attribute referencing the SPA client would cycle
+# through the distribution.
+locals {
+  api_allowed_client_ids_parameter_name = "/${local.name_prefix}/api/allowed-client-ids"
+  api_allowed_client_ids_parameter_arn  = "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.api_allowed_client_ids_parameter_name}"
+}
+
+resource "aws_ssm_parameter" "api_allowed_client_ids" {
+  # checkov:skip=CKV2_AWS_34: holds the SPA client id, a public value, not a secret
+  name  = local.api_allowed_client_ids_parameter_name
+  type  = "String"
+  value = module.cognito.spa_client_id
+
+  tags = {
+    "data-classification" = "internal"
+  }
 }
 
 resource "aws_ssm_parameter" "relay_cognito_audience" {

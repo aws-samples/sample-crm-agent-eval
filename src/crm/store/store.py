@@ -2,7 +2,10 @@
 """DynamoDB access: entity-per-table persistence, tenant-prefixed GSI queries, and scoped teardown.
 
 Every DynamoDB item read and write in the application goes through :class:`Store`. AWS errors are
-translated to :mod:`crm.errors` members by :func:`crm.errors.wrap_aws_error`.
+translated to :mod:`crm.errors` members by :func:`crm.errors.wrap_aws_error`; on every read and
+write path a client-side SDK failure is translated too: an unreachable or timed-out endpoint
+becomes a retryable :class:`crm.errors.ServiceBusy`, and anything else, rejected parameters
+included, an internal error.
 
 * **Idempotent writes.** :meth:`Store.put_idempotent` treats a retry with the same
   ``transaction_key`` and payload as a no-op and refuses a different payload with :class:`Conflict`;
@@ -31,7 +34,8 @@ from decimal import Decimal
 from typing import Any, Final
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError, HTTPClientError
+from botocore.exceptions import ConnectionError as BotoConnectionError
 
 from crm.errors import Conflict, CrmError, ServiceBusy, ValidationFailed, wrap_aws_error
 from crm.store.keys import derive, derive_encoded, derived_attributes
@@ -143,6 +147,8 @@ class Store:
             )
         except ClientError as exc:
             raise wrap_aws_error(exc, operation=f"get_item:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"get_item:{table}") from exc
         item = response.get("Item")
         return _decode_item(item) if item is not None else None
 
@@ -151,12 +157,16 @@ class Store:
     ) -> list[dict[str, object]]:
         """Return the full base-table items at ``keys``, in no guaranteed order.
 
-        Absent keys are omitted. Unprocessed keys are re-requested; a request making no progress
-        raises :class:`crm.errors.CrmError`.
+        Absent keys are omitted. Unprocessed keys are re-requested, with bounded exponential
+        backoff while a request makes no progress.
 
         Args:
             table: One of :data:`crm.store.schema.TABLE_NAMES`.
             keys: Primary keys to fetch. An empty sequence returns ``[]`` without an AWS call.
+
+        Raises:
+            ServiceBusy: A chunk made no progress for :data:`_BATCH_PUT_MAX_ATTEMPTS` attempts in a
+                row.
         """
         if not keys:
             return []
@@ -167,21 +177,34 @@ class Store:
         # BatchGetItem reports throttled keys as UnprocessedKeys rather than raising.
         for start in range(0, len(encoded), _BATCH_GET_CHUNK_SIZE):
             pending = encoded[start : start + _BATCH_GET_CHUNK_SIZE]
+            stalled = 0
             while pending:
+                if stalled:
+                    time.sleep(_BATCH_PUT_BACKOFF_BASE_SECONDS * 2 ** (stalled - 1))
                 try:
                     response = self._client.batch_get_item(
                         RequestItems={physical: {"Keys": pending}}
                     )
                 except ClientError as exc:
                     raise wrap_aws_error(exc, operation=f"batch_get_items:{table}") from exc
+                except BotoCoreError as exc:
+                    raise _wrap_sdk_error(exc, operation=f"batch_get_items:{table}") from exc
                 for raw in response.get("Responses", {}).get(physical, []):
                     items.append(_decode_item(raw))
                 unprocessed = response.get("UnprocessedKeys", {}).get(physical, {}).get("Keys", [])
-                if len(unprocessed) == len(pending):
-                    raise CrmError(
-                        f"batch_get_items:{table} made no progress: all {len(pending)} key(s) came "
-                        "back unprocessed. Refusing to retry an identical request indefinitely."
-                    )
+                if len(unprocessed) < len(pending):
+                    stalled = 0
+                else:
+                    stalled += 1
+                    if stalled >= _BATCH_PUT_MAX_ATTEMPTS:
+                        raise ServiceBusy(
+                            "The data store is busy and could not return every record; retry the "
+                            "operation.",
+                            detail=(
+                                f"batch_get_items:{table}: no progress on {len(pending)} key(s) "
+                                f"after {_BATCH_PUT_MAX_ATTEMPTS} attempts"
+                            ),
+                        )
                 pending = list(unprocessed)
         return items
 
@@ -196,6 +219,8 @@ class Store:
             )
         except ClientError as exc:
             raise wrap_aws_error(exc, operation=f"put_item:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"put_item:{table}") from exc
 
     def batch_put_items(self, table: str, items: Sequence[Mapping[str, object]]) -> int:
         """Unconditionally write every item into ``table`` through ``BatchWriteItem``.
@@ -243,6 +268,8 @@ class Store:
                 response = self._client.batch_write_item(RequestItems=pending)
             except ClientError as exc:
                 raise wrap_aws_error(exc, operation=f"batch_put_items:{table}") from exc
+            except BotoCoreError as exc:
+                raise _wrap_sdk_error(exc, operation=f"batch_put_items:{table}") from exc
             pending = response.get("UnprocessedItems") or {}
             if not pending:
                 return
@@ -316,6 +343,8 @@ class Store:
             )
         except ClientError as exc:
             raise wrap_aws_error(exc, operation=f"delete_item:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"delete_item:{table}") from exc
 
     def put_if_absent(self, table: str, item: Mapping[str, object]) -> bool:
         """Write ``item`` only if no item exists at its primary key.
@@ -337,6 +366,8 @@ class Store:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 return False
             raise wrap_aws_error(exc, operation=f"put_if_absent:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"put_if_absent:{table}") from exc
         return True
 
     def update_item(
@@ -441,6 +472,8 @@ class Store:
             if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
                 raise _condition_conflict(table, exc) from exc
             raise wrap_aws_error(exc, operation=f"update_item:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"update_item:{table}") from exc
         return _decode_item(response["Attributes"])
 
     # -- queries -----------------------------------------------------------------------------
@@ -501,6 +534,8 @@ class Store:
             response = self._client.query(**kwargs)
         except ClientError as exc:
             raise wrap_aws_error(exc, operation=f"query_gsi:{table}.{gsi_name}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"query_gsi:{table}.{gsi_name}") from exc
 
         items = [_decode_item(raw) for raw in response.get("Items", [])]
         next_cursor = response.get("LastEvaluatedKey")
@@ -557,6 +592,8 @@ class Store:
                 response = self._client.query(**kwargs)
             except ClientError as exc:
                 raise wrap_aws_error(exc, operation=f"count_tenant:{table}") from exc
+            except BotoCoreError as exc:
+                raise _wrap_sdk_error(exc, operation=f"count_tenant:{table}") from exc
             total += int(response["Count"])
             next_cursor = response.get("LastEvaluatedKey")
             if not next_cursor:
@@ -600,6 +637,8 @@ class Store:
                 response = self._client.scan(**kwargs)
             except ClientError as exc:
                 raise wrap_aws_error(exc, operation=f"scan_key_prefix:{table}") from exc
+            except BotoCoreError as exc:
+                raise _wrap_sdk_error(exc, operation=f"scan_key_prefix:{table}") from exc
             for raw in response.get("Items", []):
                 yield _decode_item(raw, exact=True)
             cursor = response.get("LastEvaluatedKey")
@@ -642,6 +681,8 @@ class Store:
             self._client.transact_write_items(**kwargs)
         except ClientError as exc:
             raise wrap_aws_error(exc, operation="transact_write") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation="transact_write") from exc
 
     #: The four ``TransactWriteItems`` action keys, each carrying its own ``TableName``.
     _TRANSACT_ACTION_KEYS: Final[tuple[str, ...]] = ("Put", "Update", "Delete", "ConditionCheck")
@@ -714,6 +755,8 @@ class Store:
             response = self._client.batch_write_item(RequestItems=request_items)
         except ClientError as exc:
             raise wrap_aws_error(exc, operation=f"batch_delete:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"batch_delete:{table}") from exc
         unprocessed = response.get("UnprocessedItems") or {}
         if unprocessed:
             # One synchronous retry; items still unprocessed after it raise Conflict.
@@ -721,11 +764,24 @@ class Store:
                 retry_response = self._client.batch_write_item(RequestItems=unprocessed)
             except ClientError as exc:
                 raise wrap_aws_error(exc, operation=f"batch_delete_retry:{table}") from exc
+            except BotoCoreError as exc:
+                raise _wrap_sdk_error(exc, operation=f"batch_delete_retry:{table}") from exc
             if retry_response.get("UnprocessedItems"):
                 raise Conflict(
                     "Tenant teardown could not remove all items; retry the operation.",
                     detail=f"table={table} unprocessed after retry",
                 )
+
+
+def _wrap_sdk_error(exc: BotoCoreError, *, operation: str) -> CrmError:
+    """Map a client-side SDK failure to the taxonomy: transport faults are retryable, the rest
+    (rejected parameters included, which the server built) internal."""
+    detail = f"operation={operation} exc={type(exc).__name__}"
+    if isinstance(exc, (BotoConnectionError, HTTPClientError)):
+        busy = ServiceBusy("The service is busy. Retry shortly.")
+        busy.detail = detail
+        return busy
+    return CrmError("The request could not be completed.", detail=detail)
 
 
 def _chunk(items: list[dict[str, object]], size: int) -> Iterable[list[dict[str, object]]]:

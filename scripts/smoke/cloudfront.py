@@ -13,6 +13,12 @@ forwarded on the two identity-bearing behaviours (`infra/modules/frontend_cdn/cl
 assertions about what must be absent from the deployed distribution: the retired AgentCore
 data-plane origin, a viewer-request function association, and response compression.
 
+Asserts one custom response-headers policy on every behaviour, carrying an enforced
+`Content-Security-Policy` (`Override` on) and `X-Frame-Options: DENY`, and that the served header on
+`/`, an unauthenticated `/api/*` response and an unauthenticated `/agent/*` response is that policy:
+the designed directive set, Cognito in `connect-src`, and a `sha256-` source for every inline script
+the served document carries.
+
 Then drives the distribution over the network: a client-side deep link must return the built SPA
 document (and a missing asset path must not), while an unauthenticated `/api/*` request must still
 be refused with a 401/403 rather than a `200` page of HTML
@@ -27,12 +33,17 @@ as `defer` with the machine-readable reason `missing_custom_acm_certificate`, ne
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
 import ssl
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, open_https, run_main
+
+from eval.verification import Status
 
 LAYER = 4
 RESOURCE_CLASS = "cloudfront"
@@ -48,6 +59,12 @@ HttpCaller = Callable[[str], HttpResult]
 
 # `(url, method) -> HttpResult`. The negative-auth probe's seam, which chooses its method.
 HttpMethodCaller = Callable[[str, str], HttpResult]
+
+# `(status_code, lowercased headers, body)` for a completed response, or a `str` transport failure.
+HeaderResult = tuple[int, Mapping[str, str], str] | str
+
+# `(url, method) -> HeaderResult`. The seam for the probes that read response headers.
+HeaderCaller = Callable[[str, str], HeaderResult]
 
 # `True` if the sub-1.2 handshake was refused by the server, `False` if it unexpectedly
 # succeeded, or a `str` explaining why the local TLS stack could not even attempt the
@@ -105,6 +122,27 @@ def default_http_method_caller(url: str, method: str) -> HttpResult:
             return response.status, response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        return f"transport error calling {method} {url}: {exc}"
+
+
+def default_header_caller(url: str, method: str) -> HeaderResult:
+    """Perform one unauthenticated request with no body and return its status, headers and body.
+
+    Header names are lowercased. Returns `(status_code, headers, body)` for any received response,
+    including 4xx; a `str` only when no HTTP response was received at all.
+    """
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(url, method=method)  # noqa: S310 - internal seam
+    try:
+        with open_https(request, timeout=30) as response:
+            headers = {name.lower(): value for name, value in response.headers.items()}
+            return response.status, headers, response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        headers = {name.lower(): value for name, value in exc.headers.items()}
+        return exc.code, headers, exc.read().decode("utf-8", errors="replace")
     except urllib.error.URLError as exc:
         return f"transport error calling {method} {url}: {exc}"
 
@@ -740,12 +778,332 @@ def _check_api_negative_auth_preserved(
         )
 
 
+#: The fixed directives of the served CSP: every directive except `script-src` and `connect-src`,
+#: which carry deployment-derived sources after `'self'`.
+_CSP_FIXED_DIRECTIVES: dict[str, tuple[str, ...]] = {
+    "default-src": ("'self'",),
+    "style-src": ("'self'", "'unsafe-inline'"),
+    "img-src": ("'self'", "data:"),
+    "font-src": ("'self'", "data:"),
+    "frame-ancestors": ("'none'",),
+    "base-uri": ("'none'",),
+    "object-src": ("'none'",),
+    "form-action": ("'self'",),
+}
+
+#: Every directive the served CSP must carry, and no other.
+_CSP_DIRECTIVES: frozenset[str] = frozenset({*_CSP_FIXED_DIRECTIVES, "script-src", "connect-src"})
+
+#: A `script-src` hash source.
+_SCRIPT_HASH_SOURCE = re.compile(r"^'sha256-[A-Za-z0-9+/]{43}='$")
+
+#: An inline `<script>` with no attributes: the only kind the CSP allows by hash.
+_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.DOTALL)
+
+#: An unauthenticated `/agent/*` probe. The relay refuses it before routing, so any path works.
+_UNAUTHENTICATED_AGENT_PATH = "/agent/csp-probe"
+
+#: `(resource, path, method, unauthenticated)` for each served-header probe.
+_CSP_PROBES: tuple[tuple[str, str, str, bool], ...] = (
+    ("behavior:/*", "/", "GET", False),
+    ("behavior:/api/*", _UNAUTHENTICATED_API_PATH, _UNAUTHENTICATED_API_METHOD, True),
+    ("behavior:/agent/*", _UNAUTHENTICATED_AGENT_PATH, "GET", True),
+)
+
+_CSP_HEADER = "content-security-policy"
+_CSP_REPORT_ONLY_HEADER = "content-security-policy-report-only"
+
+
+def _parse_csp(policy: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Return `{directive: [sources]}` for `policy` and the directives it repeats.
+
+    A repeated directive keeps its first occurrence, as browsers do.
+    """
+    parsed: dict[str, list[str]] = {}
+    repeated: list[str] = []
+    for part in policy.split(";"):
+        tokens = part.split()
+        if not tokens:
+            continue
+        name = tokens[0].lower()
+        if name in parsed:
+            repeated.append(name)
+            continue
+        parsed[name] = tokens[1:]
+    return parsed, repeated
+
+
+def _csp_hash(script_body: str) -> str:
+    digest = hashlib.sha256(script_body.encode("utf-8")).digest()
+    return "'sha256-" + base64.b64encode(digest).decode("ascii") + "'"
+
+
+def _csp_design_problems(policy: str) -> list[str]:
+    """Every way `policy` departs from the designed directive set; empty when it matches."""
+    parsed, repeated = _parse_csp(policy)
+    problems: list[str] = [f"directive {name!r} appears more than once" for name in repeated]
+    missing = sorted(_CSP_DIRECTIVES - parsed.keys())
+    extra = sorted(parsed.keys() - _CSP_DIRECTIVES)
+    if missing:
+        problems.append(f"missing directives {missing}")
+    if extra:
+        problems.append(f"unexpected directives {extra}")
+    for name, expected in _CSP_FIXED_DIRECTIVES.items():
+        if name in parsed and tuple(parsed[name]) != expected:
+            problems.append(f"{name} is {parsed[name]}, expected {list(expected)}")
+    script_src = parsed.get("script-src", [])
+    if script_src[:1] != ["'self'"] or not all(
+        _SCRIPT_HASH_SOURCE.match(source) for source in script_src[1:]
+    ):
+        problems.append(f"script-src must be 'self' then sha256 hash sources only: {script_src}")
+    connect_src = parsed.get("connect-src", [])
+    if connect_src[:1] != ["'self'"] or not all(
+        source.startswith("https://") and "*" not in source for source in connect_src[1:]
+    ):
+        problems.append(f"connect-src must be 'self' then https origins only: {connect_src}")
+    for name, sources in parsed.items():
+        if "'unsafe-eval'" in sources:
+            problems.append(f"{name} allows 'unsafe-eval'")
+        if "'unsafe-inline'" in sources and name != "style-src":
+            problems.append(f"{name} allows 'unsafe-inline'")
+    return problems
+
+
+def _check_response_headers_policy(
+    distribution_config: dict[str, Any], cloudfront: Any
+) -> tuple[list[CheckResult], str | None]:
+    """Assert one custom response-headers policy on every behaviour, enforcing the CSP.
+
+    Returns the results and the policy's CSP value, or `None` when it could not be read.
+    """
+    resource = "distribution"
+    behaviours = [("default", distribution_config.get("DefaultCacheBehavior", {}))]
+    for behaviour in distribution_config.get("CacheBehaviors", {}).get("Items", []) or []:
+        behaviours.append((str(behaviour.get("PathPattern")), behaviour))
+    ids = {label: behaviour.get("ResponseHeadersPolicyId") for label, behaviour in behaviours}
+    distinct = set(ids.values())
+    results: list[CheckResult] = []
+    if None in distinct or "" in distinct or len(distinct) != 1:
+        results.append(
+            CheckResult(
+                resource=resource,
+                check="one_response_headers_policy_on_every_behaviour",
+                status="fail",
+                detail=f"behaviours do not share one ResponseHeadersPolicyId: {ids}",
+            )
+        )
+        results.append(
+            CheckResult(
+                resource=resource,
+                check="response_headers_policy_enforces_csp",
+                status="fail",
+                detail="no single policy to inspect; see one_response_headers_policy_on_every_behaviour",
+            )
+        )
+        return results, None
+    (policy_id,) = distinct
+    results.append(
+        CheckResult(
+            resource=resource,
+            check="one_response_headers_policy_on_every_behaviour",
+            status="pass",
+            detail=f"every behaviour ({', '.join(ids)}) attaches ResponseHeadersPolicyId {policy_id}",
+        )
+    )
+
+    custom_ids = {
+        str(item.get("ResponseHeadersPolicy", {}).get("Id"))
+        for item in cloudfront.list_response_headers_policies(Type="custom")
+        .get("ResponseHeadersPolicyList", {})
+        .get("Items", [])
+        or []
+    }
+    config = (
+        cloudfront.get_response_headers_policy(Id=policy_id)
+        .get("ResponseHeadersPolicy", {})
+        .get("ResponseHeadersPolicyConfig", {})
+    )
+    security = config.get("SecurityHeadersConfig", {}) or {}
+    csp_block = security.get("ContentSecurityPolicy", {}) or {}
+    csp_value = csp_block.get("ContentSecurityPolicy")
+    frame = (security.get("FrameOptions", {}) or {}).get("FrameOption")
+    problems = []
+    if policy_id not in custom_ids:
+        problems.append(
+            f"policy {policy_id} is not a custom policy (an AWS-managed one has no CSP)"
+        )
+    if not isinstance(csp_value, str) or not csp_value.strip():
+        problems.append("the policy carries no Content-Security-Policy")
+    if csp_block.get("Override") is not True:
+        problems.append(
+            f"ContentSecurityPolicy.Override is {csp_block.get('Override')!r}, not True"
+        )
+    if frame != "DENY":
+        problems.append(f"FrameOptions.FrameOption is {frame!r}, not 'DENY'")
+    results.append(
+        CheckResult(
+            resource=resource,
+            check="response_headers_policy_enforces_csp",
+            status="fail" if problems else "pass",
+            detail="; ".join(problems)
+            if problems
+            else f"custom policy {policy_id}: CSP with Override true, X-Frame-Options DENY",
+        )
+    )
+    return results, csp_value if isinstance(csp_value, str) and csp_value.strip() else None
+
+
+def _check_served_csp(
+    domain_name: str,
+    *,
+    region: str,
+    cognito_domain: str,
+    policy_csp: str | None,
+    header_caller: HeaderCaller,
+) -> Iterable[CheckResult]:
+    """Assert the served CSP on `/`, an unauthenticated `/api/*` and an unauthenticated `/agent/*`.
+
+    One `csp_header_enforced` row per behaviour, then rows over the `/` response's header: equal on
+    every behaviour and to the policy, the designed directive set, Cognito in `connect-src`, and a
+    hash source for every inline script in the served document.
+    """
+    served: dict[str, str] = {}
+    root_body: str | None = None
+    for resource, path, method, unauthenticated in _CSP_PROBES:
+        check = "csp_header_enforced"
+        result = header_caller(f"https://{domain_name}{path}", method)
+        if isinstance(result, str):
+            yield CheckResult(resource=resource, check=check, status="fail", detail=result)
+            continue
+        status_code, headers, body = result
+        policy = headers.get(_CSP_HEADER)
+        if unauthenticated and status_code < 400:
+            yield CheckResult(
+                resource=resource,
+                check=check,
+                status="fail",
+                detail=(
+                    f"unauthenticated {method} {path} returned {status_code}; the probe must read "
+                    "the header from a refusal"
+                ),
+            )
+        elif not policy:
+            report_only = (
+                " (only Content-Security-Policy-Report-Only)"
+                if headers.get(_CSP_REPORT_ONLY_HEADER)
+                else ""
+            )
+            yield CheckResult(
+                resource=resource,
+                check=check,
+                status="fail",
+                detail=f"{method} {path} returned {status_code} with no enforced CSP{report_only}",
+            )
+        else:
+            served[resource] = policy
+            if path == "/":
+                root_body = body
+            yield CheckResult(
+                resource=resource,
+                check=check,
+                status="pass",
+                detail=f"{method} {path} returned {status_code} carrying Content-Security-Policy",
+            )
+
+    resource = "distribution"
+    root_policy = served.get("behavior:/*")
+    if root_policy is None:
+        for check in (
+            "served_csp_identical_and_equal_to_policy",
+            "served_csp_matches_design",
+            "served_csp_connect_src_allows_cognito",
+            "served_csp_allows_every_inline_script",
+        ):
+            yield CheckResult(
+                resource=resource,
+                check=check,
+                status="fail",
+                detail="no CSP was served on / to inspect; see behavior:/* csp_header_enforced",
+            )
+        return
+
+    differing = sorted(name for name, value in served.items() if value != root_policy)
+    mismatch = []
+    if differing:
+        mismatch.append(f"behaviours serving a different CSP from /: {differing}")
+    if policy_csp is not None and root_policy != policy_csp:
+        mismatch.append("the served CSP differs from the response-headers policy's value")
+    compared = (
+        "and to the policy's value"
+        if policy_csp is not None
+        else ("(the policy's value was unreadable, so it was not compared)")
+    )
+    yield CheckResult(
+        resource=resource,
+        check="served_csp_identical_and_equal_to_policy",
+        status="fail" if mismatch else "pass",
+        detail="; ".join(mismatch)
+        if mismatch
+        else f"every behaviour that served a CSP serves the same one, equal to / {compared}",
+    )
+
+    problems = _csp_design_problems(root_policy)
+    yield CheckResult(
+        resource=resource,
+        check="served_csp_matches_design",
+        status="fail" if problems else "pass",
+        detail="; ".join(problems) if problems else f"served CSP matches the design: {root_policy}",
+    )
+
+    parsed, _ = _parse_csp(root_policy)
+    connect_src = parsed.get("connect-src", [])
+    wanted = [
+        f"https://cognito-idp.{region}.amazonaws.com",
+        f"https://{cognito_domain}.auth.{region}.amazoncognito.com",
+    ]
+    absent = [origin for origin in wanted if origin not in connect_src]
+    yield CheckResult(
+        resource=resource,
+        check="served_csp_connect_src_allows_cognito",
+        status="fail" if absent else "pass",
+        detail=f"connect-src lacks {absent}: {connect_src}"
+        if absent
+        else f"connect-src carries {wanted}",
+    )
+
+    script_src = parsed.get("script-src", [])
+    scripts = _INLINE_SCRIPT.findall(root_body or "")
+    hashes = [_csp_hash(body) for body in scripts]
+    not_allowed = [h for h in hashes if h not in script_src]
+    status: Status
+    if not scripts:
+        status, detail = (
+            "fail",
+            "the served document carries no inline <script>, so the hash check verified nothing",
+        )
+    elif not_allowed:
+        status, detail = (
+            "fail",
+            f"served inline scripts hash to {not_allowed}, absent from script-src {script_src}: "
+            "browsers refuse them",
+        )
+    else:
+        status, detail = "pass", f"every served inline script's hash is in script-src: {hashes}"
+    yield CheckResult(
+        resource=resource,
+        check="served_csp_allows_every_inline_script",
+        status=status,
+        detail=detail,
+    )
+
+
 def checks(
     ctx: SmokeContext,
     *,
     http_caller: HttpCaller | None = None,
     http_method_caller: HttpMethodCaller | None = None,
     tls_probe: TlsProbe | None = None,
+    http_header_caller: HeaderCaller | None = None,
 ) -> Iterable[CheckResult]:
     """Yield one `CheckResult` per (resource, check) pair for the CloudFront distribution.
 
@@ -757,6 +1115,7 @@ def checks(
         http_method_caller if http_method_caller is not None else default_http_method_caller
     )
     probe = tls_probe if tls_probe is not None else default_tls_probe
+    header_caller = http_header_caller if http_header_caller is not None else default_header_caller
 
     domain_name = ctx.outputs.require_str("cloudfront_domain_name")
     cloudfront = ctx.client("cloudfront")
@@ -812,6 +1171,16 @@ def checks(
 
     yield from _check_spa_history_fallback(domain_name, caller)
     yield from _check_api_negative_auth_preserved(domain_name, method_caller)
+
+    policy_results, policy_csp = _check_response_headers_policy(distribution_config, cloudfront)
+    yield from policy_results
+    yield from _check_served_csp(
+        domain_name,
+        region=ctx.region,
+        cognito_domain=ctx.outputs.require_str("cognito_domain"),
+        policy_csp=policy_csp,
+        header_caller=header_caller,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

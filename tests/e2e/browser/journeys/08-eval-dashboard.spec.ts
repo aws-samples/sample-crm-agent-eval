@@ -257,6 +257,26 @@ function succeededStatusBody(records: EvalResponseRecord[]): WireStatus {
 
 test.describe.configure({ timeout: RUN_TIMEOUT_MS + 60_000 });
 
+/** Rank wording: a rank, ranking or ranked entry, which would order the arms by a result. */
+const RANK_WORDING = /\brank(?:ing|ed|s)?\b/;
+
+/**
+ * Phrases that contain "rank" but name a statistics method rather than an ordering of arms. Each is
+ * removed before the rank check; any other "rank" wording still fails it.
+ */
+const RANK_WORDING_EXEMPT_PHRASES: readonly string[] = ["nearest-rank percentile"];
+
+/** The first rank wording in `text` after the exempt phrases are removed, or `null`. */
+function rankWording(text: string): string | null {
+  let scanned = text.toLowerCase();
+  for (const phrase of RANK_WORDING_EXEMPT_PHRASES) scanned = scanned.split(phrase).join(" ");
+  const found = scanned.match(RANK_WORDING);
+  return found === null ? null : found[0];
+}
+
+/** The artefact control that downloads `matrix.md` in place instead of opening it in a new tab. */
+const MATRIX_DOWNLOAD_TEST_ID = "download-matrix-md";
+
 /** The content type the sweep stores an artefact under, by its key's extension. */
 function artefactContentType(path: string): string {
   if (path.endsWith(".csv")) return "text/csv";
@@ -274,6 +294,16 @@ test.describe("the eval dashboard publishes measurements and withholds every jud
       expect(sample, `${sample} is a measurement, not a currency figure`).not.toMatch(
         CURRENCY_SHAPED,
       );
+    }
+  });
+
+  test("the rank check fires on rank wording and exempts only the named percentile method", () => {
+    // Control for `rankWording`.
+    for (const sample of ["Rank 1", "ranked first", "the ranking below", "ranks", "nearest-rank and rank"]) {
+      expect(rankWording(sample), `${sample} is rank wording`).not.toBeNull();
+    }
+    for (const sample of ["takes the nearest-rank percentile over those tasks", "frank", "rankle"]) {
+      expect(rankWording(sample), `${sample} is not rank wording`).toBeNull();
     }
   });
 
@@ -438,7 +468,7 @@ test.describe("the eval dashboard publishes measurements and withholds every jud
 
     // No rank, position, or ordinal anywhere in the results.
     const mainText = await page.getByRole("main").innerText();
-    expect(mainText.toLowerCase()).not.toMatch(/\brank(?:ing|ed|s)?\b/);
+    expect(rankWording(mainText), "no rank wording appears in the results").toBeNull();
     expect(mainText).not.toMatch(/\b(?:1st|2nd|3rd)\b/);
 
     // No sort affordance: no `aria-sort` and no control in a column header.
@@ -511,7 +541,12 @@ test.describe("the eval dashboard publishes measurements and withholds every jud
     await expect(artifactSection).toHaveCount(1);
     await expect(artifactSection.getByRole("alert")).toHaveCount(0);
 
-    const controls = artifactSection.getByRole("button");
+    // The matrix.md download control saves in place rather than opening a tab; journey 21 covers it.
+    const downloadControl = artifactSection.getByTestId(MATRIX_DOWNLOAD_TEST_ID);
+    await expect(downloadControl, "the matrix.md download control appears once").toHaveCount(1);
+    const controls = artifactSection
+      .getByRole("button")
+      .and(artifactSection.locator(`:not([data-testid="${MATRIX_DOWNLOAD_TEST_ID}"])`));
     const count = await controls.count();
     expect(
       count,

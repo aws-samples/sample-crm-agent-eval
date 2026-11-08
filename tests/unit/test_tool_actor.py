@@ -19,7 +19,14 @@ from agents.supervisor import classify_tool_result
 from agents.tier_attribution import InvocationAttribution
 from agents.tool_actor import TOOL_TIER, ToolActorResult, formulate_and_invoke
 from agents.turn_driver import session_turn_tuning
-from crm.envelope import AGENT_IDENTITY_KEY, CLAIM_REP_ID, CLAIM_TENANT, Identity
+from crm.envelope import (
+    AGENT_IDENTITY_KEY,
+    AGENT_PRINCIPAL_TYPE_KEY,
+    CLAIM_REP_ID,
+    CLAIM_TENANT,
+    Identity,
+    decode_identity,
+)
 from crm.errors import ValidationFailed
 from crm.toolspec.definitions import BY_NAME
 from crm.toolspec.validation import validate_arguments
@@ -256,6 +263,26 @@ class TestSB3IdentityHandling:
         assert trusted["claims"][CLAIM_REP_ID] == "rep-1"  # the real identity, not "attacker"
         assert trusted["claims"][CLAIM_TENANT] == "demo"
         assert event["account_id"] == "acc-1"  # the non-identity arg survives as a sibling
+
+    def test_a_service_identity_keeps_its_principal_type_across_the_agent_hop(self) -> None:
+        identity = Identity(
+            rep_id="svc-1", book=frozenset({"acc-1"}), principal_type="service", tenant="demo"
+        )
+
+        event = agent_identity_event(identity, {"account_id": "acc-1"})
+
+        assert event[AGENT_IDENTITY_KEY][AGENT_PRINCIPAL_TYPE_KEY] == "service"
+        decoded = decode_identity(event)
+        assert decoded.principal_type == "service"
+        assert decoded.source == "agent"
+
+    def test_a_user_identity_round_trips_unchanged_across_the_agent_hop(self) -> None:
+        identity = Identity(rep_id="rep-1", book=frozenset({"acc-1", "acc-2"}), tenant="demo")
+
+        decoded = decode_identity(agent_identity_event(identity, {}))
+
+        assert decoded.principal_type == "user"
+        assert (decoded.rep_id, decoded.book, decoded.tenant) == ("rep-1", identity.book, "demo")
 
 
 class TestSB4OutOfScopeDenied:

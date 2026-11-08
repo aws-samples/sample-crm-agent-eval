@@ -8,7 +8,8 @@ Every high-risk write reaches persisted state only through :func:`submit_proposa
 rejection both condition the status flip on ``status == pending``, so exactly one decision wins.
 ``after_payload`` is checked by :func:`crm.domain.allowlists.validate_proposal_payload` at submit
 and again at approve. :func:`rebase_proposal` re-captures a pending proposal's ``before_snapshot``
-from current state. Proposal ``Update`` expressions set ``tenant_status`` alongside ``status``;
+from current state. Approve and rebase both refuse an opportunity ``stage`` change that is not a
+permitted transition from the record's current stage. Proposal ``Update`` expressions set ``tenant_status`` alongside ``status``;
 :meth:`crm.store.store.Store.transact_write` applies the table prefix.
 """
 
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from crm.domain.allowlists import validate_proposal_payload
+from crm.domain.stages import PERMITTED_TRANSITION_KINDS, classify_requested_transition
 from crm.errors import Conflict, CrmError, NotFound, ValidationFailed
 from crm.store.keys import derive, derived_attributes, tenant_prefixed
 from crm.store.store import Store
@@ -211,6 +213,23 @@ def _apply_operation(
         return None
     merged = {**current, **(after_payload or {}), "updated_at": now}
     return derive(target_table, merged)
+
+
+def _require_permitted_stage_move(
+    target_table: str, current: Mapping[str, object], payload: Mapping[str, object] | None
+) -> None:
+    """Raise unless moving ``current`` to ``payload["stage"]`` is a permitted transition."""
+    if target_table != "opportunities" or not payload or "stage" not in payload:
+        return
+    from_stage = str(current.get("stage"))
+    to_stage = str(payload["stage"])
+    kind = classify_requested_transition(from_stage, to_stage, source="after_payload.stage")
+    if kind not in PERMITTED_TRANSITION_KINDS:
+        raise ValidationFailed(
+            f"Stage transition from {from_stage!r} to {to_stage!r} is not permitted.",
+            source="after_payload.stage",
+            detail=f"transition_kind={kind.value}",
+        )
 
 
 def _require_payload_targets_declared_record(
@@ -491,7 +510,8 @@ def approve_proposal(
             or the transaction was cancelled for another cause.
         ValidationFailed: The stored ``after_payload`` carries a field outside
             :func:`crm.domain.allowlists.proposal_payload_allowlist`, or assigns the target's
-            partition key or ``tenant``.
+            partition key or ``tenant``; or, with ``source="after_payload.stage"``, its ``stage``
+            would move the current record by a refused transition.
         RuntimeError: A non-``delete`` operation produced no after-snapshot (internal invariant).
     """
     proposal = store.get_item("proposals", {"proposal_id": proposal_id})
@@ -533,6 +553,7 @@ def approve_proposal(
     changed = _changed_fields(touched, stored_before, current)
     if changed:
         raise _fields_changed_conflict(changed, proposal_id=proposal_id)
+    _require_permitted_stage_move(target_table, current, touched)
 
     after_snapshot = _apply_operation(target_table, current, operation, touched, now=now)
     if operation != "delete" and after_snapshot is None:
@@ -746,6 +767,8 @@ def rebase_proposal(
         Conflict: ``reason="already_decided"`` when the proposal is not ``pending``;
             ``reason="target_missing"`` when the target record no longer exists under ``tenant``;
             no reason when the proposal changed concurrently or is malformed.
+        ValidationFailed: ``source="after_payload.stage"`` when the proposal's ``stage`` would move
+            the current record by a refused transition; nothing is written.
     """
     proposal = store.get_item("proposals", {"proposal_id": proposal_id})
     if proposal is None or proposal.get("tenant") != tenant:
@@ -773,6 +796,11 @@ def rebase_proposal(
             "The record this proposal targets no longer exists.",
             reason="target_missing",
             detail=f"proposal_id={proposal_id} target_table={target_table} target_id={target_id}",
+        )
+    if proposal.get("operation") != "delete":
+        after_payload = proposal.get("after_payload")
+        _require_permitted_stage_move(
+            target_table, current, after_payload if isinstance(after_payload, Mapping) else None
         )
 
     read_updated_at = proposal.get("updated_at")

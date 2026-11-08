@@ -365,12 +365,12 @@ def test_every_declared_input_is_wired_by_the_root() -> None:
     assert passed - variables == set(), f"passed by the root but not declared: {passed - variables}"
 
 
-#: `Managed-SecurityHeadersPolicy`'s data-source reference.
-SECURITY_HEADERS_DATA_SOURCE = "data.aws_cloudfront_response_headers_policy.security_headers.id"
+#: The module's own response-headers policy: the standard security headers plus an enforced CSP.
+SECURITY_HEADERS_POLICY = "aws_cloudfront_response_headers_policy.security_headers.id"
 
 
-def test_every_behaviour_attaches_the_managed_security_headers_policy() -> None:
-    """The default behaviour and every ordered behaviour carry the security-headers policy."""
+def test_every_behaviour_attaches_the_modules_security_headers_policy() -> None:
+    """The default behaviour and every ordered behaviour carry the one CSP-bearing policy."""
     text = CLOUDFRONT_TF.read_text(encoding="utf-8")
     behaviours = _blocks(text, "default_cache_behavior") + _blocks(text, "ordered_cache_behavior")
     assert len(behaviours) == 3, (
@@ -378,13 +378,14 @@ def test_every_behaviour_attaches_the_managed_security_headers_policy() -> None:
     )
     for body in behaviours:
         arguments = _arguments(body)
-        assert arguments.get("response_headers_policy_id") == SECURITY_HEADERS_DATA_SOURCE, (
+        assert arguments.get("response_headers_policy_id") == SECURITY_HEADERS_POLICY, (
             arguments.get("path_pattern", "default"),
             arguments.get("response_headers_policy_id"),
         )
-    data = re.search(
-        r'(?ms)^data\s+"aws_cloudfront_response_headers_policy"\s+"security_headers"\s*\{(.*?)^\}',
-        text,
+    policies = re.findall(
+        r'(?m)^resource\s+"aws_cloudfront_response_headers_policy"\s+"(\w+)"', text
     )
-    assert data is not None, "the security-headers data source is not declared"
-    assert _arguments(data.group(1)).get("name") == "Managed-SecurityHeadersPolicy"
+    assert policies == ["security_headers"], policies
+    assert not re.search(r'(?m)^data\s+"aws_cloudfront_response_headers_policy"', text), (
+        "a managed response-headers policy is still read; a behaviour takes only one policy"
+    )

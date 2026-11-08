@@ -48,6 +48,18 @@ this deployment owns is a `fail`, as is a `ForAllValues` LeadingKeys Allow that 
 outside `KEYED_DYNAMODB_ACTIONS`. An absent role, a missing or unrecognised evaluation result, a role
 whose policies cannot be loaded (`leading_keys:policies_unreadable`), or an over-grant is a `fail`,
 never `skip`. A matrix that `matrix_shape_problems` rejects is one failing `matrix_readable` row.
+
+`supplementary_checks` adds a fixed set of rows (`SUPPLEMENTARY_ROW_COUNT`), each emitted on every
+path. The roles of `sweep_task`, `pre_token_generation` and the Runtime image's CodeBuild project,
+found by exact name in `iam:ListRoles`, are refused `kms:Encrypt`/`kms:Decrypt` on the cursor key
+under its valid encryption context (`cursor_key_use_denied:<label>`), refused writing the API
+client-allowlist parameter (`allowlist_parameter_write_denied:<label>`) and refused reading it
+(`allowlist_parameter_read_denied:<label>`). The key ARN and the parameter name are read from the
+`search_opportunities` function's environment. The `approve_proposal` role may `Query` the
+opportunities table's `gsi_account` index (`approve_query_gsi_account_allowed`), and is refused
+`Query` on the base table (`approve_query_base_table_denied`) and on every other index
+`describe-table` lists (`approve_query_other_indexes_denied`), and `Scan` on the table and every
+index (`approve_scan_denied`). An unresolved input fails every row that needs it.
 """
 
 from __future__ import annotations
@@ -2518,6 +2530,7 @@ def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
             + scope_rows
             + conditioned_rows
             + roles * _ROWS_PER_ROLE_OUTSIDE_THE_SIMULATE_MATRIX
+            + SUPPLEMENTARY_ROW_COUNT
         ),
         basis=(
             f"{simulate_rows} matrix row(s) over {roles} execution role(s) x {triples} "
@@ -2528,12 +2541,13 @@ def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
             "leading_keys or key_prefix, the sweep roles' included, plus "
             f"{roles} x {_ROWS_PER_ROLE_OUTSIDE_THE_SIMULATE_MATRIX} per-role rows "
             "(intended_grants_parity, role_exists, no_dynamodb_wildcard, and at least one "
-            "leading_keys row), derived from table_action_role_matrix.json and infra/main.tf"
+            "leading_keys row), derived from table_action_role_matrix.json and infra/main.tf, plus "
+            f"{SUPPLEMENTARY_ROW_COUNT} supplementary row(s)"
         ),
     )
 
 
-def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901
+def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901
     """Yield one `CheckResult` per (role, assertion) pair across the full allow/deny matrix.
 
     Never raises for a check failure: an absent role, a missing simulation result, or an
@@ -3117,6 +3131,221 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901
                     detail="this role's policies carry no DynamoDB Allow statement to assert on",
                 )
             )
+
+
+#: Labels of the non-API roles `supplementary_checks` probes, and each role's deployed name.
+NON_API_ROLE_NAMES: Final[Mapping[str, str]] = {
+    "sweep_task": f"{_NAME_PREFIX}-sweep-task-role",
+    "pre_token_generation": f"{_NAME_PREFIX}-pre-token-generation-role",
+    "codebuild": f"{_NAME_PREFIX}-codebuild-role",
+}
+
+#: The action function whose environment names the cursor key and the allowlist parameter.
+CURSOR_ENV_FUNCTION: Final[str] = f"{_NAME_PREFIX}-search_opportunities"
+CURSOR_KEY_ENV: Final[str] = "CRM_CURSOR_KMS_KEY_ARN"
+ALLOWLIST_PARAMETER_ENV: Final[str] = "CRM_API_ALLOWED_CLIENT_IDS_PARAMETER"
+
+#: The valid cursor encryption context, as simulation context entries.
+CURSOR_CONTEXT: Final[Mapping[str, str]] = {
+    "kms:EncryptionContext:purpose": "crm-cursor",
+    "kms:EncryptionContext:tenant": DEMO_TENANT,
+    "kms:EncryptionContext:rep_id": "rep-smoke-probe",
+    "kms:EncryptionContext:operation": "search_opportunities",
+}
+CURSOR_KEY_ACTIONS: Final[tuple[str, ...]] = ("kms:Encrypt", "kms:Decrypt")
+PARAMETER_WRITE_ACTIONS: Final[tuple[str, ...]] = (
+    "ssm:PutParameter",
+    "ssm:DeleteParameter",
+    "ssm:LabelParameterVersion",
+)
+APPROVE_FUNCTION: Final[str] = "approve_proposal"
+APPROVE_TABLE: Final[str] = "opportunities"
+APPROVE_INDEX: Final[str] = "gsi_account"
+
+#: Rows `supplementary_checks` emits on every path: three per non-API role plus four for
+#: `approve_proposal`.
+SUPPLEMENTARY_ROW_COUNT: Final[int] = 3 * len(NON_API_ROLE_NAMES) + 4
+
+
+def _row(resource: str, check: str, ok: bool, detail: str) -> CheckResult:
+    return CheckResult(
+        resource=resource, check=check, status="pass" if ok else "fail", detail=detail
+    )
+
+
+def _discover_role_arns(ctx: SmokeContext) -> tuple[dict[str, str], str | None]:
+    """`iam:ListRoles` filtered to the exact names in `NON_API_ROLE_NAMES` plus `approve_proposal`."""
+    wanted = {**NON_API_ROLE_NAMES, APPROVE_FUNCTION: _role_name(APPROVE_FUNCTION)}
+    by_name = {name: label for label, name in wanted.items()}
+    found: dict[str, str] = {}
+    try:
+        paginator = ctx.client("iam").get_paginator("list_roles")
+        for page in paginator.paginate():
+            for role in page.get("Roles", []):
+                label = by_name.get(str(role.get("RoleName")))
+                if label is not None:
+                    found[label] = str(role["Arn"])
+    except Exception as exc:  # noqa: BLE001 - reported on every row that needs a role
+        return found, f"iam:ListRoles raised {type(exc).__name__}: {exc}"
+    return found, None
+
+
+def _env_inputs(ctx: SmokeContext, account_id: str) -> tuple[str | None, str | None, str]:
+    """(cursor key ARN, allowlist parameter ARN, problem detail) from the cursor function's env."""
+    try:
+        config = ctx.client("lambda").get_function_configuration(FunctionName=CURSOR_ENV_FUNCTION)
+    except Exception as exc:  # noqa: BLE001 - reported on every row that needs these inputs
+        return None, None, f"get_function_configuration({CURSOR_ENV_FUNCTION}) raised {exc}"
+    env = (config.get("Environment") or {}).get("Variables") or {}
+    key_arn = env.get(CURSOR_KEY_ENV) or None
+    name = env.get(ALLOWLIST_PARAMETER_ENV) or None
+    parameter_arn = None
+    if name:
+        path = name if name.startswith("/") else f"/{name}"
+        parameter_arn = f"arn:aws:ssm:{ctx.region}:{account_id}:parameter{path}"
+    missing = [n for n, v in ((CURSOR_KEY_ENV, key_arn), (ALLOWLIST_PARAMETER_ENV, name)) if not v]
+    return key_arn, parameter_arn, f"{CURSOR_ENV_FUNCTION} has no {', '.join(missing)}"
+
+
+def _decisions(
+    ctx: SmokeContext,
+    role_arn: str,
+    actions: Sequence[str],
+    resource_arn: str,
+    context: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """`{action: decision}`; a simulate error becomes the decision `error:<Type>`."""
+    out: dict[str, str] = {}
+    for action in actions:
+        try:
+            out[action] = _simulate_evaluation(
+                ctx, role_arn, action, resource_arn, extra_context=context
+            )[0]
+        except Exception as exc:  # noqa: BLE001 - an unknown decision is never a pass
+            out[action] = f"error:{type(exc).__name__}"
+    return out
+
+
+def _all_refused(decisions: Mapping[str, str]) -> bool:
+    return bool(decisions) and all(
+        d in {"implicitDeny", "explicitDeny"} for d in decisions.values()
+    )
+
+
+def _non_api_rows(
+    ctx: SmokeContext,
+    roles: Mapping[str, str],
+    roles_error: str | None,
+    key_arn: str | None,
+    parameter_arn: str | None,
+    env_problem: str,
+) -> Iterator[CheckResult]:
+    for label, role_name in NON_API_ROLE_NAMES.items():
+        role_arn = roles.get(label)
+        no_role = roles_error or f"no role named {role_name!r} in iam:ListRoles"
+        probes: tuple[tuple[str, str | None, tuple[str, ...], Mapping[str, str] | None], ...] = (
+            ("cursor_key_use_denied", key_arn, CURSOR_KEY_ACTIONS, CURSOR_CONTEXT),
+            ("allowlist_parameter_write_denied", parameter_arn, PARAMETER_WRITE_ACTIONS, None),
+            ("allowlist_parameter_read_denied", parameter_arn, ("ssm:GetParameter",), None),
+        )
+        for check, resource_arn, actions, context in probes:
+            name = f"{check}:{label}"
+            if role_arn is None:
+                yield _row(role_name, name, False, no_role)
+            elif resource_arn is None:
+                yield _row(role_name, name, False, env_problem)
+            else:
+                decisions = _decisions(ctx, role_arn, actions, resource_arn, context)
+                yield _row(role_name, name, _all_refused(decisions), f"{resource_arn}: {decisions}")
+
+
+def _approve_rows(
+    ctx: SmokeContext, role_arn: str | None, role_problem: str, account_id: str
+) -> Iterator[CheckResult]:
+    resource = _role_name(APPROVE_FUNCTION)
+    names = (
+        "approve_query_gsi_account_allowed",
+        "approve_query_base_table_denied",
+        "approve_query_other_indexes_denied",
+        "approve_scan_denied",
+    )
+    tables = ctx.outputs.get("dynamodb_table_names", {})
+    physical = tables.get(APPROVE_TABLE) if isinstance(tables, dict) else None
+    problem = role_problem if role_arn is None else ""
+    indexes: list[str] = []
+    if not problem:
+        if not physical:
+            problem = f"stack output dynamodb_table_names has no {APPROVE_TABLE!r}"
+        else:
+            try:
+                table = ctx.client("dynamodb").describe_table(TableName=str(physical))["Table"]
+                indexes = sorted(
+                    str(g["IndexName"]) for g in table.get("GlobalSecondaryIndexes") or ()
+                )
+            except Exception as exc:  # noqa: BLE001 - reported on every approve row
+                problem = f"describe_table({physical}) raised {type(exc).__name__}: {exc}"
+            if not problem and APPROVE_INDEX not in indexes:
+                problem = f"{physical} lists no {APPROVE_INDEX} index: {indexes}"
+    if problem or role_arn is None:
+        for check in names:
+            yield _row(resource, check, False, problem)
+        return
+    table_arn = f"arn:aws:dynamodb:{ctx.region}:{account_id}:table/{physical}"
+    index_arn = f"{table_arn}/index/{APPROVE_INDEX}"
+    others = [f"{table_arn}/index/{name}" for name in indexes if name != APPROVE_INDEX]
+    in_scope = INDEX_IN_SCOPE_LEADING_KEY[APPROVE_INDEX]
+    try:
+        allowed, _ = _simulate_evaluation(
+            ctx, role_arn, "dynamodb:Query", index_arn, leading_keys=[in_scope]
+        )
+    except Exception as exc:  # noqa: BLE001 - an unknown decision is never a pass
+        allowed = f"error:{type(exc).__name__}"
+    yield _row(resource, names[0], allowed == "allowed", f"{index_arn}: {allowed}")
+    base = _decisions(ctx, role_arn, ("dynamodb:Query",), table_arn)
+    yield _row(resource, names[1], _all_refused(base), f"{table_arn}: {base}")
+    other: dict[str, str] = {}
+    for arn in others:
+        other[arn] = _decisions(ctx, role_arn, ("dynamodb:Query",), arn)["dynamodb:Query"]
+    yield _row(
+        resource,
+        names[2],
+        all(d in {"implicitDeny", "explicitDeny"} for d in other.values()),
+        f"other indexes: {other}" if others else "the table has no other index",
+    )
+    scans: dict[str, str] = {}
+    for arn in (table_arn, index_arn, *others):
+        scans[arn] = _decisions(ctx, role_arn, ("dynamodb:Scan",), arn)["dynamodb:Scan"]
+    yield _row(resource, names[3], _all_refused(scans), f"{scans}")
+
+
+def supplementary_checks(ctx: SmokeContext) -> Iterator[CheckResult]:
+    """Yield exactly `SUPPLEMENTARY_ROW_COUNT` rows; see the module docstring."""
+    try:
+        account_id = str(ctx.client("sts").get_caller_identity()["Account"])
+    except Exception as exc:  # noqa: BLE001 - reported on every row
+        detail = f"sts:GetCallerIdentity raised {type(exc).__name__}: {exc}"
+        for label, role_name in NON_API_ROLE_NAMES.items():
+            for check in (
+                "cursor_key_use_denied",
+                "allowlist_parameter_write_denied",
+                "allowlist_parameter_read_denied",
+            ):
+                yield _row(role_name, f"{check}:{label}", False, detail)
+        yield from _approve_rows(ctx, None, detail, "")
+        return
+    roles, roles_error = _discover_role_arns(ctx)
+    key_arn, parameter_arn, env_problem = _env_inputs(ctx, account_id)
+    yield from _non_api_rows(ctx, roles, roles_error, key_arn, parameter_arn, env_problem)
+    approve_problem = roles_error or (
+        f"no role named {_role_name(APPROVE_FUNCTION)!r} in iam:ListRoles"
+    )
+    yield from _approve_rows(ctx, roles.get(APPROVE_FUNCTION), approve_problem, account_id)
+
+
+def checks(ctx: SmokeContext) -> Iterator[CheckResult]:
+    """The per-role allow/deny matrix (`_role_matrix_checks`), then `supplementary_checks`."""
+    yield from _role_matrix_checks(ctx)
+    yield from supplementary_checks(ctx)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

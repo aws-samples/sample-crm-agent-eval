@@ -441,6 +441,13 @@ def _replace_identity(body: dict[str, Any], verified_identity: dict[str, Any]) -
     return rewritten
 
 
+def _request_body(event: object) -> object:
+    """Return `event["mcp"]["gatewayRequest"]["body"]` without assuming any level is a dict."""
+    mcp = event.get("mcp") if isinstance(event, dict) else None
+    gateway_request = mcp.get("gatewayRequest") if isinstance(mcp, dict) else None
+    return gateway_request.get("body") if isinstance(gateway_request, dict) else None
+
+
 def lambda_handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
     """AgentCore Gateway REQUEST interceptor entry point.
 
@@ -452,16 +459,53 @@ def lambda_handler(event: dict[str, Any], _context: object) -> dict[str, Any]:
 
     Returns:
         `transformedGatewayRequest` carrying the rewritten body on success or passthrough, or
-        `transformedGatewayResponse` short-circuiting the call on a verification failure.
+        `transformedGatewayResponse` short-circuiting the call on a verification failure. A
+        non-object body, a non-object `params`, and any unexpected exception (configuration
+        errors included) are all denied; no exception escapes this function. The denial log line
+        carries an `InterceptorConfigError`'s message, and only the type name of any other error.
     """
+    try:
+        return _handle(event)
+    except Exception as exc:
+        reason = (
+            f"config_error:{exc}"
+            if isinstance(exc, InterceptorConfigError)
+            else f"unexpected_error:{type(exc).__name__}"
+        )
+        logger.warning(
+            json.dumps(
+                {
+                    "event": "gateway_auth_denied",
+                    "reason": reason,
+                    "ts": int(time.time()),
+                }
+            )
+        )
+        body = _request_body(event)
+        return _deny(body if isinstance(body, dict) else {})
+
+
+def _handle(event: dict[str, Any]) -> dict[str, Any]:
+    """Verify the caller and rewrite or deny the request; see `lambda_handler`."""
     config = _load_config()
 
     gateway_request = event.get("mcp", {}).get("gatewayRequest", {})
     headers = gateway_request.get("headers") or {}
-    body = gateway_request.get("body") or {}
+    raw_body = gateway_request.get("body")
+    if raw_body is None:
+        raw_body = {}
+    if not isinstance(raw_body, dict):
+        logger.info(json.dumps({"event": "gateway_auth_denied", "reason": "body_not_an_object"}))
+        return _deny({})
+    body: dict[str, Any] = raw_body
 
     if body.get("method") == _TOOLS_LIST_METHOD:
         return _passthrough(body)
+
+    params = body.get("params")
+    if params is not None and not isinstance(params, dict):
+        logger.info(json.dumps({"event": "gateway_auth_denied", "reason": "params_not_an_object"}))
+        return _deny(body)
 
     token = _extract_bearer_token(headers)
     if token is None:

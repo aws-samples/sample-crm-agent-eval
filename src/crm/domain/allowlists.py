@@ -18,7 +18,12 @@ from typing import Final, Literal, Union, get_args, get_origin
 from crm.domain.entities import Account, Activity, Contact, Opportunity
 from crm.errors import ValidationFailed, bounded_detail_value
 from crm.store.keys import derived_source_attributes
-from crm.toolspec.definitions import TABLES, allowlist_for, high_risk_fields_for
+from crm.toolspec.definitions import (
+    TABLES,
+    allowlist_for,
+    high_risk_fields_for,
+    max_length_for,
+)
 
 #: The entity dataclass whose annotations declare each table's field value types.
 _ENTITY_FOR_TABLE: Final[dict[str, type]] = {
@@ -142,8 +147,10 @@ def validate_field_values(table: str, fields: Mapping[str, object]) -> None:
     """Reject a field value whose type, enum membership or shape the declared schema does not admit.
 
     Rejects a value whose type the entity annotation does not admit, a value outside a
-    ``Literal`` field's closed set, and a blank string for a field :func:`crm.store.keys.derive`
-    derives an index key attribute from. ``None`` is accepted for an optional field.
+    ``Literal`` field's closed set, a string longer than
+    :func:`crm.toolspec.definitions.max_length_for` its field, and a blank string for a field
+    :func:`crm.store.keys.derive` derives an index key attribute from. ``None`` is accepted for an
+    optional field.
 
     Args:
         table: A plural table name from :data:`crm.toolspec.definitions.TABLES`.
@@ -151,8 +158,8 @@ def validate_field_values(table: str, fields: Mapping[str, object]) -> None:
 
     Raises:
         ValidationFailed: When a value's type is not one the entity declares for that field, when it
-            falls outside the closed set an enum-typed field declares, or when a derived-source
-            field carries a blank string.
+            falls outside the closed set an enum-typed field declares, when a string exceeds its
+            field's length cap, or when a derived-source field carries a blank string.
         ValueError: When ``table`` is not a recognised table name.
     """
     if table not in FIELD_VALUE_TYPES:
@@ -183,6 +190,12 @@ def validate_field_values(table: str, fields: Mapping[str, object]) -> None:
                 f"Field {key!r} on {table} must be one of {permitted}.",
                 source=key,
                 detail=f"table={table} field={key} permitted={permitted}",
+            )
+        if isinstance(value, str) and len(value) > max_length_for(key):
+            raise ValidationFailed(
+                f"Field {key!r} on {table} is longer than its maximum length.",
+                source=key,
+                detail=f"table={table} field={key} max_length={max_length_for(key)}",
             )
         if key in index_sources and isinstance(value, str) and not value.strip():
             raise ValidationFailed(

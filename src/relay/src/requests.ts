@@ -80,6 +80,40 @@ export function decodeBody(event: LambdaFunctionURLEvent): TurnBody | undefined 
   };
 }
 
+/**
+ * The longest prompt, in characters (Unicode code points), a turn accepts. Equal to the Runtime's
+ * and the chat Gateway target's caps.
+ */
+export const PROMPT_MAX_CHARS = 8000;
+
+/** Sent when a prompt is longer than {@link PROMPT_MAX_CHARS}. Names the limit, not the prompt. */
+export const PROMPT_TOO_LONG_MESSAGE = `The message is longer than ${PROMPT_MAX_CHARS} characters.`;
+
+/** Whether `prompt` is within {@link PROMPT_MAX_CHARS}, counting code points as the Runtime does. */
+export function isPromptWithinCap(prompt: string): boolean {
+  let count = 0;
+  for (const _codePoint of prompt) {
+    count += 1;
+    if (count > PROMPT_MAX_CHARS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The problem with this body's `prompt` length, or `undefined` when there is none. A body with no
+ * string prompt returns `undefined`; {@link decodeBody} rejects it.
+ */
+export function promptLengthError(event: LambdaFunctionURLEvent): string | undefined {
+  const body = parseJsonBody(event);
+  const prompt = body === undefined ? undefined : body["prompt"];
+  if (typeof prompt !== "string" || isPromptWithinCap(prompt)) {
+    return undefined;
+  }
+  return PROMPT_TOO_LONG_MESSAGE;
+}
+
 /** A cancellation body: which conversation to stop, and nothing else. */
 export interface CancelBody {
   readonly sessionId: string;

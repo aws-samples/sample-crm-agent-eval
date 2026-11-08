@@ -14,9 +14,14 @@ from typing import Any
 from crm.audit import build_audit_record
 from crm.authz import Identity, require_record_scope
 from crm.domain import validate_update_fields
-from crm.errors import NotFound, bounded_detail_value
+from crm.errors import Conflict, NotFound, bounded_detail_value
 from crm.handlers._common import build_handler, now_iso
-from crm.handlers.wire import put_operation
+from crm.handlers.wire import (
+    put_operation,
+    raise_if_record_changed,
+    unchanged_since_read,
+    unchanged_since_read_values,
+)
 from crm.store.keys import derive
 from crm.store.store import Store
 
@@ -30,7 +35,7 @@ def _update_opportunity(
     fields = dict(arguments["fields"])
     validate_update_fields(_TABLE, fields)
 
-    before = store.get_item(_TABLE, {"opportunity_id": opportunity_id})
+    before = store.get_item(_TABLE, {"opportunity_id": opportunity_id}, consistent=True)
     if before is None or before.get("tenant") != identity.tenant:
         raise NotFound(
             "The opportunity does not exist.",
@@ -48,10 +53,20 @@ def _update_opportunity(
         before_snapshot=before,
         after_snapshot=after,
     )
-    store.transact_write(
-        [put_operation(_TABLE, after), put_operation("audit_records", audit.to_item())],
-        transaction_key=str(arguments["transaction_key"]),
+    record_put = put_operation(
+        _TABLE,
+        after,
+        condition=f"attribute_exists(opportunity_id) AND {unchanged_since_read(before)}",
+        values=unchanged_since_read_values(before),
     )
+    try:
+        store.transact_write(
+            [record_put, put_operation("audit_records", audit.to_item())],
+            transaction_key=str(arguments["transaction_key"]),
+        )
+    except Conflict as exc:
+        raise_if_record_changed(exc, table=_TABLE, record_id=opportunity_id)
+        raise
     return {"opportunity": after}
 
 

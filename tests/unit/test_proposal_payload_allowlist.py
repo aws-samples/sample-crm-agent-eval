@@ -46,6 +46,7 @@ from crm.store.provisioning import create_all_tables
 from crm.store.schema import table_schema
 from crm.store.store import Store
 from crm.toolspec.definitions import TABLES, allowlist_for, high_risk_fields_for
+from tests.conftest import TEST_API_CLIENT_ID
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -99,7 +100,9 @@ def _identity_block(channel: str) -> dict[str, Any]:
     }
     if channel == AGENT_IDENTITY_KEY:
         return {"claims": claims}
-    return {"authorizer": {"jwt": {"claims": claims}}}
+    return {
+        "authorizer": {"jwt": {"claims": {**claims, "token_use": "id", "aud": TEST_API_CLIENT_ID}}}
+    }
 
 
 def _event(channel: str, arguments: dict[str, Any]) -> dict[str, Any]:

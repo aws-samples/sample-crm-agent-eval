@@ -6,6 +6,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { JSX, ReactNode } from "react";
 
+import { resetUserSettingsState } from "../components/tuning/sessionTuning";
 import { loadRuntimeConfig } from "../config/runtimeConfig";
 import { CognitoAuthSession, type AuthSession } from "./CognitoAuthSession";
 import type { Identity } from "./identity";
@@ -58,6 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
 
   const signOut = useCallback(() => {
     session?.signOut();
+    resetUserSettingsState();
     setSession(undefined);
     setIdentity(undefined);
     setStatus("signed-out");

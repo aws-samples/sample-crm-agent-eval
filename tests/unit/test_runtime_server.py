@@ -42,6 +42,7 @@ from crm.errors import AuthenticationFailed
 from crm.toolspec.definitions import BY_NAME
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
 from providers.tier_tuning import WIRE_SCHEMA_VERSION
+from tests.conftest import TEST_API_CLIENT_ID
 
 
 def _identity_block(claims: dict[str, Any], *, session_id: str | None = None) -> dict[str, Any]:
@@ -1278,7 +1279,15 @@ def test_the_offline_identity_seam_is_unreachable_over_http(client: TestClient) 
     seam_payload: dict[str, Any] = {
         "requestContext": {
             "requestId": "req-1",
-            "authorizer": {"jwt": {"claims": {CLAIM_REP_ID: "rep-seam"}}},
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        CLAIM_REP_ID: "rep-seam",
+                        "token_use": "id",
+                        "aud": TEST_API_CLIENT_ID,
+                    }
+                }
+            },
         },
         "prompt": "hello",
         "session_id": "s1",

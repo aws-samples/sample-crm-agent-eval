@@ -32,6 +32,7 @@ from eval.artefacts import (
     EVAL_ARTEFACTS_SCOPE,
     PREFIX_ENV_VAR,
     ArtefactsConfig,
+    download_disposition,
     validate_artefact_key,
 )
 from eval.runs import job_row_id
@@ -348,3 +349,192 @@ def test_an_artefact_the_sweep_uploads_is_the_object_artefact_url_signs(
         status, body = _call(store, _artefact_url(run_id, relative, full=True), s3=s3)
         assert status == 200, body
         assert requests.get(body["url"], timeout=10).text == f"uploaded {relative}"
+
+
+# -- download disposition -------------------------------------------------------------------------
+
+
+def _download_url(run_id: str, key: str, download: object, **claims: bool) -> dict[str, Any]:
+    return _event(
+        {"action": "artefact_url", "run_id": run_id, "key": key, "download": download}, **claims
+    )
+
+
+class TestDownload:
+    @pytest.mark.parametrize(
+        ("key", "filename"),
+        [
+            ("matrix.md", "matrix-{run}.md"),
+            ("matrix.csv", "matrix-{run}.csv"),
+            (_RAW_KEY, "matrix-{run}.json"),
+        ],
+    )
+    def test_a_download_url_serves_the_object_as_a_named_attachment(
+        self, aws: tuple[Store, Any], key: str, filename: str
+    ) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+
+        status, body = _call(store, _download_url(run_id, key, True, full=True), s3=s3)
+
+        assert status == 200, body
+        expected = f'attachment; filename="{filename.format(run=run_id)}"'
+        query = parse_qs(urlsplit(body["url"]).query)
+        assert query["response-content-disposition"] == [expected]
+        fetched = requests.get(body["url"], timeout=10)
+        assert fetched.status_code == 200
+        assert fetched.headers["Content-Disposition"] == expected
+        assert fetched.text == f"body of {key}"
+
+    @pytest.mark.parametrize("download", [False, None])
+    def test_without_download_the_url_names_no_disposition(
+        self, aws: tuple[Store, Any], download: object
+    ) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+        body_args: dict[str, Any] = {"action": "artefact_url", "run_id": run_id, "key": "matrix.md"}
+        if download is not None:
+            body_args["download"] = download
+        status, body = _call(store, _event(body_args, full=True), s3=s3)
+        assert status == 200, body
+        assert "response-content-disposition" not in parse_qs(urlsplit(body["url"]).query)
+
+    @pytest.mark.parametrize("download", ["true", 1, None, ["x"]])
+    def test_a_non_boolean_download_is_400_before_any_presign(
+        self, aws: tuple[Store, Any], download: object
+    ) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+        status, body = _call(
+            store, _download_url(run_id, "matrix.md", download, full=True), s3=_NeverPresign()
+        )
+        assert status == 400, body
+        assert body["error"]["source"] == "download"
+
+    def test_a_caller_without_full_visibility_is_403_with_download(
+        self, aws: tuple[Store, Any]
+    ) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+        status, body = _call(store, _download_url(run_id, "matrix.md", True), s3=_NeverPresign())
+        assert status == 403
+        assert body["error"]["missing_scope"] == EVAL_ARTEFACTS_SCOPE
+
+    def test_an_unrecorded_key_is_404_with_download(self, aws: tuple[Store, Any]) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+        status, _body = _call(
+            store, _download_url(run_id, "other.md", True, full=True), s3=_NeverPresign()
+        )
+        assert status == 404
+
+    def test_download_is_refused_by_every_other_action(self, aws: tuple[Store, Any]) -> None:
+        store, s3 = aws
+        run_id = _completed_run(store, s3)
+        for body_args in (
+            {"action": "status", "run_id": run_id, "download": True},
+            {"action": "list", "download": True},
+            {"action": "submit", "download": True},
+        ):
+            status, body = _call(store, _event(body_args, full=True), s3=_NeverPresign())
+            assert status == 400, (body_args, body)
+            assert body["error"]["source"] == "arguments"
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("matrix.md", 'attachment; filename="matrix-r1.md"'),
+        ("raw/a.b.json", 'attachment; filename="matrix-r1.json"'),
+        ("raw/README", 'attachment; filename="matrix-r1"'),
+    ],
+)
+def test_download_disposition_names_matrix_run_and_the_key_suffix(key: str, expected: str) -> None:
+    assert download_disposition("r1", key) == expected
+
+
+# -- the run payload's tier table guard -----------------------------------------------------------
+
+
+def _tier_record(summary: object) -> runs.RunRecord:
+    return runs.RunRecord(
+        run_id="r-guard",
+        tenant="eval-r-guard",
+        mode="stub",
+        status="completed",
+        started_at="2026-11-06T00:00:00+00:00",
+        matrix_report={"tier_comparison": summary},
+    )
+
+
+def _unavailable_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    lines = []
+    for record in caplog.records:
+        try:
+            parsed = json.loads(record.getMessage())
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("event") == "eval_tier_table_unavailable":
+            lines.append(parsed)
+    return lines
+
+
+def test_a_summary_the_formatter_refuses_is_omitted_and_logged_with_its_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("INFO")
+    payload = _tier_record({"tiers": {}, "notes": []}).to_payload()
+    assert "tier_comparison_table" not in payload
+    assert _unavailable_lines(caplog) == [
+        {
+            "event": "eval_tier_table_unavailable",
+            "correlation_id": "r-guard",
+            "reason": "tier comparison summary field 'columns' is not a list",
+        }
+    ]
+
+
+@pytest.mark.parametrize("bug", [TypeError, KeyError, AttributeError])
+def test_a_formatter_bug_is_not_swallowed(
+    bug: type[Exception], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _broken(_summary: object) -> dict[str, object]:
+        raise bug("formatter bug")
+
+    monkeypatch.setattr(runs, "tier_comparison_table", _broken)
+    caplog.set_level("INFO")
+    with pytest.raises(bug):
+        _tier_record({"columns": [], "tiers": {}, "notes": []}).to_payload()
+    assert _unavailable_lines(caplog) == []
+
+
+def _stored_summary() -> dict[str, Any]:
+    from eval.matrix import build_matrix_result, tier_comparison
+
+    stored: dict[str, Any] = json.loads(json.dumps(tier_comparison(build_matrix_result([]))))
+    return stored
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("model_ids", [1, 2], "has a non-string model id"),
+        ("model_ids", "not-a-list", "has a non-string model id"),
+        ("efforts", [{"x": 1}], "has a non-string effort"),
+    ],
+)
+def test_a_stored_entry_with_unjoinable_lists_is_refused_as_malformed(
+    field: str, value: object, reason: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from eval.matrix import tier_comparison_table
+
+    summary = _stored_summary()
+    summary["columns"] = [{"label": "anthropic", "mode": "stub"}]
+    entry: dict[str, Any] = {"model_ids": ["m"], "efforts": ["medium"], field: value}
+    summary["tiers"] = {tier: [dict(entry)] for tier in ("supervisor", "subagent", "tool")}
+    with pytest.raises(ValueError, match=reason):
+        tier_comparison_table(summary)
+    caplog.set_level("INFO")
+    assert "tier_comparison_table" not in _tier_record(summary).to_payload()
+    (line,) = _unavailable_lines(caplog)
+    assert reason in line["reason"]

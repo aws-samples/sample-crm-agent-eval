@@ -19,7 +19,8 @@ import {
   type ApiErrorBody,
   type TokenSource,
 } from "../../api/CrmApiClient";
-import type { EvalMatrix } from "./types";
+import { TIER_COMPARISON_TIERS } from "./types";
+import type { EvalMatrix, EvalTierComparisonTable } from "./types";
 
 /**
  * The run statuses `RunRecord.to_payload()` renders (`eval.runs.JOB_STATUSES`).
@@ -105,6 +106,11 @@ export interface EvalRunStatusResponse {
   /** The parsed `matrix.json` contents, once the run has produced them. */
   readonly matrix?: EvalMatrix;
   /**
+   * The tier comparison summary as display cells, present when the run's matrix carries one. A
+   * table whose shape cannot be read is dropped at parse time and renders as unavailable.
+   */
+  readonly tier_comparison_table?: EvalTierComparisonTable;
+  /**
    * Paths/URLs to the run artifacts, once produced. `useEvalRun.toArtifactLinks` converts these to
    * the client-side `EvalArtifactLinks`.
    */
@@ -154,6 +160,11 @@ export interface EvalArtefactUrlResponse {
   readonly expires_in: number;
 }
 
+/** Options of {@link EvalRunClient.getArtefactUrl}; `download` is sent only when `true`. */
+export interface ArtefactUrlOptions {
+  readonly download?: boolean;
+}
+
 /** The most repeats one sweep may run (`eval.runs.MAX_SWEEP_REPEATS`). */
 export const MAX_SWEEP_REPEATS = 5;
 
@@ -178,8 +189,15 @@ export interface EvalRunClient {
   estimateLiveRun(repeats?: number): Promise<EvalEstimateResponse>;
   /** Requests a cooperative cancel. Admin only; the server enforces it. */
   cancelRun(runId: string): Promise<EvalCancelResponse>;
-  /** A presigned GET for one artefact of `runId`; the server checks the caller and the key. */
-  getArtefactUrl(runId: string, key: string): Promise<EvalArtefactUrlResponse>;
+  /**
+   * A presigned GET for one artefact of `runId`; the server checks the caller and the key. With
+   * `download`, the URL serves the object as an attachment.
+   */
+  getArtefactUrl(
+    runId: string,
+    key: string,
+    options?: ArtefactUrlOptions,
+  ): Promise<EvalArtefactUrlResponse>;
 }
 
 function unreadable(path: string): CrmApiError {
@@ -231,10 +249,39 @@ function isRenderableMatrix(raw: unknown): boolean {
   });
 }
 
+/** Whether `raw` is a tier comparison table: string headers, one section per tier in order, each
+ * row a list of strings as long as `headers`, and string notes. */
+function isTierComparisonTable(raw: unknown): raw is EvalTierComparisonTable {
+  const table = asRecord(raw);
+  const headers = table.headers;
+  const sections = table.sections;
+  const notes = table.notes;
+  if (!Array.isArray(headers) || headers.length < 2 || !headers.every((h) => typeof h === "string")) {
+    return false;
+  }
+  if (!Array.isArray(notes) || !notes.every((note) => typeof note === "string")) return false;
+  if (!Array.isArray(sections) || sections.length !== TIER_COMPARISON_TIERS.length) return false;
+  return sections.every((candidate: unknown, index) => {
+    const section = asRecord(candidate);
+    return (
+      section.tier === TIER_COMPARISON_TIERS[index] &&
+      typeof section.heading === "string" &&
+      Array.isArray(section.rows) &&
+      section.rows.every(
+        (row: unknown) =>
+          Array.isArray(row) &&
+          row.length === headers.length &&
+          row.every((cell: unknown) => typeof cell === "string"),
+      )
+    );
+  });
+}
+
 /**
  * Parse one run, checking the fields the page branches on (`run_id`, `status`, `is_terminal`,
  * `cancel_requested`), the figures it renders (`tasks_*`, `cost_spent_usd`) and, when present,
- * `repeats` and the matrix structure; other display fields are not validated here.
+ * `repeats` and the matrix structure; other display fields are not validated here. An unreadable
+ * `tier_comparison_table` is dropped rather than refusing the run.
  *
  * @throws CrmApiError when one of those fields is invalid.
  */
@@ -259,6 +306,11 @@ function parseRun<TResponse extends StartEvalRunResponse>(raw: unknown, path: st
     (run.matrix !== undefined && !isRenderableMatrix(run.matrix))
   ) {
     throw unreadable(path);
+  }
+  if (run.tier_comparison_table !== undefined && !isTierComparisonTable(run.tier_comparison_table)) {
+    const { tier_comparison_table: _unreadableTable, ...rest } = run;
+    void _unreadableTable;
+    return rest as unknown as TResponse;
   }
   return run as unknown as TResponse;
 }
@@ -395,8 +447,13 @@ export class HttpEvalRunClient implements EvalRunClient {
     });
   }
 
-  getArtefactUrl(runId: string, key: string): Promise<EvalArtefactUrlResponse> {
-    return this.action({ action: "artefact_url", run_id: runId, key }).then((raw) => {
+  getArtefactUrl(
+    runId: string,
+    key: string,
+    options: ArtefactUrlOptions = {},
+  ): Promise<EvalArtefactUrlResponse> {
+    const download = options.download === true ? { download: true } : {};
+    return this.action({ action: "artefact_url", run_id: runId, key, ...download }).then((raw) => {
       const response = asRecord(raw);
       if (
         typeof response.url !== "string" ||

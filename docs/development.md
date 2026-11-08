@@ -39,7 +39,7 @@ git config core.hooksPath githooks                      # or: pre-commit install
   cask `drawio`, whose CLI is `drawio`), using `drawio -x -f svg --embed-svg-images --theme light`;
   see [`docs/figures/README.md`](figures/README.md).
 - Security-relevant pins: `cryptography` 50.0.2, `PyJWT` 2.15.1, `urllib3` 2.8.0 and
-  `pytest` 9.1.1 (`requirements.txt`); `vite` 8.3.5 and `tailwindcss` 4.3.3 (`frontend/package.json`;
+  `pytest` 9.1.1 (`requirements.txt`); `vite` 8.3.6 and `tailwindcss` 4.3.5 (`frontend/package.json`;
   Tailwind 4 needs Safari 16.4, Chrome 111 or Firefox 128, see [`frontend/README.md`](../frontend/README.md)); `hashicorp/aws`
   6.71.0 (exact constraint) and `hashicorp/null` 3.3.2 (lock file only; no version constraint), in
   `infra/.terraform.lock.hcl`.

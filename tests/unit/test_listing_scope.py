@@ -16,7 +16,13 @@ from moto import mock_aws
 from crm.authz import Identity
 from crm.envelope import IDENTITY_KEY, identity_event
 from crm.errors import ScopeDenied, ValidationFailed
-from crm.handlers import pipeline_aggregate, search_accounts, search_opportunities
+from crm.handlers import (
+    list_audit_records,
+    list_proposals,
+    pipeline_aggregate,
+    search_accounts,
+    search_opportunities,
+)
 from crm.search import ACCOUNT_ID_MAX_LENGTH
 from crm.search import search_accounts as search_accounts_fn
 from crm.search import search_opportunities as search_opportunities_fn
@@ -36,7 +42,18 @@ _HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "search_opportunities": search_opportunities.handler,
     "search_accounts": search_accounts.handler,
     "pipeline_aggregate": pipeline_aggregate.handler,
+    "list_audit_records": list_audit_records.handler,
+    "list_proposals": list_proposals.handler,
 }
+
+
+def _listed_account_ids(tool: str, body: dict[str, Any]) -> list[str]:
+    """The ``account_id`` each row a listing handler returned is scoped by."""
+    if tool == "list_audit_records":
+        return [str(record["account_id"]) for record in body["audit_records"]]
+    if tool == "list_proposals":
+        return [str(proposal["before_snapshot"]["account_id"]) for proposal in body["proposals"]]
+    return [str(item["account_id"]) for item in body["items"]]
 
 
 class _SpyStore:
@@ -80,7 +97,8 @@ def _assert_denied(result: dict[str, Any], missing_scope: str) -> None:
 
 @pytest.fixture
 def store() -> Iterator[Store]:
-    """A moto-backed store seeded with one in-book and one out-of-book account and opportunity."""
+    """A moto-backed store seeded with an in-book and an out-of-book account, each with one
+    opportunity, one audit record and one pending proposal."""
     with mock_aws():
         client = boto3.client("dynamodb", region_name="us-east-1")
         create_all_tables(client)
@@ -119,6 +137,32 @@ def _seed(store: Store, *, account_id: str, opportunity_id: str) -> None:
             "tenant_owner_rep_id": tenant_prefixed(_TENANT, _REP),
             "tenant_stage": tenant_prefixed(_TENANT, "Discovery"),
             "stage_close_date": stage_close_date("Discovery", "2026-01-01"),
+        },
+    )
+    store.put_item(
+        "audit_records",
+        {
+            "audit_id": f"audit-{opportunity_id}",
+            "tenant": _TENANT,
+            "account_id": account_id,
+            "target_table": "opportunities",
+            "target_id": opportunity_id,
+            "actor_rep_id": _REP,
+            "status": "applied",
+            "created_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    store.put_item(
+        "proposals",
+        {
+            "proposal_id": f"prop-{opportunity_id}",
+            "tenant": _TENANT,
+            "status": "pending",
+            "actor_rep_id": _REP,
+            "target_table": "opportunities",
+            "target_id": opportunity_id,
+            "created_at": "2026-01-01T00:00:00Z",
+            "before_snapshot": {"tenant": _TENANT, "account_id": account_id},
         },
     )
 
@@ -166,7 +210,7 @@ def test_a_book_caller_gets_its_own_data(tool: str, store: Store) -> None:
     if tool == "pipeline_aggregate":
         assert result["body"]["value_rollup"] == 1000
     else:
-        assert [item["account_id"] for item in result["body"]["items"]] == [_IN_BOOK]
+        assert _listed_account_ids(tool, result["body"]) == [_IN_BOOK]
 
 
 @pytest.mark.parametrize("tool", sorted(_HANDLERS))
@@ -179,10 +223,7 @@ def test_a_full_visibility_caller_with_an_empty_book_gets_every_record(
     if tool == "pipeline_aggregate":
         assert result["body"]["value_rollup"] == 2000
     else:
-        assert sorted(item["account_id"] for item in result["body"]["items"]) == [
-            _IN_BOOK,
-            _OUT_OF_BOOK,
-        ]
+        assert sorted(_listed_account_ids(tool, result["body"])) == [_IN_BOOK, _OUT_OF_BOOK]
 
 
 # -- explicit account filter ----------------------------------------------------------------------

@@ -7,7 +7,7 @@ change ships; `review-PASS` rows are recorded as review findings if absent. This
 `scripts/check_plan_security_baseline.py --self-check`, which fails when a row has neither a plan-time
 assertion nor a recorded reason it cannot be one, and by `tests/unit/test_verify_security_baseline.py`.
 
-![AWS network baseline: the adopted VPC with its interface and gateway endpoints, security groups, optional egress-only NAT, flow logs, the Runtime resource policy's SourceVpce deny, KMS keys and CloudTrail; WAF and the viewer TLS 1.2 minimum are deferred](figures/security-baseline-aws-network.svg)
+![AWS network baseline: the adopted VPC with its interface and gateway endpoints, security groups, optional egress-only NAT, flow logs, the Runtime resource policy's SourceVpce deny, KMS keys and CloudTrail; the CloudFront security-headers and CSP policy is enforced, while WAF and the viewer TLS 1.2 minimum are deferred](figures/security-baseline-aws-network.svg)
 
 | Control | Requirement | Verify | Class |
 |---|---|---|---|
@@ -36,7 +36,50 @@ assertion nor a recorded reason it cannot be one, and by `tests/unit/test_verify
 | Logs | explicit retention; no secrets, tokens, or full payloads | log-group config + `scripts/check_log_redaction.py` | review-PASS |
 | Logs | KMS CMK on every log group (`kms_key_id` set, never null) | `check_plan_security_baseline.py --only logs` over the plan; `describe-log-groups \| jq '.logGroups[].kmsKeyId'` | review-PASS |
 | KMS | key usage, rotation, access policy documented | key policies and `enable_key_rotation` on every `aws_kms_key` under `infra/`, reviewed by hand | review-PASS |
-| KMS | logs, CloudTrail, frontend and eval-artefacts CMK policies deny key use to every non-service principal outside the key's allowlist, and key administration to every principal outside `crm_operator_principal_arns` and the account root | `check_plan_security_baseline.py --only store`; Layer 4 smoke `store_principal_deny` | review-PASS |
+| KMS | logs, CloudTrail, frontend, eval-artefacts and pagination-cursor CMK policies deny key use to every non-service principal outside the key's allowlist, and key administration to every principal outside `crm_operator_principal_arns` and the account root | `check_plan_security_baseline.py --only store`; Layer 4 smoke `store_principal_deny` | review-PASS |
+
+## Browser and API trust narrowing
+
+These controls narrow trust the stack already grants. Each fails closed when misconfigured.
+
+- **Content-Security-Policy.** Every CloudFront behaviour attaches the frontend module's own
+  response-headers policy, `aws_cloudfront_response_headers_policy.security_headers` in
+  `infra/modules/frontend_cdn/cloudfront.tf`. It keeps the managed security headers, with
+  `X-Frame-Options: DENY`, and adds an enforced (not report-only) CSP. `script-src` allows the site
+  and the inline theme script in `frontend/index.html` by its `sha256-` hash, which the root module
+  derives from that file at plan time. `connect-src` allows the site, the regional Cognito user-pool
+  endpoint and the hosted-UI domain. `'unsafe-inline'` appears only in `style-src`; no directive
+  allows `'unsafe-eval'`, and `frame-ancestors`, `base-uri` and `object-src` are `'none'`. A
+  misconfigured CSP makes the browser block the script or request. Plan time:
+  `tests/unit/test_infra_csp.py` and `tests/unit/test_infra_cdn.py`.
+- **Pagination cursors.** `next_cursor` values are opaque and bound to the caller (`src/crm/cursor.py`).
+  The paginating tools encrypt the DynamoDB page key with AWS KMS under an encryption context naming
+  the purpose, tenant, rep and operation, so another caller or operation cannot replay or edit it. A
+  failed check is a `validation_failed` response with `source: cursor`. The key (`aws_kms_key.cursor`
+  in `infra/main.tf`) is a customer-managed key with rotation enabled. Its policy refuses any use
+  outside the `crm-cursor` context, and refuses key use and administration to every principal outside
+  the paginating tools' roles and `crm_operator_principal_arns`. Only those tools' functions carry
+  `CRM_CURSOR_KMS_KEY_ARN`. A deployed Lambda without it refuses every cursor.
+- **API client audience.** On the `apigw` identity channel, `crm.envelope` also requires the
+  token to be issued to an allowed app client (`aud` on an ID token, `client_id` on an access token).
+  The allowed client ids come from the SSM parameter named by `CRM_API_ALLOWED_CLIENT_IDS_PARAMETER`,
+  read once per process. That parameter, `aws_ssm_parameter.api_allowed_client_ids` in `infra/main.tf`,
+  is a `String` named `/<name_prefix>/api/allowed-client-ids`, holding the SPA client id. A token from any other client gets `401`. An unset, unreadable or empty
+  allowlist admits nobody: the request fails as a server error, and neither a failed read nor an empty value is cached.
+  Unit: `tests/unit/test_envelope.py`.
+- **Refresh-token revocation at sign-out.** Every app client has token revocation enabled
+  (`enable_token_revocation` in `infra/modules/cognito/main.tf`). Signing out of the SPA starts revoking the
+  refresh token and clears the cached Cognito tokens at once (`frontend/src/auth/CognitoAuthSession.ts`);
+  a failed revocation is logged to the browser console only, and the sign-out still completes.
+- **Free-text length caps.** Every free-text string a tool accepts carries a `maxLength`
+  (`src/crm/toolspec/definitions.py`): 4000 characters for `description`, `notes`, `body` and `reason`,
+  4000 for `cursor`, 1024 for the `revert_audit_record` reason, and 256 for any other string without a
+  limit of its own (such as `transaction_key`'s 128). The cap is in
+  the generated input validator and the Gateway tool schemas alike; a longer value is a `validation_failed`
+  response (`400`).
+- **Eval run reads.** `eval_trigger`'s `estimate`, `status`, `list` and `artefact_url` actions need an admin
+  or full tenant visibility, as starting a stub sweep does; any other caller gets `403` naming the
+  `eval:trigger` scope (`artefact_url`: `eval:artefacts`). Live sweeps, `cancel` and `unlock` stay admin-only.
 
 ## Accepted wildcard and base-table grants
 

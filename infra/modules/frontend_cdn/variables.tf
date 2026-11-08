@@ -113,3 +113,23 @@ variable "caller_principal_arn" {
   description = "Role or user ARN of the principal running this plan. The key and origin-bucket policies refuse to plan unless it is a listed administrator other than the account root, so no apply can lock its own caller out."
   type        = string
 }
+
+variable "csp_script_hashes" {
+  description = "CSP source hashes (`sha256-<base64>`, unquoted) of the SPA's inline scripts, added to `script-src` beside `'self'`."
+  type        = list(string)
+
+  validation {
+    condition     = alltrue([for hash in var.csp_script_hashes : can(regex("^sha256-[A-Za-z0-9+/]{43}=$", hash))])
+    error_message = "Every csp_script_hashes entry must be `sha256-` followed by a 44-character base64 SHA-256 digest, without surrounding quotes."
+  }
+}
+
+variable "csp_connect_src_extra" {
+  description = "Origins (`https://<host>`) added to the CSP `connect-src` beside `'self'`: the endpoints the SPA calls directly, such as the regional Cognito user-pool endpoint and the hosted-UI domain."
+  type        = list(string)
+
+  validation {
+    condition     = alltrue([for origin in var.csp_connect_src_extra : can(regex("^https://[A-Za-z0-9.-]+$", origin))])
+    error_message = "Every csp_connect_src_extra entry must be a bare `https://<host>` origin: no path, port, wildcard, quote or separator."
+  }
+}

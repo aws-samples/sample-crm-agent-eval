@@ -91,6 +91,22 @@ def _matrix() -> dict[str, Any]:
     }
 
 
+def _tier_table(arms: int) -> dict[str, Any]:
+    """A `tier_comparison_table` in `eval.matrix.tier_comparison_table`'s shape for `arms` arms."""
+    return {
+        "headers": ["Metric", *(f"arm-{index}" for index in range(arms))],
+        "sections": [
+            {"tier": tier, "heading": heading, "rows": [["Model", *(["m"] * arms)]]}
+            for tier, heading in (
+                ("supervisor", "Supervisor"),
+                ("subagent", "Subagent"),
+                ("tool", "ToolCall"),
+            )
+        ],
+        "notes": [],
+    }
+
+
 class FakeEvalApi:
     """A stateful `/api/eval_trigger`: each `status` advances a running sweep by `step` tasks."""
 
@@ -130,9 +146,12 @@ class FakeEvalApi:
             return 200, dict(run)
         if action == "artefact_url":
             key = str(body["key"])
-            if key not in run.get("artifacts", {}).get("raw", []):
+            recorded = run.get("artifacts", {})
+            if key not in recorded.get("raw", []) and key != recorded.get("matrix_md"):
                 return 404, {"error": {"code": "not_found", "message": "no such artefact"}}
             url = f"https://artifacts-bucket.s3.amazonaws.com/eval-artifacts/{run['run_id']}/{key}?X-Amz-Signature=sig"
+            if body.get("download") is True:
+                url += "&response-content-disposition=attachment"
             return 200, {"run_id": run["run_id"], "key": key, "url": url, "expires_in": 300}
         if action == "cancel":
             if run["is_terminal"]:
@@ -172,7 +191,8 @@ class FakeEvalApi:
             is_terminal=True,
             teardown_status="ok",
             matrix=_matrix(),
-            artifacts={"raw": ["raw/arm-0.json", "raw/arm-1.json"]},
+            artifacts={"raw": ["raw/arm-0.json", "raw/arm-1.json"], "matrix_md": "matrix.md"},
+            tier_comparison_table=_tier_table(len(_FAMILIES)),
             cost_spent_usd=0.5 if run["mode"] == "live" else 0.0,
         )
         if self.lock == run["run_id"]:
@@ -392,6 +412,32 @@ class FakeFetch:
         return self.http_status, self.http_code
 
 
+class FakeArtefactGet:
+    """S3's answer to an https GET of a presigned artefact URL: the same bytes either way, with
+    `Content-Disposition: attachment` when the URL asked for it."""
+
+    def __init__(
+        self,
+        *,
+        disposition: str | None = 'attachment; filename="matrix-run.md"',
+        download_body: bytes = b"# matrix\n",
+        plain_body: bytes = b"# matrix\n",
+        status: int = 200,
+    ) -> None:
+        self.disposition = disposition
+        self.download_body = download_body
+        self.plain_body = plain_body
+        self.status = status
+        self.urls: list[str] = []
+
+    def __call__(self, url: str) -> tuple[int, Mapping[str, str], bytes]:
+        self.urls.append(url)
+        if "response-content-disposition" in url:
+            headers = {"content-disposition": self.disposition} if self.disposition else {}
+            return self.status, headers, self.download_body
+        return 200, {}, self.plain_body
+
+
 def _run(
     api: FakeEvalApi,
     *,
@@ -399,6 +445,7 @@ def _run(
     store: FakeStore | None = None,
     provisioner: FakeProvisioner | None = None,
     fetch: FakeFetch | None = None,
+    artefact_get: FakeArtefactGet | None = None,
 ) -> dict[str, CheckResult]:
     clock = Clock()
     results = list(
@@ -411,6 +458,7 @@ def _run(
             clock=clock,
             sleeper=clock.sleep,
             fetch=fetch or FakeFetch(),
+            artefact_get=artefact_get or FakeArtefactGet(),
         )
     )
     by_check = {r.check: r for r in results}
@@ -437,6 +485,9 @@ _STUB_FLOW_CHECKS = (
     "artefact_url_https_get_succeeds",
     "artefact_url_plain_http_denied",
     "artefact_url_tampered_key_denied",
+    "status_carries_tier_comparison_table",
+    "matrix_md_download_is_attachment",
+    "matrix_md_download_bytes_match_artefact",
     "rehearsal_tenant_empty",
     "tenant_emptied_by_the_workers_own_role",
     "demo_tenant_untouched",
@@ -2308,3 +2359,141 @@ def test_fetch_status_returns_the_status_and_the_error_code(
     responses.append(_Response(200, b"<Error><Code>AccessDenied</Code></Error>"))
     assert mod.fetch_status("https://bucket.s3.amazonaws.com/k?X-Amz-Signature=s") == (200, None)
     assert responses[-1].read_calls == 0
+
+
+# -- tier_comparison_table and the matrix.md download -------------------------------------
+
+
+_DOWNLOAD_ROWS = (
+    "status_carries_tier_comparison_table",
+    "matrix_md_download_is_attachment",
+    "matrix_md_download_bytes_match_artefact",
+)
+
+
+def _failing_download_rows(rows: Mapping[str, CheckResult]) -> set[str]:
+    return {check for check in _DOWNLOAD_ROWS if rows[check].status != "pass"}
+
+
+def test_the_tier_table_and_download_rows_pass_on_a_correct_run() -> None:
+    get = FakeArtefactGet()
+    rows = _run(FakeEvalApi(), artefact_get=get)
+    assert _failing_download_rows(rows) == set(), {c: rows[c].detail for c in _DOWNLOAD_ROWS}
+    assert len(get.urls) == 2
+    assert "response-content-disposition" in get.urls[0]
+    assert "response-content-disposition" not in get.urls[1]
+
+
+class _TableApi(FakeEvalApi):
+    def __init__(self, table: object) -> None:
+        super().__init__()
+        self.table = table
+
+    def _finish(self, run: dict[str, Any], status: str) -> None:
+        super()._finish(run, status)
+        if self.table is _ABSENT:
+            run.pop("tier_comparison_table")
+        else:
+            run["tier_comparison_table"] = self.table
+
+
+_ABSENT = object()
+
+
+def _narrow_rows() -> dict[str, Any]:
+    table = _tier_table(len(_FAMILIES))
+    table["sections"][1]["rows"] = [["Model", "m"]]
+    return table
+
+
+def _reordered() -> dict[str, Any]:
+    table = _tier_table(len(_FAMILIES))
+    table["sections"].reverse()
+    return table
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        _ABSENT,
+        "not-a-table",
+        _tier_table(len(_FAMILIES) - 1),
+        _tier_table(len(_FAMILIES) + 1),
+        {**_tier_table(len(_FAMILIES)), "headers": ["Tier", "arm-0", "arm-1"]},
+        _narrow_rows(),
+        _reordered(),
+    ],
+    ids=[
+        "absent",
+        "not-object",
+        "one-column-short",
+        "one-column-extra",
+        "no-metric",
+        "narrow-row",
+        "reordered",
+    ],
+)
+def test_a_broken_tier_table_reds_exactly_its_row(table: object) -> None:
+    rows = _run(_TableApi(table))
+    assert _failing_download_rows(rows) == {"status_carries_tier_comparison_table"}
+
+
+@pytest.mark.parametrize(
+    ("get", "reddened"),
+    [
+        (FakeArtefactGet(disposition=None), {"matrix_md_download_is_attachment"}),
+        (FakeArtefactGet(disposition="inline"), {"matrix_md_download_is_attachment"}),
+        (FakeArtefactGet(download_body=b"other"), {"matrix_md_download_bytes_match_artefact"}),
+        (
+            FakeArtefactGet(download_body=b"", plain_body=b""),
+            {"matrix_md_download_bytes_match_artefact"},
+        ),
+        (
+            FakeArtefactGet(status=403),
+            {"matrix_md_download_is_attachment", "matrix_md_download_bytes_match_artefact"},
+        ),
+    ],
+    ids=["no-disposition", "inline", "different-bytes", "empty-bytes", "download-refused"],
+)
+def test_a_broken_download_reds_exactly_its_row(get: FakeArtefactGet, reddened: set[str]) -> None:
+    rows = _run(FakeEvalApi(), artefact_get=get)
+    assert _failing_download_rows(rows) == reddened
+
+
+def test_the_download_flag_is_sent_and_a_refusal_fetches_nothing() -> None:
+    class NoDownloadApi(FakeEvalApi):
+        def __call__(
+            self, route: str, token: str | None, body: Mapping[str, Any]
+        ) -> tuple[int, dict[str, Any]]:
+            if body.get("action") == "artefact_url" and body.get("download") is True:
+                self.calls.append(dict(body))
+                return 400, {"error": {"code": "validation_failed", "message": "download"}}
+            return super().__call__(route, token, body)
+
+    get = FakeArtefactGet()
+    api = NoDownloadApi()
+    rows = _run(api, artefact_get=get)
+    assert _failing_download_rows(rows) == {
+        "matrix_md_download_is_attachment",
+        "matrix_md_download_bytes_match_artefact",
+    }
+    assert get.urls == []
+    assert any(c.get("download") is True and c.get("key") == "matrix.md" for c in api.calls)
+
+
+def test_a_run_without_a_matrix_md_artefact_fails_both_download_rows() -> None:
+    class NoMarkdownApi(FakeEvalApi):
+        def _finish(self, run: dict[str, Any], status: str) -> None:
+            super()._finish(run, status)
+            run["artifacts"].pop("matrix_md")
+
+    rows = _run(NoMarkdownApi())
+    assert _failing_download_rows(rows) == {
+        "matrix_md_download_is_attachment",
+        "matrix_md_download_bytes_match_artefact",
+    }
+
+
+def test_get_artefact_refuses_a_non_https_url() -> None:
+    with pytest.raises(ValueError, match="non-https"):
+        mod.get_artefact("http://bucket.s3.amazonaws.com/k")

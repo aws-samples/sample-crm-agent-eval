@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast, get_args
 
 from crm.authz import Identity, require_record_scope, require_scope, require_tenant
+from crm.domain.references import require_primary_contact_in_account
+from crm.domain.stages import REFUSED_TRANSITION_KINDS, STAGES, classify_transition
 from crm.errors import Conflict, CrmError, NotFound, ScopeDenied, ValidationFailed
 from crm.store.keys import derive, tenant_prefixed
 from crm.store.store import Store
@@ -268,7 +270,9 @@ def revert(
             proposal rebase (checked after scope), the target record was modified after the audit
             entry was written, the record is a create whose target still has child records (see
             :data:`_CHILD_INDEXES`), or it is a delete whose restored record's parent is absent
-            (see :func:`_refuse_while_parent_absent`).
+            (see :func:`_refuse_while_parent_absent`), or it would move an opportunity's stage by
+            a refused transition kind (see :func:`_refuse_refused_stage_move`), or it would restore a
+            dangling ``primary_contact_id`` (see :func:`_refuse_dangling_primary_contact`).
         CrmError: ``internal_error`` when the record carries an unrecognised ``action``.
         ValidationFailed: If ``reason`` is longer than :data:`_MAX_REASON_LENGTH`.
     """
@@ -299,6 +303,10 @@ def revert(
 
     if not before_snapshot:
         _refuse_while_children_exist(store, identity.tenant, target_table, target_id)
+    _refuse_refused_stage_move(target_table, before_snapshot, after_snapshot, audit_id)
+    _refuse_dangling_primary_contact(
+        store, identity, target_table, before_snapshot, after_snapshot, audit_id
+    )
 
     reversed_at = _now()
     operations = _revert_transaction_items(
@@ -322,6 +330,67 @@ def revert(
         "reversed_by": identity.rep_id,
         "reversed_reason": normalised_reason,
     }
+
+
+def _refuse_refused_stage_move(
+    target_table: str,
+    before_snapshot: dict[str, object],
+    after_snapshot: dict[str, object],
+    audit_id: str,
+) -> None:
+    """Refuse an opportunity revert whose ``after`` → ``before`` stage move is a refused kind.
+
+    Only an update revert moves a stage; snapshots without two recognised stages are not checked.
+
+    Raises:
+        Conflict: The restore would reopen a closed opportunity or move it between closed stages.
+    """
+    if target_table != "opportunities" or not before_snapshot or not after_snapshot:
+        return
+    current, restored = after_snapshot.get("stage"), before_snapshot.get("stage")
+    if current not in STAGES or restored not in STAGES:
+        return
+    kind = classify_transition(str(current), str(restored))
+    if kind in REFUSED_TRANSITION_KINDS:
+        raise Conflict(
+            "Reverting this change would reopen a closed opportunity or move it between closed "
+            "stages, which is not allowed.",
+            detail=f"audit_id={audit_id} reason=refused_stage_move kind={kind.value}",
+        )
+
+
+def _refuse_dangling_primary_contact(
+    store: Store,
+    identity: Identity,
+    target_table: str,
+    before_snapshot: dict[str, object],
+    after_snapshot: dict[str, object],
+    audit_id: str,
+) -> None:
+    """Refuse restoring an opportunity whose ``primary_contact_id`` no longer names a contact under
+    its account.
+
+    Checked only when the restore writes that reference: a delete revert, or an update revert whose
+    snapshots differ on it.
+
+    Raises:
+        Conflict: The restored contact is absent, in another tenant, or under another account.
+    """
+    if target_table != "opportunities" or not before_snapshot:
+        return
+    restored = before_snapshot.get("primary_contact_id")
+    if after_snapshot and restored == after_snapshot.get("primary_contact_id"):
+        return
+    try:
+        require_primary_contact_in_account(
+            store, identity, str(before_snapshot.get("account_id")), restored
+        )
+    except ValidationFailed as exc:
+        raise Conflict(
+            "Reverting this change would restore a primary contact that no longer exists under "
+            "the opportunity's account.",
+            detail=f"audit_id={audit_id} reason=dangling_primary_contact",
+        ) from exc
 
 
 #: For each table a create can be reverted on, the (child table, GSI) pairs whose index partition

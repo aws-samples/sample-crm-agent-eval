@@ -31,7 +31,7 @@ This is a demo and a research instrument, not a production CRM.
 
 ![Concept overview: the React SPA (served from S3 via CloudFront), external MCP clients and the in-app Strands agents reach one enforcement boundary in the CRM action Lambdas through the apigw, gateway and agent identity channels; decode_identity, the input validator, authz and store.py lead to tenant-partitioned DynamoDB; the toolspec generates the validator, the MCP tool definitions and the agent tool registry; the eval run_sweep drives agent turns and writes results](docs/figures/readme-concept-overview.svg)
 
-![AWS user plane: the browser runs the React SPA it downloads through CloudFront. CloudFront's default behaviour serves the built SPA's static files from a private S3 bucket (OAC, SSE-KMS), which is where the UI is hosted; CloudFront also sends /api/* through a VPC origin, internal ALB and execute-api endpoint to the private REST API and the CRM action Lambdas on DynamoDB, and sends /agent/* to the relay Lambda, the AgentCore Runtime and Amazon Bedrock; Cognito signs users in](docs/figures/readme-aws-user-plane.svg)
+![AWS user plane: the browser runs the React SPA it downloads through CloudFront. CloudFront's default behaviour serves the built SPA's static files from a private S3 bucket (OAC, SSE-KMS), which is where the UI is hosted; CloudFront also sends /api/* through a VPC origin, internal ALB and execute-api endpoint to the private REST API and the CRM action Lambdas on DynamoDB, which read their API client allowlist from Parameter Store, and sends /agent/* to the relay Lambda, the AgentCore Runtime and Amazon Bedrock; every behaviour carries an enforced security-headers and CSP policy; Cognito signs users in](docs/figures/readme-aws-user-plane.svg)
 
 ![AWS agent plane: MCP clients get a Cognito token and call two AgentCore Gateways; the CRM tools Gateway runs an identity interceptor and invokes one action Lambda per tool, the chat Gateway runs its own interceptor and invokes chat_with_supervisor, which calls the AgentCore Runtime; the Runtime invokes the action Lambdas and Bedrock models and pulls its image from ECR, built by CodeBuild; eval_trigger starts the eval_sweep state machine, whose sweep_task sends eval turns to the Runtime and whose sweep_control writes artefacts to S3](docs/figures/readme-aws-agent-plane.svg)
 
@@ -45,14 +45,17 @@ This is a demo and a research instrument, not a production CRM.
 - **Agents.** `src/agents/supervisor.py` handles each chat turn with direct read tools and four
   subagents: research, mutation, analytics and composer. High-risk changes go through a proposal
   that a user approves or rejects. No tool lets an agent commit one directly.
+  `docs/agent-architecture.md` describes the deployment, the agent workflow and one chat turn.
 - **Relay.** `src/relay/` is a small Node.js Lambda. It verifies the Cognito token, calls the
   AgentCore Runtime with SigV4 and streams its server-sent events back unchanged.
 - **Models.** Every model call goes through Amazon Bedrock, signed with IAM credentials. The project
   reads and accepts no vendor or Bedrock API key.
 - **Tenants.** Data is partitioned by tenant, and every index partition key includes the tenant.
 - **Hardening.** Every Lambda and the API stage run active X-Ray tracing. Every CloudFront behaviour
-  carries the AWS-managed security-headers policy (HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
-  `Referrer-Policy`, `X-XSS-Protection`). Every versioned bucket under `infra/` expires noncurrent
+  carries the module's security-headers policy (HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`, `X-XSS-Protection`) with an enforced `Content-Security-Policy`. The CSP allows
+  scripts only from the site itself plus the inline theme script, by hash, and allows connections
+  only to the site and Cognito. Every versioned bucket under `infra/` expires noncurrent
   versions (the state-backend buckets that `infra/bootstrap_state_backend.sh` creates have no
   lifecycle rule), and the CloudTrail buckets have ACLs disabled. The smoke checks send their HTTP
   requests through one opener that refuses any URL scheme but `https`; the JWKS fetch in
@@ -391,7 +394,8 @@ completion, task completion over repeats (a task counts when it passed in a stri
 repeats), accuracy, cost and latency per completed task, invocations, tokens and self-corrected
 retries at that tier. It is measurement only: columns are not sorted by any result, and no
 difference or ratio between them is computed. `matrix.json` (`tier_comparison`) and `matrix.csv`
-(`summary_*` columns) carry the same figures. `docs/eval-methodology.md` defines every row.
+(`summary_*` columns) carry the same figures. `docs/eval-methodology.md` defines every row. The
+eval dashboard's results page shows the same tables and offers the run's `matrix.md` as a download.
 
 Every model family is sent the same prompts: `config/agent_prompts/` (supervisor and subagent) and
 `config/answer_style.yaml`. Each arm's provenance records `prompt_bundle_sha256`, a digest over the
@@ -535,6 +539,8 @@ docs/           guides
 
 **Develop**
 
+- [`docs/agent-architecture.md`](docs/agent-architecture.md): where the agents run, how the
+  supervisor, subagents and tool tier divide a turn, and one chat turn end to end
 - [`docs/development.md`](docs/development.md): environment, test tiers, gates and contributor rules
 - [`.github/workflows/README.md`](.github/workflows/README.md): the CI workflows and their parity
   with GitLab CI

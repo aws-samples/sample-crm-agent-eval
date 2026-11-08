@@ -164,7 +164,7 @@ function hasForbiddenCharacter(value: string): boolean {
 }
 
 /** The longest pagination cursor (`CURSOR_MAX_LENGTH` server-side). */
-export const CURSOR_MAX_LENGTH = 2048;
+export const CURSOR_MAX_LENGTH = 4000;
 
 /** A pagination cursor: URL-safe base64. */
 export const CURSOR_PATTERN = /^[A-Za-z0-9_-]*=*$/;

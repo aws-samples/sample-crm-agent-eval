@@ -256,3 +256,32 @@ def test_an_empty_owner_filter_is_a_validation_error_not_a_crash(store: Store) -
     with pytest.raises(ValidationFailed) as raised:
         search_accounts(store, identity, owner_rep_id="")
     assert raised.value.source == "owner_rep_id"
+
+
+def test_out_of_book_accounts_below_the_budget_are_neither_counted_nor_cause_truncation(
+    store: Store,
+) -> None:
+    for index in range(5):
+        _seed_account(store, account_id=f"acct-out-{index}")
+    scoped = Identity(rep_id=_OWNER, book=frozenset({"acct-in-book"}), tenant=_TENANT)
+
+    result = search_accounts(store, scoped, limit=1)
+
+    assert result.items == []
+    assert result.examined_count == 0
+    assert result.truncated is False
+    assert result.next_cursor is None
+
+
+def test_a_search_accounts_cursor_replayed_by_another_rep_is_refused(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, EXAMINATION_BUDGET + 10)
+    first = search_accounts(store, identity, query="cascadia")
+    assert first.next_cursor is not None
+    other = Identity(rep_id="rep-2", full_visibility=True, tenant=_TENANT)
+
+    with pytest.raises(ValidationFailed) as refused:
+        search_accounts(store, other, query="cascadia", cursor=first.next_cursor)
+
+    assert refused.value.source == "cursor"

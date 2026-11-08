@@ -13,6 +13,13 @@ verified identity. The check calls `get_account` and observes the allow/deny out
 be denied, and one that would narrow scope (an empty book) must still succeed. A result that does
 not unambiguously show the expected outcome is a `fail`.
 
+Also posts a raw JSON-RPC array body carrying one well-formed `tools/call` with a valid token, and
+asserts every reply member is a refusal (a JSON-RPC error, or a `result` with `isError: true`)
+and none carries tool output (`content` or `structuredContent`) without `isError: true`, recording
+the reply's shape without its values. That no tool Lambda was invoked cannot
+be tied to one request from outside the account's logs and metrics, so that row is reported as
+`defer`.
+
 Also asserts an expired token and an underscoped token are both refused with a user-safe
 `{"error": {"code", "message"}}` body carrying no internal detail, each preceded by a premise check
 read from the token's own signature-verified claims (a past `exp`; a `scope` lacking `*/invoke`). On the provisioned
@@ -46,7 +53,7 @@ from typing import Any, Final, Protocol
 
 import jwt
 from boto3.dynamodb.types import TypeDeserializer
-from scripts.smoke.harness import CheckResult, SmokeContext, open_https, run_main
+from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, open_https, run_main
 from scripts.smoke.mfa_user import BareMfaUser, LiveBareMfaUserProvisioner
 from scripts.smoke.tenant import (
     SmokeTenant,
@@ -163,6 +170,12 @@ McpResult = dict[str, Any] | str
 #: `(method, params, token)` -> `McpResult`. The transport seam every check goes through.
 McpCaller = Callable[[str, Mapping[str, Any], str | None], McpResult]
 
+#: A decoded JSON response of any shape (a batch reply is an array), or a `str` transport failure.
+RawResult = Any
+
+#: `(raw JSON-RPC body text, token) -> RawResult`. The seam for a request `McpCaller` cannot build.
+RawCaller = Callable[[str, str | None], RawResult]
+
 #: `rep_id` a caller-supplied, forged `_identity` claims in the discard check.
 _FORGED_REP_ID = "attacker-forged-rep"
 
@@ -259,6 +272,33 @@ def default_mcp_caller(
     if not isinstance(decoded, dict):
         return f"response body is not a JSON object: {decoded!r}"
     return decoded
+
+
+def default_raw_caller(body: str, token: str | None, *, gateway_url: str = "") -> RawResult:
+    """POST `body` verbatim to the Gateway's `/mcp` endpoint and return the decoded JSON reply.
+
+    Returns the decoded JSON of any shape on any HTTP response, or a `str` when no response was
+    received or the body is not JSON. `gateway_url` falls back to `CRM_SMOKE_GATEWAY_URL`.
+    """
+    base_url = gateway_url or os.environ.get("CRM_SMOKE_GATEWAY_URL", "")
+    url = base_url.rstrip("/") + "/mcp" if base_url else base_url
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(  # noqa: S310 - internal seam, no untrusted URL
+        url, data=body.encode("utf-8"), headers=headers, method="POST"
+    )
+    try:
+        with open_https(request, timeout=30) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as exc:
+        return f"transport error calling {url}: {exc}"
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return f"response body is not valid JSON: {raw!r}"
 
 
 def _token_from_env_or_flag(argv: Sequence[str] | None) -> str | None:
@@ -867,6 +907,137 @@ def _call_identity_discard_tool(
     return caller(
         "tools/call", {"name": _mcp_name_for(mcp_names, tool), "arguments": arguments}, token
     )
+
+
+#: `result` members that carry a tool call's output.
+_TOOL_OUTPUT_KEYS: Final[frozenset[str]] = frozenset({"content", "structuredContent"})
+
+#: `defer_reason` for the no-invocation row: no per-request signal ties a Lambda invocation to the
+#: array-body request.
+_NO_INVOCATION_SIGNAL_DEFER_REASON: Final[str] = "no_per_request_invocation_signal"
+
+
+def _array_body(mcp_names: Mapping[str, str], account_id: str) -> str:
+    """A JSON-RPC array body holding one well-formed `get_account` `tools/call`."""
+    tool = _identity_discard_tool()
+    call = {
+        "jsonrpc": "2.0",
+        "id": "smoke-array-body",
+        "method": "tools/call",
+        "params": {
+            "name": _mcp_name_for(mcp_names, tool),
+            "arguments": {**_arguments_for(tool), "account_id": account_id},
+        },
+    }
+    return json.dumps([call])
+
+
+def _value_shape(value: object) -> str:
+    """Name `value`'s JSON type; an object also lists its sorted keys, never its values."""
+    if isinstance(value, Mapping):
+        return "object{" + ",".join(sorted(str(key) for key in value)) + "}"
+    if isinstance(value, list):
+        return f"array[{len(value)}]"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int | float):
+        return "number"
+    if value is None:
+        return "null"
+    return "string" if isinstance(value, str) else type(value).__name__
+
+
+def _reply_shape(reply: RawResult) -> str:
+    """Describe `reply`'s structure: per member, its keys, value types, error code and `isError`."""
+    if isinstance(reply, str):
+        return "no JSON reply"
+    members = reply if isinstance(reply, list) else [reply]
+    described: list[str] = []
+    for member in members:
+        if not isinstance(member, Mapping):
+            described.append(_value_shape(member))
+            continue
+        fields = ", ".join(f"{key}:{_value_shape(member[key])}" for key in sorted(member))
+        error = member.get("error")
+        code = error.get("code") if isinstance(error, Mapping) else None
+        suffix = f" error.code={code!r}" if code is not None else ""
+        result = member.get("result")
+        is_error = result.get("isError") if isinstance(result, Mapping) else None
+        if isinstance(is_error, bool):
+            suffix += f" result.isError={is_error}"
+        described.append("{" + fields + "}" + suffix)
+    prefix = f"array[{len(members)}] " if isinstance(reply, list) else ""
+    return prefix + "; ".join(described)
+
+
+def _array_body_problems(reply: RawResult) -> list[str]:
+    """Every way `reply` shows a tool call answered, or cannot be judged; empty when neither.
+
+    A member is a refusal when it carries a JSON-RPC `error` or a `result` whose `isError` is
+    true; a `result` carrying tool output without `isError: true` is a tool call answered.
+    """
+    if isinstance(reply, str):
+        return [reply]
+    members = reply if isinstance(reply, list) else [reply]
+    problems: list[str] = []
+    for member in members:
+        if not isinstance(member, Mapping):
+            problems.append(f"reply member is not a JSON object: {_value_shape(member)}")
+            continue
+        result = member.get("result")
+        if not isinstance(result, Mapping) or result.get("isError") is True:
+            continue
+        output = sorted(_TOOL_OUTPUT_KEYS & set(result))
+        if output:
+            problems.append(
+                f"the reply's `result` carries tool-call output ({', '.join(output)}) without "
+                "`isError: true`: a tool call was answered"
+            )
+    return problems
+
+
+def _check_array_body_answers_no_tool_call(
+    raw_caller: RawCaller, token: str | None, *, account_id: str, mcp_names: Mapping[str, str]
+) -> list[CheckResult]:
+    """Post a JSON-RPC array body with a valid token; assert no tool call is answered.
+
+    Emits `array_body_answers_no_tool_call` and the deferred `array_body_reaches_no_tool`.
+    """
+    check = "array_body_answers_no_tool_call"
+    if token is None:
+        refused = CheckResult(
+            resource=RESOURCE_CLASS,
+            check=check,
+            status="fail",
+            detail="no access token, so the array body could not be sent with a valid one",
+        )
+    else:
+        reply = raw_caller(_array_body(mcp_names, account_id), token)
+        problems = _array_body_problems(reply)
+        shape = f"reply shape: {_reply_shape(reply)}"
+        refused = CheckResult(
+            resource=RESOURCE_CLASS,
+            check=check,
+            status="fail" if problems else "pass",
+            detail="; ".join([*problems, shape])
+            if problems
+            else (
+                "a JSON-RPC array body carrying a valid get_account tools/call was answered with "
+                f"no tool-call output; {shape}"
+            ),
+        )
+    no_tool = CheckResult(
+        resource=RESOURCE_CLASS,
+        check="array_body_reaches_no_tool",
+        status=DEFER,
+        defer_reason=_NO_INVOCATION_SIGNAL_DEFER_REASON,
+        detail=(
+            "NOT VERIFIED: no signal outside the account's logs and metrics ties one Lambda "
+            "invocation to this request, and other checks invoke the same tool. The in-band "
+            "evidence is array_body_answers_no_tool_call's reply carrying no tool-call output"
+        ),
+    )
+    return [refused, no_tool]
 
 
 def _is_success(result: McpResult) -> bool:
@@ -1598,6 +1769,7 @@ def checks(
     sleeper: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
     jwks_url: str | None = None,
+    raw_caller: RawCaller | None = None,
 ) -> Iterable[CheckResult]:
     """Yield one `CheckResult` per (tool-or-resource-class, check) pair.
 
@@ -1625,6 +1797,7 @@ def checks(
         clock: Seam the expiry assertions read the current time from.
         jwks_url: JWKS endpoint the expired and underscoped tokens are verified against; the
             pool's by default.
+        raw_caller: Raw-body transport seam override for the array-body check.
     """
     gateway_url = ctx.outputs.require_str("agentcore_gateway_url")
     caller = (
@@ -1635,6 +1808,11 @@ def checks(
     wait = sleeper if sleeper is not None else time.sleep
     now = clock if clock is not None else time.time
     verifiers = token_verifiers(ctx, jwks_url=jwks_url)
+    raw = (
+        raw_caller
+        if raw_caller is not None
+        else functools.partial(default_raw_caller, gateway_url=gateway_url)
+    )
 
     if token is not None or provisioner is None:
         return _gateway_checks(
@@ -1647,6 +1825,7 @@ def checks(
             sleeper=wait,
             clock=now,
             verifiers=verifiers,
+            raw_caller=raw,
         )
 
     # Minted before the tenant is seeded, so the run's own work ages it.
@@ -1671,6 +1850,7 @@ def checks(
         sleeper=wait,
         clock=now,
         verifiers=verifiers,
+        raw_caller=raw,
     )
 
 
@@ -1685,6 +1865,7 @@ def _provisioned_checks(
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
     verifiers: TokenVerifiers,
+    raw_caller: RawCaller,
 ) -> list[CheckResult]:
     """Provision the underscoped user and the service principal's fixture, run every check, then
     always clean both up.
@@ -1764,6 +1945,7 @@ def _provisioned_checks(
                 sleeper=sleeper,
                 clock=clock,
                 verifiers=verifiers,
+                raw_caller=raw_caller,
                 expired_reason=expired_reason,
                 underscoped_reason=(
                     f"underscoped token ({underscoped_error})"
@@ -1790,10 +1972,11 @@ def _gateway_checks(
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
     verifiers: TokenVerifiers,
+    raw_caller: RawCaller,
     expired_reason: str = _OPERATOR_EXPIRED_REASON,
     underscoped_reason: str = _OPERATOR_UNDERSCOPED_REASON,
 ) -> list[CheckResult]:
-    """Run the inventory, per-tool invoke, identity-discard, and refusal checks, in that order.
+    """Run the inventory, per-tool invoke, identity-discard, array-body and refusal checks, in order.
 
     The expired token is presented only after it has aged past its own `exp`, and each refusal is
     preceded by a premise check read from the token's own verified claims.
@@ -1814,6 +1997,11 @@ def _gateway_checks(
             in_book_account=in_book_account,
             out_of_book_account=out_of_book_account,
             mcp_names=mcp_names,
+        )
+    )
+    results.extend(
+        _check_array_body_answers_no_tool_call(
+            raw_caller, token, account_id=in_book_account, mcp_names=mcp_names
         )
     )
 

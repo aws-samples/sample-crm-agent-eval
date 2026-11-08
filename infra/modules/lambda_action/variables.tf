@@ -225,6 +225,45 @@ variable "dynamodb_kms_grant_enabled" {
   default     = false
 }
 
+variable "config_parameter_arns" {
+  description = "SSM parameter ARNs the function reads at runtime. Each is granted `ssm:GetParameter` in the `<function_name>-logs` policy; no wildcard."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.config_parameter_arns : can(regex("^arn:aws[a-z-]*:ssm:[a-z0-9-]+:[0-9]{12}:parameter/[A-Za-z0-9_./-]+$", arn))
+    ])
+    error_message = "Each config_parameter_arns entry must be one fully-qualified SSM parameter ARN with no wildcard."
+  }
+}
+
+variable "cursor_kms_key_arn" {
+  description = <<-EOT
+    ARN of the customer-managed KMS key that seals pagination cursors. The role's
+    `<function_name>-dynamodb-kms` policy grants `kms:Encrypt` and `kms:Decrypt` on it only with the
+    encryption context `purpose = crm-cursor`. Required when `cursor_kms_grant_enabled` is true.
+  EOT
+  type        = string
+  default     = null
+}
+
+variable "cursor_kms_grant_enabled" {
+  description = "Whether the `<function_name>-dynamodb-kms` policy also grants use of `cursor_kms_key_arn`, as a plan-time-known flag. Requires `dynamodb_kms_grant_enabled`."
+  type        = bool
+  default     = false
+
+  validation {
+    condition     = !var.cursor_kms_grant_enabled || var.cursor_kms_key_arn != null
+    error_message = "cursor_kms_grant_enabled is true but cursor_kms_key_arn is null: the cursor grant would name no key."
+  }
+
+  validation {
+    condition     = !var.cursor_kms_grant_enabled || var.dynamodb_kms_grant_enabled
+    error_message = "cursor_kms_grant_enabled requires dynamodb_kms_grant_enabled: the cursor grant is a statement of the `<function_name>-dynamodb-kms` policy."
+  }
+}
+
 variable "table_action_role_matrix_entries" {
   description = <<-EOT
     This instantiation's rows in the project-wide table × action × role matrix. Each entry records, for

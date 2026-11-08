@@ -57,12 +57,13 @@ from botocore.exceptions import (  # noqa: E402
     ClientError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    HTTPClientError,
     NoCredentialsError,
     ProfileNotFound,
 )
 
 from crm.authz import DEMO_TENANT  # noqa: E402
-from crm.errors import CrmError, NotFound, TableNotFound  # noqa: E402
+from crm.errors import CrmError, NotFound, ServiceBusy, TableNotFound  # noqa: E402
 from crm.store.schema import TENANT_SCOPED_TABLES  # noqa: E402
 from crm.store.store import Store  # noqa: E402
 from eval.tenancy import (  # noqa: E402
@@ -99,13 +100,38 @@ _UNREACHABLE_FAILURES: Final[tuple[type[Exception], ...]] = (
 )
 
 
+#: SDK transport failures that `Store` re-raises as `ServiceBusy`; found through the cause chain.
+_CONNECTION_CAUSES: Final[tuple[type[Exception], ...]] = (
+    EndpointConnectionError,
+    ConnectTimeoutError,
+    HTTPClientError,
+)
+
+
+def _raised_from_connection_failure(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc.__cause__ or exc.__context__
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _CONNECTION_CAUSES):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def is_unreachable_failure(exc: BaseException) -> bool:
     """Whether ``exc`` proves the store was never reached or never provisioned.
 
     ``True`` earns the exit-``3`` "verified nothing" disposition; anything else is a failure of a
     store that answered.
+
+    A :class:`crm.errors.ServiceBusy` that :class:`crm.store.store.Store` raised from a connection
+    failure (:data:`_CONNECTION_CAUSES` anywhere in its cause chain) counts as unreachable too; one
+    with any other cause, or none, is an answer.
     """
-    return isinstance(exc, _UNREACHABLE_FAILURES)
+    if isinstance(exc, _UNREACHABLE_FAILURES):
+        return True
+    return isinstance(exc, ServiceBusy) and _raised_from_connection_failure(exc)
 
 
 class CensusUnreadableError(RuntimeError):

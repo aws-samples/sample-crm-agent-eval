@@ -64,12 +64,12 @@ _ENTITY_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9_
 FILTER_MAX_COUNT: Final[int] = 16
 FIELD_NAME_MAX_LENGTH: Final[int] = 64
 FILTER_VALUE_MAX_LENGTH: Final[int] = 256
-CURSOR_MAX_LENGTH: Final[int] = 2048
+CURSOR_MAX_LENGTH: Final[int] = 4000
 
 #: A filter key or sort field: a lower-case snake-case attribute name.
 _FIELD_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"[a-z][a-z0-9_]*")
 
-#: A pagination cursor: URL-safe base64, as :func:`crm.search.encode_cursor` emits.
+#: A pagination cursor: URL-safe base64, as :func:`crm.cursor.encode_cursor` emits.
 _CURSOR_PATTERN: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_\-]*=*")
 
 #: Characters a string filter value may not carry: C0/C1 controls and the Unicode line separators.

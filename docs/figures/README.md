@@ -1,6 +1,6 @@
 # Figures
 
-See also: [documentation map](../../README.md#documentation). Pages embedding these figures: [README](../../README.md) · [development](../development.md) · [evaluation methodology](../eval-methodology.md) · [MCP client guide](../mcp-client-guide.md) · [relay artefact](../relay-artefact.md) · [runbook](../runbook.md) · [security baseline](../security-baseline.md)
+See also: [documentation map](../../README.md#documentation). Pages embedding these figures: [README](../../README.md) · [agent architecture](../agent-architecture.md) · [development](../development.md) · [evaluation methodology](../eval-methodology.md) · [MCP client guide](../mcp-client-guide.md) · [relay artefact](../relay-artefact.md) · [runbook](../runbook.md) · [security baseline](../security-baseline.md)
 
 Each figure is a draw.io source (`<name>.drawio`) next to its SVG export (`<name>.svg`); the
 markdown pages link the SVG. Edit the source, then re-export; never edit an SVG by hand.

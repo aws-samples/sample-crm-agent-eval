@@ -245,6 +245,14 @@ PENDING_RECAPTURE_ABSENT_TYPES: frozenset[str] = frozenset()
 #: together with the gate's entries.
 PENDING_RECAPTURE_LAGGING_COUNTS: frozenset[str] = frozenset()
 
+#: Grants declared in `FIXTURE_STALE_GRANTS` until the compliant fixture is re-captured; emptied
+#: together with the gate's entries.
+PENDING_RECAPTURE_STALE_GRANTS: frozenset[str] = frozenset()
+
+#: Grants declared in `FIXTURE_PENDING_GRANTS` until the compliant fixture is re-captured; emptied
+#: together with the gate's entries.
+PENDING_RECAPTURE_PENDING_GRANTS: frozenset[str] = frozenset()
+
 SOURCE_DERIVED_CONTROLS: dict[str, str] = {
     "no_json_syntax_terraform": "Its subject is the file listing of `infra/`, not a plan, so no plan "
     "fixture can violate it. `TestNoJsonSyntaxTerraform` plants a `.tf.json` in a tmp `infra/` and "
@@ -6116,6 +6124,13 @@ class TestFixtureLagDeclarations:
             for k, v in gate.FIXTURE_LAGGING_COUNTS.items()
             if k not in PENDING_RECAPTURE_LAGGING_COUNTS
         }
+        assert set(gate.FIXTURE_STALE_GRANTS) == PENDING_RECAPTURE_STALE_GRANTS
+        assert set(gate.FIXTURE_PENDING_GRANTS) == PENDING_RECAPTURE_PENDING_GRANTS
+        for name, pending in (
+            ("FIXTURE_STALE_GRANTS", PENDING_RECAPTURE_STALE_GRANTS),
+            ("FIXTURE_PENDING_GRANTS", PENDING_RECAPTURE_PENDING_GRANTS),
+        ):
+            declarations[name] = {k: v for k, v in getattr(gate, name).items() if k not in pending}
         assert {name: value for name, value in declarations.items() if value} == {}
         lag = [
             f
@@ -6137,7 +6152,9 @@ class TestFixtureLagDeclarations:
         failed = self._failed_subjects(self._findings("dynamodb_leading_keys_isolation", document))
         assert "approve_proposal -> accounts (action coverage)" in failed, failed
         monkeypatch.setattr(
-            gate, "FIXTURE_STALE_GRANTS", {"approve_proposal:accounts:dynamodb:PutItem": "planted"}
+            gate,
+            "FIXTURE_STALE_GRANTS",
+            {**gate.FIXTURE_STALE_GRANTS, "approve_proposal:accounts:dynamodb:PutItem": "planted"},
         )
         findings = self._findings("dynamodb_leading_keys_isolation", document)
         assert not self._failed_subjects(findings), self._failed_subjects(findings)
@@ -6173,7 +6190,13 @@ class TestFixtureLagDeclarations:
         monkeypatch.setattr(
             gate,
             "FIXTURE_PENDING_GRANTS",
-            {"eval-trigger:eval_runs:dynamodb:Query": ("planted", "eval_trigger_eval_runs_grants")},
+            {
+                **gate.FIXTURE_PENDING_GRANTS,
+                "eval-trigger:eval_runs:dynamodb:Query": (
+                    "planted",
+                    "eval_trigger_eval_runs_grants",
+                ),
+            },
         )
         findings = self._findings("dynamodb_leading_keys_isolation", document)
         assert not self._failed_subjects(findings), self._failed_subjects(findings)
@@ -7694,11 +7717,11 @@ class TestBootstrapParity:
 
 
 class TestStoreKeyPolicyCount:
-    """`aws_kms_key_policy` expects 3, and the committed fixture plans 3 with no lagging entry."""
+    """`aws_kms_key_policy` expects 4, and the committed fixture plans 4."""
 
-    def test_the_expected_and_declared_counts_are_three(self) -> None:
-        assert gate.EXPECTED_RESOURCE_COUNTS["aws_kms_key_policy"].fixed == 3
-        assert gate.DECLARED_INFRA_BLOCK_COUNTS['resource "aws_kms_key_policy"'][0] == 3
+    def test_the_expected_and_declared_counts_are_four(self) -> None:
+        assert gate.EXPECTED_RESOURCE_COUNTS["aws_kms_key_policy"].fixed == 4
+        assert gate.DECLARED_INFRA_BLOCK_COUNTS['resource "aws_kms_key_policy"'][0] == 4
         rows = {
             f.resource: f.status
             for f in gate.check_declared_infra_block_counts(gate.Plan(resource_changes=[]))
@@ -7713,23 +7736,30 @@ class TestStoreKeyPolicyCount:
         ]
         return row
 
-    def test_the_recaptured_fixture_plans_three_and_the_count_passes(self) -> None:
+    def test_the_fixture_plans_four_and_the_count_passes(self) -> None:
         planned = sum(
             1
             for r in load_plan("compliant").resource_changes
             if r.get("type") == "aws_kms_key_policy"
         )
-        assert planned == 3
+        assert planned == 4
         assert "aws_kms_key_policy" not in gate.FIXTURE_LAGGING_COUNTS
         assert self._count_row(load_plan("compliant")).status == "pass"
 
-    def test_a_plan_with_two_or_four_fails(self) -> None:
+    def _with_extra(self, document: dict[str, Any], count: int) -> Any:
+        policy = next(r for r in document["resource_changes"] if r["type"] == "aws_kms_key_policy")
+        extra = [
+            copy.deepcopy(policy) | {"address": f"aws_kms_key_policy.planted_{index}"}
+            for index in range(count)
+        ]
+        return _plan_of(document | {"resource_changes": [*document["resource_changes"], *extra]})
+
+    def test_a_plan_with_four_passes_and_three_or_five_fails(self) -> None:
         document = plan_fixtures.build("compliant")
         policy = next(r for r in document["resource_changes"] if r["type"] == "aws_kms_key_policy")
-        fourth = copy.deepcopy(policy) | {"address": "aws_kms_key_policy.planted_fourth"}
-        more = [*document["resource_changes"], fourth]
         fewer = [r for r in document["resource_changes"] if r is not policy]
-        assert self._count_row(_plan_of(document | {"resource_changes": more})).status == "fail"
+        assert self._count_row(_plan_of(document)).status == "pass"
+        assert self._count_row(self._with_extra(document, 1)).status == "fail"
         assert self._count_row(_plan_of(document | {"resource_changes": fewer})).status == "fail"
 
     def test_a_lagging_declaration_defers_only_the_count_it_declares(
@@ -7741,16 +7771,17 @@ class TestStoreKeyPolicyCount:
             document
             | {"resource_changes": [r for r in document["resource_changes"] if r is not policy]}
         )
-        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (2, "lagging")})
+        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (3, "lagging")})
         assert self._count_row(fewer).status == "deferred"
         assert self._count_row(load_plan("compliant")).status == "pass"
+        assert self._count_row(self._with_extra(document, 1)).status == "fail"
 
-    def test_a_reintroduced_lagging_entry_is_stale_against_the_recaptured_fixture(
+    def test_a_wrong_lagging_count_is_stale_against_the_fixture(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         row = "(declared-lagging) aws_kms_key_policy"
         assert row not in {f.resource for f in gate.check_fixture_currency()}
-        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (2, "stale")})
+        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (3, "stale")})
         assert {f.resource: f.status for f in gate.check_fixture_currency()}[row] == "fail"
 
 

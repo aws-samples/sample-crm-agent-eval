@@ -3,11 +3,11 @@
  * The signed-in user's per-tier tuning: one `{family, model, effort}` selection per tier, persisted
  * server-side through `POST /api/user_settings` and mirrored in memory here.
  *
- * {@link loadUserSettings} fetches the saved settings once per page load, {@link saveUserSettings}
- * and {@link resetUserSettings} write them, and the store adopts the server's view only after the
- * server accepts it. The chat surface reads `getSessionTuning()` once per new turn, so a change
- * applies to the next turn and never to one already streaming. Nothing here touches browser
- * storage.
+ * {@link loadUserSettings} fetches the saved settings once per sign-in, {@link saveUserSettings}
+ * and {@link resetUserSettings} write them, {@link resetUserSettingsState} forgets them at
+ * sign-out, and the store adopts the server's view only after the server accepts it. The chat
+ * surface reads `getSessionTuning()` once per new turn, so a change applies to the next turn and
+ * never to one already streaming. Nothing here touches browser storage.
  *
  * {@link useTuningEditor} is the editing state shared by the settings page and the assistant
  * panel: a pending copy, client-side validation, and server rejections mapped onto the offending
@@ -97,6 +97,7 @@ const INITIAL_STATE: StoreState = { tuning: EMPTY_TUNING, settings: { status: "i
 
 let state: StoreState = INITIAL_STATE;
 let inFlightLoad: Promise<void> | null = null;
+let loadGeneration = 0;
 const listeners = new Set<() => void>();
 
 function update(next: Partial<StoreState>): void {
@@ -171,17 +172,22 @@ export function resetSessionTuning(): void {
 }
 
 /**
- * Fetch the saved settings once per page load. Later calls resolve with the first call's result;
+ * Fetch the saved settings once per sign-in. Later calls resolve with the first call's result;
  * a failed load may be retried.
  */
 export function loadUserSettings(client: SettingsClient): Promise<void> {
   if (state.settings.status === "ready") return Promise.resolve();
   if (inFlightLoad !== null) return inFlightLoad;
   update({ settings: { status: "loading" } });
-  inFlightLoad = client
+  const generation = loadGeneration;
+  const isCurrent = (): boolean => generation === loadGeneration;
+  const load = client
     .getUserSettings()
-    .then(adoptView)
+    .then((view) => {
+      if (isCurrent()) adoptView(view);
+    })
     .catch((err: unknown) => {
+      if (!isCurrent()) return;
       update({
         settings: {
           status: "error",
@@ -190,19 +196,44 @@ export function loadUserSettings(client: SettingsClient): Promise<void> {
       });
     })
     .finally(() => {
-      inFlightLoad = null;
+      if (isCurrent()) inFlightLoad = null;
     });
-  return inFlightLoad;
+  inFlightLoad = load;
+  return load;
 }
 
-/** Save `tuning` to the server and adopt the server's view. Rejects with the server's error. */
+/**
+ * Return the store to its never-loaded state and notify subscribers, so the next
+ * {@link loadUserSettings} fetches afresh. A load, save or reset still in flight is abandoned: its
+ * result is discarded when it settles.
+ */
+export function resetUserSettingsState(): void {
+  loadGeneration += 1;
+  inFlightLoad = null;
+  update(INITIAL_STATE);
+}
+
+/** Adopt `view` only if {@link resetUserSettingsState} has not run since `generation` was read. */
+function adoptViewIfCurrent(generation: number, view: UserSettingsView): void {
+  if (generation === loadGeneration) adoptView(view);
+}
+
+/**
+ * Save `tuning` to the server and adopt the server's view. Rejects with the server's error. A
+ * response arriving after {@link resetUserSettingsState} is discarded.
+ */
 export async function saveUserSettings(client: SettingsClient, tuning: SessionTuning): Promise<void> {
-  adoptView(await client.saveUserSettings({ tuning: wireTuningBlock(tuning) }));
+  const generation = loadGeneration;
+  adoptViewIfCurrent(generation, await client.saveUserSettings({ tuning: wireTuningBlock(tuning) }));
 }
 
-/** Delete the saved settings and adopt the server's defaults. Rejects with the server's error. */
+/**
+ * Delete the saved settings and adopt the server's defaults. Rejects with the server's error. A
+ * response arriving after {@link resetUserSettingsState} is discarded.
+ */
 export async function resetUserSettings(client: SettingsClient): Promise<void> {
-  adoptView(await client.resetUserSettings());
+  const generation = loadGeneration;
+  adoptViewIfCurrent(generation, await client.resetUserSettings());
 }
 
 /** React hook binding a component to the current tuning, re-rendering on change. */
@@ -341,5 +372,6 @@ export function useTuningEditor(matrix: CapabilityMatrix, client: SettingsClient
 export function __resetSessionTuningForTests(): void {
   state = INITIAL_STATE;
   inFlightLoad = null;
+  loadGeneration += 1;
   listeners.clear();
 }

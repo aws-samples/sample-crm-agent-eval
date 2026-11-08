@@ -201,7 +201,9 @@ before the intro line, `## Reading these figures` and the per-arm sections, whic
 unchanged. `matrix.json` carries the same figures as its first key, `tier_comparison`, with
 `columns`, `tiers` (`supervisor`, `subagent`, `tool`) and `notes`. `matrix.csv` carries them as
 `summary_*` columns after every existing column, with each arm's values repeated on each of its task
-rows. `eval.matrix.tier_comparison` builds all three from the arm records.
+rows. `eval.matrix.tier_comparison` builds all three from the arm records. The summary tables
+themselves come from `eval.matrix.tier_comparison_table`, which the CLI's `matrix.md` and the eval
+dashboard both render.
 
 There are three tables, Supervisor, Subagent and ToolCall, each with one column per arm in run order.
 Columns are never re-sorted. A column is headed by the arm's family. When a family has more than one

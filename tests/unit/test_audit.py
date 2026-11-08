@@ -988,3 +988,187 @@ def test_the_delete_revert_parent_read_is_consistent(
 
     assert ("accounts", True) in reads
     assert ("accounts", False) not in reads
+
+
+# -- stage moves a revert may not make ------------------------------------------------------
+
+
+def _put_stage_update_record(
+    store: Store, identity: Identity, *, before_stage: str, after_stage: str, audit_id: str
+) -> None:
+    snapshot = {
+        "opportunity_id": "opp-1",
+        "tenant": "demo",
+        "account_id": "acc-1",
+        "name": "Acme Renewal",
+        "value": 50000,
+    }
+    record = build_audit_record(
+        identity=identity,
+        target_table="opportunities",
+        target_id="opp-1",
+        before_snapshot={**snapshot, "stage": before_stage},
+        after_snapshot={**snapshot, "stage": after_stage},
+        audit_id=audit_id,
+    )
+    store.put_item("audit_records", record.to_item())
+
+
+@pytest.mark.parametrize(
+    ("before_stage", "after_stage"),
+    [("Negotiation", "Closed Won"), ("Discovery", "Closed Lost"), ("Closed Lost", "Closed Won")],
+    ids=["reopen-won", "reopen-lost", "closed-lateral"],
+)
+def test_revert_that_would_make_a_refused_stage_move_is_a_conflict_writing_nothing(
+    store: Store, identity: Identity, before_stage: str, after_stage: str
+) -> None:
+    _seed_opportunity(store, stage=after_stage)
+    _put_stage_update_record(
+        store, identity, before_stage=before_stage, after_stage=after_stage, audit_id="audit-close"
+    )
+
+    with pytest.raises(Conflict) as raised:
+        revert(identity, store, audit_id="audit-close", transaction_key="tx-refused-stage")
+
+    assert "closed" in raised.value.message
+    opportunity = store.get_item("opportunities", {"opportunity_id": "opp-1"})
+    assert opportunity is not None and opportunity["stage"] == after_stage
+    audit = store.get_item("audit_records", {"audit_id": "audit-close"})
+    assert audit is not None and audit["status"] == "active"
+
+
+def test_revert_of_a_regression_still_restores_the_earlier_stage(
+    store: Store, identity: Identity
+) -> None:
+    _seed_opportunity(store, stage="Discovery")
+    _put_stage_update_record(
+        store,
+        identity,
+        before_stage="Qualification",
+        after_stage="Discovery",
+        audit_id="audit-regress",
+    )
+
+    result = revert(identity, store, audit_id="audit-regress", transaction_key="tx-regress")
+
+    assert result["status"] == "reversed"
+    opportunity = store.get_item("opportunities", {"opportunity_id": "opp-1"})
+    assert opportunity is not None and opportunity["stage"] == "Qualification"
+
+
+# -- a restored primary contact must still exist under the opportunity's account -------------
+
+
+def _put_contact_update_record(
+    store: Store, identity: Identity, *, before_contact: str | None, after_contact: str | None
+) -> str:
+    base = {**_opportunity(), "stage": "Discovery"}
+    record = build_audit_record(
+        identity=identity,
+        target_table="opportunities",
+        target_id="opp-1",
+        before_snapshot={**base, "primary_contact_id": before_contact},
+        after_snapshot={**base, "primary_contact_id": after_contact},
+        audit_id="audit-contact",
+    )
+    store.put_item("audit_records", record.to_item())
+    return "audit-contact"
+
+
+def _seed_opportunity_naming(store: Store, contact_id: str | None) -> None:
+    store.put_item(
+        "opportunities", {**_opportunity(), "stage": "Discovery", "primary_contact_id": contact_id}
+    )
+
+
+@pytest.mark.parametrize(
+    "restored_contact",
+    [
+        {},
+        {"contact_id": "con-old", "tenant": "demo", "account_id": "acc-other", "name": "Elsewhere"},
+        {"contact_id": "con-old", "tenant": "other", "account_id": "acc-1", "name": "Foreign"},
+    ],
+    ids=["deleted", "other-account", "other-tenant"],
+)
+def test_update_revert_restoring_a_dangling_primary_contact_is_a_conflict_writing_nothing(
+    store: Store, identity: Identity, restored_contact: dict[str, object]
+) -> None:
+    if restored_contact:
+        store.put_item("contacts", restored_contact)
+    store.put_item("contacts", {**_contact(), "contact_id": "con-new"})
+    _seed_opportunity_naming(store, "con-new")
+    audit_id = _put_contact_update_record(
+        store, identity, before_contact="con-old", after_contact="con-new"
+    )
+
+    with pytest.raises(Conflict) as raised:
+        revert(identity, store, audit_id=audit_id, transaction_key="tx-dangling")
+
+    assert "primary contact" in raised.value.message
+    opportunity = store.get_item("opportunities", {"opportunity_id": "opp-1"})
+    assert opportunity is not None and opportunity["primary_contact_id"] == "con-new"
+    audit = store.get_item("audit_records", {"audit_id": audit_id})
+    assert audit is not None and audit["status"] == "active"
+
+
+def test_update_revert_restoring_a_live_primary_contact_succeeds(
+    store: Store, identity: Identity
+) -> None:
+    store.put_item("contacts", {**_contact(), "contact_id": "con-old"})
+    store.put_item("contacts", {**_contact(), "contact_id": "con-new"})
+    _seed_opportunity_naming(store, "con-new")
+    audit_id = _put_contact_update_record(
+        store, identity, before_contact="con-old", after_contact="con-new"
+    )
+
+    revert(identity, store, audit_id=audit_id, transaction_key="tx-live-contact")
+
+    opportunity = store.get_item("opportunities", {"opportunity_id": "opp-1"})
+    assert opportunity is not None and opportunity["primary_contact_id"] == "con-old"
+
+
+def test_update_revert_restoring_a_cleared_primary_contact_needs_no_contact(
+    store: Store, identity: Identity
+) -> None:
+    store.put_item("contacts", {**_contact(), "contact_id": "con-new"})
+    _seed_opportunity_naming(store, "con-new")
+    audit_id = _put_contact_update_record(
+        store, identity, before_contact=None, after_contact="con-new"
+    )
+
+    revert(identity, store, audit_id=audit_id, transaction_key="tx-cleared-contact")
+
+    opportunity = store.get_item("opportunities", {"opportunity_id": "opp-1"})
+    assert opportunity is not None and opportunity["primary_contact_id"] is None
+
+
+def test_update_revert_leaving_the_primary_contact_unchanged_does_not_check_it(
+    store: Store, identity: Identity
+) -> None:
+    _seed_opportunity_naming(store, "con-gone")
+    audit_id = _put_contact_update_record(
+        store, identity, before_contact="con-gone", after_contact="con-gone"
+    )
+
+    revert(identity, store, audit_id=audit_id, transaction_key="tx-unchanged-contact")
+
+    audit = store.get_item("audit_records", {"audit_id": audit_id})
+    assert audit is not None and audit["status"] == "reversed"
+
+
+def test_delete_revert_restoring_a_dangling_primary_contact_is_a_conflict(
+    store: Store, identity: Identity
+) -> None:
+    _seed_account(store)
+    audit_id = _put_delete_record(
+        store,
+        identity,
+        "opportunities",
+        "opp-1",
+        {**_opportunity(), "primary_contact_id": "con-gone"},
+    )
+
+    with pytest.raises(Conflict):
+        revert(identity, store, audit_id=audit_id, transaction_key="tx-delete-dangling")
+
+    assert store.get_item("opportunities", {"opportunity_id": "opp-1"}) is None

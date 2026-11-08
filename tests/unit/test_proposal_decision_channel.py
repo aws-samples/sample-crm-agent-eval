@@ -20,6 +20,7 @@ from crm.handlers import approve_proposal, reject_proposal, revert_audit_record,
 from crm.handlers._common import idempotent_id
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
+from tests.conftest import TEST_API_CLIENT_ID
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -49,7 +50,8 @@ def _gateway_event(arguments: dict[str, Any], *, principal_type: str = "user") -
 
 
 def _apigw_event(arguments: dict[str, Any]) -> dict[str, Any]:
-    context = {"authorizer": {"jwt": {"claims": dict(_CLAIMS)}}, "requestId": "req-1"}
+    claims = {**_CLAIMS, "token_use": "id", "aud": TEST_API_CLIENT_ID}
+    context = {"authorizer": {"jwt": {"claims": claims}}, "requestId": "req-1"}
     return identity_event(REQUEST_CONTEXT_KEY, context, arguments)
 
 

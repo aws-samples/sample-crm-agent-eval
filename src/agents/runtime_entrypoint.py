@@ -10,6 +10,9 @@
 3. **Session resumption.** A :class:`SessionStore` records every emitted event under the
    ``session_id``; :func:`run_turn` with ``resume_from`` replays only later events. ``heartbeat``
    events are streamed but never recorded, so they do not shift resume indices.
+   :func:`run_turn` starts each fresh turn with :meth:`SessionStore.begin_turn`, so a session
+   holds only its latest turn's events; :class:`InMemorySessionStore` also caps that at
+   :data:`MAX_EVENTS_PER_SESSION`, enough for any one chat turn, dropping the oldest first.
 4. **SSE framing.** :func:`format_sse_line` renders one :class:`agents.events.AgentEvent` as one
    JSON object on one line.
 """
@@ -17,12 +20,20 @@
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
-from agents.budget import CHAT_BUDGET, TurnBudget, TurnBudgetSpec
+from agents.budget import (
+    CHAT_BUDGET,
+    CHAT_MAX_TOOL_CALLS,
+    DEFAULT_MAX_TOKENS,
+    TurnBudget,
+    TurnBudgetSpec,
+)
 from agents.events import AgentEvent
+from agents.subagent_runner import DEFAULT_MAX_SUBAGENT_ROUNDS
 from agents.supervisor import SUPERVISOR_TIER, SupervisorTurn
 from crm.envelope import Identity, decode_identity
 from crm.errors import ValidationFailed
@@ -167,35 +178,95 @@ class SessionStore(Protocol):
         """Return the highest sequence number recorded for ``session_id``, or ``0`` if none."""
         raise NotImplementedError
 
+    def begin_turn(self, session_id: str) -> None:
+        """Forget the events of ``session_id``'s earlier turns; sequence numbers keep counting."""
+        raise NotImplementedError
+
+
+#: The largest per-round output-token cap of any model in ``config/model_capabilities.yaml``.
+MAX_ROUND_OUTPUT_TOKENS: Final[int] = 131_072
+
+#: Events one tool call can record: its ``tool_call``, its ``tool_result`` and a ``proposal``.
+_EVENTS_PER_TOOL_CALL: Final[int] = 3
+
+#: The terminal events of one turn: ``usage`` plus ``completed``, or one ``error``.
+_TERMINAL_EVENTS_PER_TURN: Final[int] = 2
+
+#: The most ``text_delta`` frames one chat turn can record, at most one per supervisor output token.
+_MAX_TEXT_DELTAS_PER_TURN: Final[int] = DEFAULT_MAX_TOKENS + MAX_ROUND_OUTPUT_TOKENS
+
+#: The most tool calls one chat turn can record: the supervisor's, every charged leaf call, and the
+#: leaf calls of the one delegation that crosses the budget, at most one per output token.
+_MAX_TOOL_CALLS_PER_TURN: Final[int] = (
+    2 * CHAT_MAX_TOOL_CALLS + DEFAULT_MAX_SUBAGENT_ROUNDS * MAX_ROUND_OUTPUT_TOKENS
+)
+
+#: The most events :class:`InMemorySessionStore` keeps per session within one turn: one whole chat
+#: turn's worth.
+MAX_EVENTS_PER_SESSION: Final[int] = (
+    _MAX_TEXT_DELTAS_PER_TURN
+    + _EVENTS_PER_TOOL_CALL * _MAX_TOOL_CALLS_PER_TURN
+    + _TERMINAL_EVENTS_PER_TURN
+)
+
+
+@dataclass(slots=True)
+class _SessionLog:
+    """One session's retained events, oldest first, and the last sequence number it assigned."""
+
+    events: deque[_RecordedEvent]
+    last_sequence: int = 0
+
 
 @dataclass(slots=True)
 class InMemorySessionStore:
     """A process-local :class:`SessionStore`, keyed by session id.
 
-    Sessions are held for the lifetime of the store instance and never evicted.
+    Each session keeps the events appended since its last :meth:`begin_turn`, at most the most
+    recent ``max_events`` of them; appending past that drops the oldest. Sequence numbers keep
+    counting across drops and turns, so :meth:`events_after` is exact whenever no event
+    above the requested sequence has been dropped; otherwise it returns only the retained ones.
 
     Attributes:
-        _sessions: Recorded events per session id, in append order.
+        max_events: Events retained per session; defaults to :data:`MAX_EVENTS_PER_SESSION`.
+        _sessions: The retained log per session id.
     """
 
-    _sessions: dict[str, list[_RecordedEvent]] = field(default_factory=dict)
+    max_events: int = MAX_EVENTS_PER_SESSION
+    _sessions: dict[str, _SessionLog] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Reject a non-positive ``max_events``."""
+        if isinstance(self.max_events, bool) or self.max_events <= 0:
+            raise ValueError(f"max_events must be a positive integer, got {self.max_events!r}")
 
     def append(self, session_id: str, event: AgentEvent) -> int:
         """Record ``event`` for ``session_id`` and return its assigned sequence number."""
-        history = self._sessions.setdefault(session_id, [])
-        sequence = len(history) + 1
-        history.append(_RecordedEvent(sequence=sequence, event=event))
-        return sequence
+        log = self._sessions.get(session_id)
+        if log is None:
+            log = _SessionLog(events=deque(maxlen=self.max_events))
+            self._sessions[session_id] = log
+        log.last_sequence += 1
+        log.events.append(_RecordedEvent(sequence=log.last_sequence, event=event))
+        return log.last_sequence
 
     def events_after(self, session_id: str, *, sequence: int) -> tuple[AgentEvent, ...]:
-        """Return every event recorded for ``session_id`` with a sequence number above ``sequence``."""
-        history = self._sessions.get(session_id, [])
-        return tuple(recorded.event for recorded in history if recorded.sequence > sequence)
+        """Return every retained event for ``session_id`` with a sequence number above ``sequence``."""
+        log = self._sessions.get(session_id)
+        if log is None:
+            return ()
+        return tuple(recorded.event for recorded in log.events if recorded.sequence > sequence)
 
     def last_sequence(self, session_id: str) -> int:
-        """Return the highest sequence number recorded for ``session_id``, or ``0`` if none."""
-        history = self._sessions.get(session_id, [])
-        return history[-1].sequence if history else 0
+        """Return the highest sequence number assigned for ``session_id``, or ``0`` if none."""
+        log = self._sessions.get(session_id)
+        return log.last_sequence if log is not None else 0
+
+    def begin_turn(self, session_id: str) -> None:
+        """Drop every event retained for ``session_id``, keeping its sequence counter."""
+        log = self._sessions.get(session_id)
+        if log is not None:
+            log.events.clear()
 
 
 @dataclass(slots=True)
@@ -254,6 +325,11 @@ def decode_page_context(payload: dict[str, Any]) -> PageContext | None:
     return parse_page_context(raw)
 
 
+#: The longest chat prompt, in characters, a turn accepts. Equal to the relay's and the chat
+#: Gateway target's caps.
+PROMPT_MAX_CHARS: Final[int] = 8000
+
+
 def decode_invocation(payload: dict[str, Any], matrix: CapabilityMatrix) -> RuntimeInvocation:
     """Decode and validate one inbound invocation payload before any turn starts.
 
@@ -272,8 +348,9 @@ def decode_invocation(payload: dict[str, Any], matrix: CapabilityMatrix) -> Runt
     Raises:
         crm.errors.AuthenticationFailed: When identity cannot be established.
         crm.errors.ValidationFailed: When the tuning block is not schema 3 or any tier's request is
-            invalid for its resolved model, when ``prompt`` is absent, empty, or whitespace only, or when a supplied
-            :data:`PAGE_CONTEXT_KEY` descriptor is malformed. Each names the offending source.
+            invalid for its resolved model, when ``prompt`` is absent, empty, whitespace only, or
+            longer than :data:`PROMPT_MAX_CHARS`, or when a supplied :data:`PAGE_CONTEXT_KEY`
+            descriptor is malformed. Each names the offending source.
     """
     identity = resolve_identity(payload)
     tuning, resolved_tiers = resolve_tuning(matrix, raw_tuning=payload.get("tuning"))
@@ -283,6 +360,12 @@ def decode_invocation(payload: dict[str, Any], matrix: CapabilityMatrix) -> Runt
             "A message is required to start a turn.",
             source=_PROMPT_SOURCE_UI,
             detail="invocation payload carries no non-empty prompt",
+        )
+    if len(prompt) > PROMPT_MAX_CHARS:
+        raise ValidationFailed(
+            f"The message is longer than {PROMPT_MAX_CHARS} characters.",
+            source=_PROMPT_SOURCE_UI,
+            detail=f"prompt length {len(prompt)} exceeds {PROMPT_MAX_CHARS}",
         )
     session_id = str(payload.get("session_id") or identity.session_id or "")
     return RuntimeInvocation(
@@ -304,8 +387,9 @@ def run_turn(
 ) -> Iterator[str]:
     """Drive one turn's already-produced event stream into resumable SSE lines.
 
-    Every event from ``events`` except a ``heartbeat`` is recorded in ``store`` before being
-    rendered; a heartbeat is rendered only. When
+    A fresh turn first calls :meth:`SessionStore.begin_turn`, dropping the session's earlier
+    turns, then records every event from ``events`` except a ``heartbeat`` in ``store`` before
+    rendering it; a heartbeat is rendered only. When
     ``resume_from`` is below the session's last recorded sequence, only the recorded events after
     it are yielded and ``events`` is not consumed.
 
@@ -327,6 +411,7 @@ def run_turn(
             yield format_sse_line(replayed)
         return
 
+    store.begin_turn(invocation.session_id)
     for event in events:
         if event.kind != "heartbeat":
             store.append(invocation.session_id, event)
@@ -372,6 +457,7 @@ def build_supervisor_turn(
 
 __all__ = [
     "PAGE_CONTEXT_KEY",
+    "PROMPT_MAX_CHARS",
     "InMemorySessionStore",
     "RuntimeInvocation",
     "SessionStore",

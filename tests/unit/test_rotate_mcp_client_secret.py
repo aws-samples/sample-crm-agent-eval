@@ -1003,3 +1003,117 @@ def test_an_unreadable_or_empty_old_secret_file_is_a_usage_error(
     assert run.rc == 2
     assert "--old-secret-file" in run.err
     assert run.sessions == []
+
+
+def _output_members(operation: str) -> dict[str, Any]:
+    model = botocore.session.Session().get_service_model("cognito-idp")
+    return dict(model.operation_model(operation).output_shape.members)
+
+
+def test_the_fixtures_follow_the_installed_cognito_output_shapes() -> None:
+    added = _output_members("AddUserPoolClientSecret")
+    assert list(added) == ["ClientSecretDescriptor"]
+    descriptor = set(added["ClientSecretDescriptor"].members)
+    assert {"ClientSecretId", "ClientSecretValue", "ClientSecretCreateDate"} <= descriptor
+    listed = _output_members("ListUserPoolClientSecrets")
+    assert set(listed["ClientSecrets"].member.members) == descriptor
+
+
+class _FlatteningIdp:
+    """Passes every call to the stubbed client; flattens the Add response the way a reshape would."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def add_user_pool_client_secret(self, **kwargs: Any) -> dict[str, Any]:
+        response = self._inner.add_user_pool_client_secret(**kwargs)
+        return dict(response.pop("ClientSecretDescriptor"))
+
+
+class _FlatteningSession(StubbedSession):
+    def client(self, name: str, region_name: str | None = None) -> Any:
+        real = super().client(name, region_name)
+        return _FlatteningIdp(real) if name == "cognito-idp" else real
+
+
+@pytest.fixture
+def flattening_session() -> Iterator[StubbedSession]:
+    stubbed = _FlatteningSession()
+    yield stubbed
+    for stub in stubbed.stubs.values():
+        stub.deactivate()
+
+
+def test_an_unreadable_add_response_deletes_the_new_secret_and_writes_no_file(
+    aws_config: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flattening_session: StubbedSession,
+) -> None:
+    session = flattening_session
+    _expect_identity(session)
+    _expect_list(session, [OLD_ID])
+    _expect_add(session)
+    _expect_list(session, [OLD_ID, NEW_ID])
+    _expect_delete(session, NEW_ID)
+    endpoint = _happy_endpoint()
+
+    run = _run(tmp_path, capsys, session, endpoint)
+
+    assert run.rc != 0
+    session.assert_drained()
+    assert "step add" in run.err and f"deleted {NEW_ID}" in run.err
+    assert f"old secret {OLD_ID} intact" in run.err
+    assert not run.secret_out.exists()
+    assert endpoint.seen == []
+    _assert_no_secret_printed(run)
+
+
+def test_an_unreadable_add_response_whose_rollback_fails_names_the_remaining_secret(
+    aws_config: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flattening_session: StubbedSession,
+) -> None:
+    session = flattening_session
+    _expect_identity(session)
+    _expect_list(session, [OLD_ID])
+    _expect_add(session)
+    _expect_list(session, [OLD_ID, NEW_ID])
+    _expect_delete_error(session, NEW_ID)
+
+    run = _run(tmp_path, capsys, session, _happy_endpoint())
+
+    assert run.rc != 0
+    session.assert_drained()
+    assert "ALSO failed" in run.err and f"{NEW_ID} ALSO failed" in run.err
+    assert not run.secret_out.exists()
+    _assert_no_secret_printed(run)
+
+
+def test_an_unreadable_add_response_whose_lookup_fails_warns_of_a_possible_orphan(
+    aws_config: None,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flattening_session: StubbedSession,
+) -> None:
+    session = flattening_session
+    _expect_identity(session)
+    _expect_list(session, [OLD_ID])
+    _expect_add(session)
+    session.idp.add_client_error(
+        "list_user_pool_client_secrets",
+        service_error_code="TooManyRequestsException",
+        expected_params=dict(POOL),
+    )
+
+    run = _run(tmp_path, capsys, session, _happy_endpoint())
+
+    assert run.rc != 0
+    session.assert_drained()
+    assert "may remain active" in run.err
+    assert not run.secret_out.exists()
+    _assert_no_secret_printed(run)

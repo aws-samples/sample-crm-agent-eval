@@ -484,21 +484,23 @@ class TestErrors:
             raise yaml.YAMLError("bad yaml")
 
         monkeypatch.setattr(runs, "load_static_estimate", _unparseable)
-        status, body = _call(store, sfn, _event({"action": "estimate"}))
+        status, body = _call(store, sfn, _event({"action": "estimate"}, full=True))
         assert status == 500 and body["error"]["code"] == "internal_error"
 
 
 class TestReads:
-    def test_any_authenticated_user_reads_status_list_and_estimate(
+    def test_a_full_visibility_user_reads_status_list_and_estimate(
         self, store: Store, sfn: Sfn
     ) -> None:
         _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
-        status, body = _call(store, sfn, _event({"action": "status", "run_id": run["run_id"]}))
+        status, body = _call(
+            store, sfn, _event({"action": "status", "run_id": run["run_id"]}, full=True)
+        )
         assert status == 200 and body["run_id"] == run["run_id"] and body["is_terminal"] is False
-        status, page = _call(store, sfn, _event({"action": "list"}))
+        status, page = _call(store, sfn, _event({"action": "list"}, full=True))
         assert status == 200 and [r["run_id"] for r in page["runs"]] == [run["run_id"]]
         assert page["next_cursor"] is None
-        status, estimate = _call(store, sfn, _event({"action": "estimate"}))
+        status, estimate = _call(store, sfn, _event({"action": "estimate"}, full=True))
         assert status == 200 and estimate["basis"] == "static" and estimate["estimate_usd"] > 0
 
     def test_status_reconciles_a_failed_execution(self, store: Store, sfn: Sfn) -> None:
@@ -506,16 +508,22 @@ class TestReads:
         arn = runs.require_run(store, run["run_id"]).execution_arn
         assert arn is not None
         sfn.statuses[arn] = "TIMED_OUT"
-        _status, body = _call(store, sfn, _event({"action": "status", "run_id": run["run_id"]}))
+        _status, body = _call(
+            store, sfn, _event({"action": "status", "run_id": run["run_id"]}, full=True)
+        )
         assert body["status"] == "failed" and body["teardown_status"] == "unknown"
         assert runs.read_lock(store) is None
 
     def test_status_of_an_unknown_run_is_404(self, store: Store, sfn: Sfn) -> None:
-        assert _call(store, sfn, _event({"action": "status", "run_id": "nope"}))[0] == 404
+        assert (
+            _call(store, sfn, _event({"action": "status", "run_id": "nope"}, full=True))[0] == 404
+        )
 
     def test_the_payload_carries_no_execution_arn_or_account(self, store: Store, sfn: Sfn) -> None:
         _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
-        _status, body = _call(store, sfn, _event({"action": "status", "run_id": run["run_id"]}))
+        _status, body = _call(
+            store, sfn, _event({"action": "status", "run_id": run["run_id"]}, full=True)
+        )
         assert "123456789012" not in json.dumps(body) and "execution_arn" not in body
 
 
@@ -596,3 +604,104 @@ def test_the_default_client_uses_the_resolved_region(
     assert built == [
         {"service": "stepfunctions", "region_name": resolve_aws_config(validate=False).region}
     ]
+
+
+def _unlocked_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    lines = []
+    for record in caplog.records:
+        try:
+            parsed = json.loads(record.getMessage())
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("event") == "eval_run_unlocked":
+            lines.append(parsed)
+    return lines
+
+
+class TestUnlockAttribution:
+    def test_an_admin_release_logs_one_line_naming_the_releasing_rep(
+        self, store: Store, sfn: Sfn, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
+        arn = runs.require_run(store, run["run_id"]).execution_arn
+        assert arn is not None
+        sfn.statuses[arn] = "ABORTED"
+        caplog.set_level("INFO")
+        status, body = _call(store, sfn, _event({"action": "unlock"}, admin=True, rep="rep-adm"))
+        assert status == 200 and body["released"] is True
+        assert _unlocked_lines(caplog) == [
+            {"event": "eval_run_unlocked", "rep_id": "rep-adm", "correlation_id": run["run_id"]}
+        ]
+
+    def test_a_forced_release_fails_the_holder_with_a_summary_naming_the_rep(
+        self, store: Store, sfn: Sfn, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
+        arn = runs.require_run(store, run["run_id"]).execution_arn
+        assert arn is not None
+        sfn.statuses[arn] = "PENDING_REDRIVE"
+        caplog.set_level("INFO")
+        status, body = _call(store, sfn, _event({"action": "unlock"}, admin=True, rep="rep-adm"))
+        assert status == 200 and body == {"released": True, "holder_run_id": run["run_id"]}
+        record = runs.require_run(store, run["run_id"])
+        assert record.status == "failed"
+        assert record.failure_summary == "An administrator (rep rep-adm) released the sweep lock."
+        assert [line["rep_id"] for line in _unlocked_lines(caplog)] == ["rep-adm"]
+
+    def test_a_refused_or_empty_unlock_logs_no_release(
+        self, store: Store, sfn: Sfn, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("INFO")
+        assert _call(store, sfn, _event({"action": "unlock"}, admin=True))[1]["released"] is False
+        _call(store, sfn, _event({"action": "submit"}, full=True))
+        assert _call(store, sfn, _event({"action": "unlock"}, full=True))[0] == 403
+        assert _call(store, sfn, _event({"action": "unlock"}, admin=True))[0] == 409
+        assert _unlocked_lines(caplog) == []
+        assert runs.read_lock(store) is not None
+
+
+class TestReadScope:
+    @pytest.mark.parametrize("action", ["estimate", "status", "list"])
+    def test_a_book_limited_caller_is_403_eval_trigger(
+        self, store: Store, sfn: Sfn, action: str
+    ) -> None:
+        _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
+        body: dict[str, Any] = {"action": action}
+        if action == "status":
+            body["run_id"] = run["run_id"]
+        status, response = _call(store, sfn, _event(body, rep="rep-book"))
+        assert status == 403
+        assert response["error"]["missing_scope"] == "eval:trigger"
+        assert run["run_id"] not in json.dumps(response)
+
+    def test_a_book_limited_caller_learns_nothing_about_an_unknown_run(
+        self, store: Store, sfn: Sfn
+    ) -> None:
+        status, response = _call(store, sfn, _event({"action": "status", "run_id": "nope"}))
+        assert status == 403 and response["error"]["missing_scope"] == "eval:trigger"
+
+    @pytest.mark.parametrize(("admin", "full"), [(True, False), (False, True), (True, True)])
+    @pytest.mark.parametrize("action", ["estimate", "status", "list"])
+    def test_an_admin_or_full_visibility_caller_still_reads(
+        self, store: Store, sfn: Sfn, action: str, admin: bool, full: bool
+    ) -> None:
+        _status, run = _call(store, sfn, _event({"action": "submit"}, full=True))
+        body: dict[str, Any] = {"action": action}
+        if action == "status":
+            body["run_id"] = run["run_id"]
+        status, response = _call(store, sfn, _event(body, admin=admin, full=full))
+        assert status == 200, response
+
+    def test_admin_claims_on_the_agent_channel_do_not_grant_reads(
+        self, store: Store, sfn: Sfn
+    ) -> None:
+        event = {
+            AGENT_IDENTITY_KEY: {
+                "claims": {CLAIM_REP_ID: "rep-1", CLAIM_TENANT: "demo", CLAIM_GROUPS: ["admin"]},
+                "session_id": "s",
+            },
+            "action": "list",
+        }
+        response = handler_module.handler(event, None, store=store, sfn=sfn)
+        assert response["statusCode"] == 403
+        assert response["error"]["missing_scope"] == "eval:trigger"

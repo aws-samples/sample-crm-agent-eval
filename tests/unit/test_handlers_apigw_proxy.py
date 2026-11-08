@@ -45,6 +45,7 @@ from crm.handlers._common import is_proxy_event
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from crm.toolspec.definitions import ALL_TOOLS
+from tests.conftest import RECORDED_EVENT_CLIENT_ID, StubAllowlist
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -470,6 +471,53 @@ def test_a_format_1_0_envelope_without_an_authorizer_is_a_401_not_an_empty_scope
     del event["requestContext"]["authorizer"]
 
     response = get_account.handler(event, None, store=store)
+
+    assert response["statusCode"] == 401
+    assert _decoded_body(response)["error"]["code"] == "authentication_failed"
+
+
+def _claims_of(event: dict[str, Any]) -> dict[str, Any]:
+    authorizer: dict[str, Any] = event["requestContext"]["authorizer"]
+    claims: dict[str, Any] = (
+        authorizer["jwt"]["claims"] if "jwt" in authorizer else authorizer["claims"]
+    )
+    return claims
+
+
+@pytest.mark.parametrize("fmt", sorted(_ENVELOPE_BUILDERS))
+def test_a_token_issued_to_a_foreign_app_client_is_a_401_through_the_full_handler(
+    store: Store, apigw_client_allowlist: StubAllowlist, fmt: str
+) -> None:
+    """Only the client claim differs from a served replay, and the proxy response is a 401."""
+    _seed_account(store, _IN_BOOK_ACCOUNT)
+    served = _ENVELOPE_BUILDERS[fmt]({"account_id": _IN_BOOK_ACCOUNT})
+    foreign = copy.deepcopy(served)
+    assert _claims_of(foreign)["client_id"] == RECORDED_EVENT_CLIENT_ID
+    _claims_of(foreign)["client_id"] = "mcp-oauth-third-party-client"
+
+    assert get_account.handler(served, None, store=store)["statusCode"] == 200
+    response = get_account.handler(foreign, None, store=store)
+
+    assert response["statusCode"] == 401
+    assert _decoded_body(response)["error"]["code"] == "authentication_failed"
+    assert apigw_client_allowlist.reads != []
+
+
+@pytest.mark.parametrize("fmt", sorted(_ENVELOPE_BUILDERS))
+def test_an_id_token_for_a_foreign_audience_is_a_401_through_the_full_handler(
+    store: Store, apigw_client_allowlist: StubAllowlist, fmt: str
+) -> None:
+    """The same replay as an ID token is served for the admitted audience and refused otherwise."""
+    _seed_account(store, _IN_BOOK_ACCOUNT)
+    served = _ENVELOPE_BUILDERS[fmt]({"account_id": _IN_BOOK_ACCOUNT})
+    claims = _claims_of(served)
+    claims["token_use"] = "id"
+    claims["aud"] = claims.pop("client_id")
+    foreign = copy.deepcopy(served)
+    _claims_of(foreign)["aud"] = "mcp-oauth-third-party-client"
+
+    assert get_account.handler(served, None, store=store)["statusCode"] == 200
+    response = get_account.handler(foreign, None, store=store)
 
     assert response["statusCode"] == 401
     assert _decoded_body(response)["error"]["code"] == "authentication_failed"

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from crm.authz import Identity, require_scope
+from crm.domain.references import require_primary_contact_in_account
 from crm.domain.stages import STAGES
 from crm.errors import NotFound, ValidationFailed, bounded_detail_value
 from crm.handlers._common import build_handler, create_idempotent, idempotent_id, now_iso
@@ -42,17 +43,7 @@ def _create_opportunity(
         )
 
     primary_contact_id = arguments.get("primary_contact_id")
-    if primary_contact_id is not None:
-        contact = store.get_item("contacts", {"contact_id": str(primary_contact_id)})
-        if (
-            contact is None
-            or contact.get("tenant") != identity.tenant
-            or contact.get("account_id") != account_id
-        ):
-            raise ValidationFailed(
-                "primary_contact_id must reference a contact under the same account.",
-                source="primary_contact_id",
-            )
+    require_primary_contact_in_account(store, identity, account_id, primary_contact_id)
 
     opportunity_id = idempotent_id("opp", str(arguments["transaction_key"]))
     now = now_iso()

@@ -69,6 +69,8 @@ ROOT_SUBSTITUTIONS: Final[dict[str, str]] = {
     "var.crm_operator_principal_arns": f'["arn:aws:iam::{ACCOUNT}:role/fixture-operator"]',
     "module.eval_artifacts.bucket_arn": f'"arn:aws:s3:::crm-agent-eval-eval-artifacts-{ACCOUNT}"',
     "aws_kms_key.eval_artifacts.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
+    "aws_kms_key.cursor.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
+    '"${path.module}/../frontend/index.html"': f'"{REPO_ROOT / "frontend" / "index.html"}"',
     "aws_iam_role.agentcore_gateway.arn": (
         f'"arn:aws:iam::{ACCOUNT}:role/crm-agent-eval-agentcore-gateway-role"'
     ),

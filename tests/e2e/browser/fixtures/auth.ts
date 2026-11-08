@@ -7,8 +7,16 @@
  * and `admin` (`CRM_E2E_ADMIN_EMAIL` / `CRM_E2E_ADMIN_PASSWORD`, in the `admin` group). A missing
  * variable throws. A refused sign-in throws `SignInRejectedError`, and a Cognito challenge the form
  * does not support throws `SignInChallengeError`, both as soon as the form reports it.
+ *
+ * Every test built on `test` here (directly, or through `fixtures/teardown.ts`) runs with the
+ * Content-Security-Policy violation trap from `fixtures/cspTrap.ts` on its `page`, and fails after its
+ * body if any violation was recorded.
  */
 import { test as base, expect, type Page } from "@playwright/test";
+
+import { cspViolationsOf, installCspViolationTrap } from "./cspTrap";
+
+export { cspViolationsOf, installCspViolationTrap };
 
 const EMAIL_ENV_VAR = "CRM_DEMO_USER_EMAIL";
 const PASSWORD_ENV_VAR = "CRM_DEMO_USER_PASSWORD";  // pragma: allowlist secret
@@ -99,8 +107,19 @@ export async function signInAs(page: Page, account: SmokeAccount): Promise<void>
   await expect(page.getByRole("button", { name: "Sign out", exact: true })).toBeVisible();
 }
 
-/** `test` with a `signedInPage` fixture: a page signed in as the demo user. */
+/**
+ * `test` whose `page` carries the CSP violation trap, plus a `signedInPage` fixture: that page
+ * signed in as the demo user.
+ */
 export const test = base.extend<{ signedInPage: Page }>({
+  page: async ({ page }, use) => {
+    await installCspViolationTrap(page);
+    await use(page);
+    expect(
+      cspViolationsOf(page),
+      "the page recorded Content-Security-Policy violations; every journey must run without one",
+    ).toEqual([]);
+  },
   signedInPage: async ({ page }, use) => {
     await signInAsDemo(page);
     await use(page);

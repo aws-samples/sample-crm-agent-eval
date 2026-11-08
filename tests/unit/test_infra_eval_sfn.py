@@ -177,14 +177,16 @@ def _offline_state_machine(text: str) -> str:
 
 def _fixture_root(work_dir: Path, eval_sfn_text: str | None = None) -> str:
     """`main.tf`'s locals plus `eval_sfn.tf` (or `eval_sfn_text`), with stubs for every module
-    neither declares. The `dynamodb_data_plane_role_arns` and `logs_key_user_role_arns` lists are left out: they reference
-    `module.lambda_action`, which no stub can stand in for."""
+    neither declares. The `dynamodb_data_plane_role_arns`, `logs_key_user_role_arns` and
+    `cursor_key_principal_arns` lists are left out: they reference `module.lambda_action`, which no
+    stub can stand in for."""
     main_locals = [
         block
         for block in _top_level_blocks((INFRA / "main.tf").read_text(encoding="utf-8"))
         if block.startswith("locals ")
         and "dynamodb_data_plane_role_arns" not in block
         and "logs_key_user_role_arns" not in block
+        and "cursor_key_principal_arns" not in block
     ]
     text = EVAL_SFN_TF.read_text("utf-8") if eval_sfn_text is None else eval_sfn_text
     root = "\n\n".join([*main_locals, _offline_state_machine(text)])

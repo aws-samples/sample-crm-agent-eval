@@ -36,6 +36,7 @@ from eval.runs import RunRecord
 from eval.tenancy import (
     tenant_for_run,
 )
+from tests.conftest import TEST_API_CLIENT_ID
 
 
 @pytest.fixture
@@ -97,11 +98,11 @@ def test_no_public_function_accepts_a_provider_selecting_parameter(forbidden: st
 
 
 def test_the_handler_recognises_exactly_its_arguments() -> None:
-    """`mode` is for `submit` only, `repeats` for `submit` and `estimate` only, and `key` for
-    `artefact_url` only (`test_eval_artefacts.py`)."""
-    assert frozenset({"action", "run_id", "mode", "confirmed", "cursor", "key", "repeats"}) == (
-        handler_module._RECOGNISED_ARGUMENTS
-    )
+    """`mode` is for `submit` only, `repeats` for `submit` and `estimate` only, and `key` and
+    `download` for `artefact_url` only (`test_eval_artefacts.py`)."""
+    assert frozenset(
+        {"action", "run_id", "mode", "confirmed", "cursor", "key", "repeats", "download"}
+    ) == (handler_module._RECOGNISED_ARGUMENTS)
 
 
 def test_job_row_id_refuses_an_already_prefixed_id() -> None:
@@ -298,7 +299,9 @@ def test_the_proxy_channel_returns_a_json_string_body(
         "version": "2.0",
         "routeKey": "POST /evals",
         "requestContext": {
-            "authorizer": {"jwt": {"claims": _admin_claims()}},
+            "authorizer": {
+                "jwt": {"claims": {**_admin_claims(), "token_use": "id", "aud": TEST_API_CLIENT_ID}}
+            },
             "http": {"method": "POST"},
         },
         "body": json.dumps({"action": "submit"}),
@@ -318,7 +321,16 @@ def test_a_proxy_denial_carries_the_errors_own_status(store: Store) -> None:
         "version": "2.0",
         "routeKey": "POST /evals",
         "requestContext": {
-            "authorizer": {"jwt": {"claims": {CLAIM_REP_ID: "rep-brixton", CLAIM_TENANT: "demo"}}},
+            "authorizer": {
+                "jwt": {
+                    "claims": {
+                        CLAIM_REP_ID: "rep-brixton",
+                        CLAIM_TENANT: "demo",
+                        "token_use": "id",
+                        "aud": TEST_API_CLIENT_ID,
+                    }
+                }
+            },
             "http": {"method": "POST"},
         },
         "body": json.dumps({"action": "submit"}),
@@ -362,3 +374,112 @@ def test_the_handler_reaches_no_agent_registry() -> None:
 
     assert "eval_trigger" not in REGISTERED_TOOL_NAMES
     assert not any("eval" in name for name in REGISTERED_TOOL_NAMES)
+
+
+# -- the tier comparison table on the run payload -------------------------------------------------
+
+
+def _record(matrix_report: dict[str, Any] | None) -> RunRecord:
+    return RunRecord(
+        run_id="r-tier",
+        tenant="eval-r-tier",
+        mode="stub",
+        status="completed",
+        started_at="2026-11-06T00:00:00+00:00",
+        matrix_report=matrix_report,
+    )
+
+
+def _summary() -> dict[str, object]:
+    note = "Columns are the sweep's arms in run order."
+    entry: dict[str, object] = {
+        "model_ids": ["m"],
+        "efforts": ["medium"],
+        "completion": {"passed": 1, "applicable": 2, "rate": 0.5},
+        "completion_over_repeats": None,
+        "accuracy": 0.5,
+        "cost_withheld_provisional": True,
+        "cost_per_completed_task": None,
+        "cost_per_task": None,
+        "completed_task_latency_ms_p50": None,
+        "completed_task_latency_ms_p95": None,
+        "latency_sample_count": None,
+        "invocation_count": 3,
+        "input_tokens": 10,
+        "output_tokens": 2,
+        "retry_count": None,
+    }
+    return {
+        "columns": [{"label": "anthropic", "mode": "stub"}],
+        "tiers": {
+            "supervisor": [{**entry, "budget_exhausted_task_count": 0}],
+            "subagent": [{**entry, "delegation_outcomes": None}],
+            "tool": [{**entry, "truncated_task_count": 0}],
+        },
+        "notes": [note],
+    }
+
+
+def _table_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    events = []
+    for record in caplog.records:
+        try:
+            parsed = json.loads(record.getMessage())
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("event") == "eval_tier_table_unavailable":
+            events.append(parsed)
+    return events
+
+
+def test_the_payload_carries_the_tier_table_of_the_stored_summary() -> None:
+    from eval.matrix import tier_comparison_table
+
+    payload = _record({"tier_comparison": _summary(), "arms": []}).to_payload()
+    assert payload["tier_comparison_table"] == tier_comparison_table(_summary())
+    table = payload["tier_comparison_table"]
+    assert table["headers"] == ["Metric", "anthropic"]
+    assert [section["tier"] for section in table["sections"]] == ["supervisor", "subagent", "tool"]
+    supervisor = {row[0]: row[1:] for row in table["sections"][0]["rows"]}
+    assert supervisor["Cost per completed task"] == ["withheld"]
+    assert supervisor["P95 latency per completed task (ms)"] == ["not measured"]
+    assert payload["matrix"]["tier_comparison"] == _summary()
+    json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "matrix_report",
+    [None, {}, {"arms": []}, {"tier_comparison": None}, {"tier_comparison": ["x"]}],
+    ids=["no-matrix", "empty", "pre-summary", "null-block", "list-block"],
+)
+def test_a_record_without_a_summary_mapping_omits_the_table(
+    matrix_report: dict[str, Any] | None, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("INFO")
+    assert "tier_comparison_table" not in _record(matrix_report).to_payload()
+    assert _table_events(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        lambda s: s.pop("columns"),
+        lambda s: s["tiers"].pop("tool"),
+        lambda s: s.update(notes=[7]),
+        lambda s: s["tiers"]["supervisor"][0].update(model_ids=[1, 2]),
+    ],
+    ids=["no-columns", "missing-tier", "non-string-note", "non-string-model"],
+)
+def test_a_malformed_summary_is_omitted_and_logged_never_raised(
+    corrupt: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    summary = _summary()
+    corrupt(summary)
+    caplog.set_level("INFO")
+    payload = _record({"tier_comparison": summary}).to_payload()
+    assert "tier_comparison_table" not in payload
+    assert payload["status"] == "completed"
+    events = _table_events(caplog)
+    assert len(events) == 1
+    assert events[0]["correlation_id"] == "r-tier"
+    assert set(events[0]) == {"event", "correlation_id", "reason"}

@@ -83,12 +83,20 @@ def _statements(policy_json: str) -> list[dict[str, Any]]:
     return statements if isinstance(statements, list) else [statements]
 
 
+ALLOWLIST_PARAMETER_NAME: Final = "/crm-agent-eval/api/allowed-client-ids"
+ALLOWLIST_PARAMETER_ARN: Final = (
+    f"arn:aws:ssm:us-east-1:{ACCOUNT_ID}:parameter{ALLOWLIST_PARAMETER_NAME}"
+)
+
+
 def _substitutions(zip_path: Path) -> list[tuple[str, str]]:
     tables = "{ " + ", ".join(f'{t} = "{_table_arn(t)}"' for t in TABLES) + " }"
     return [
         ("${local.name_prefix}", "crm-agent-eval"),
         ("local.name_prefix", '"crm-agent-eval"'),
         ("local.eval_lambda_zip", f'"{zip_path}"'),
+        ("local.api_allowed_client_ids_parameter_name", f'"{ALLOWLIST_PARAMETER_NAME}"'),
+        ("local.api_allowed_client_ids_parameter_arn", f'["{ALLOWLIST_PARAMETER_ARN}"][0]'),
         ("module.eni_function_code_deny.policy_arn", f'"{ENI_DENY_ARN}"'),
         ("module.vpc.lambda_subnet_ids", _hcl_list(SUBNET_IDS)),
         ("module.vpc.lambda_security_group_ids", _hcl_list(SECURITY_GROUP_IDS)),
@@ -141,6 +149,7 @@ def test_environment_is_exactly_what_the_handler_reads(plan: Plan) -> None:
     (environment,) = plan.after(FUNCTION)["environment"]
     assert environment["variables"] == {
         "CRM_TABLE_PREFIX": "crm-agent-eval",
+        "CRM_API_ALLOWED_CLIENT_IDS_PARAMETER": ALLOWLIST_PARAMETER_NAME,
         "PYTHONPATH": "/var/task/src",
     }
 
