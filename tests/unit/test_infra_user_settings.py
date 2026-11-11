@@ -34,6 +34,7 @@ ROOT_MAIN: Final = REPO_ROOT / "infra" / "main.tf"
 ACCOUNT_ID: Final = "123456789012"
 LOGS_KMS_ARN: Final = f"arn:aws:kms:us-east-1:{ACCOUNT_ID}:key/fixture-logs"
 DDB_KMS_ARN: Final = f"arn:aws:kms:us-east-1:{ACCOUNT_ID}:key/fixture-ddb"
+ALLOWLIST_KMS_ARN: Final = f"arn:aws:kms:us-east-1:{ACCOUNT_ID}:key/fixture-allowlist"
 ENI_DENY_ARN: Final = f"arn:aws:iam::{ACCOUNT_ID}:policy/fixture-eni-deny"
 
 #: Built at runtime: `check_no_account_id` rejects literal `subnet-`/`sg-` ids in tracked content.
@@ -55,6 +56,9 @@ ASSERTED_ACTIONS: Final = (
 
 FUNCTION: Final = "module.lambda_action_user_settings.aws_lambda_function.this"
 DDB_POLICY: Final = "module.lambda_action_user_settings.aws_iam_role_policy.dynamodb[0]"
+CONFIG_KMS_POLICY: Final = (
+    "module.lambda_action_user_settings.aws_iam_role_policy.config_parameter_kms[0]"
+)
 
 
 def _skip_unless_terraform() -> None:
@@ -97,6 +101,7 @@ def _substitutions(zip_path: Path) -> list[tuple[str, str]]:
         ("local.eval_lambda_zip", f'"{zip_path}"'),
         ("local.api_allowed_client_ids_parameter_name", f'"{ALLOWLIST_PARAMETER_NAME}"'),
         ("local.api_allowed_client_ids_parameter_arn", f'["{ALLOWLIST_PARAMETER_ARN}"][0]'),
+        ("aws_kms_key.api_allowlist.arn", f'"{ALLOWLIST_KMS_ARN}"'),
         ("module.eni_function_code_deny.policy_arn", f'"{ENI_DENY_ARN}"'),
         ("module.vpc.lambda_subnet_ids", _hcl_list(SUBNET_IDS)),
         ("module.vpc.lambda_security_group_ids", _hcl_list(SECURITY_GROUP_IDS)),
@@ -179,6 +184,28 @@ def test_every_other_table_and_action_is_denied(plan: Plan) -> None:
         for a in _as_list(s["Action"])
     }
     assert own == set(ASSERTED_ACTIONS) - GRANTED
+
+
+def test_the_allowlist_is_decrypted_only_through_ssm_under_its_key(plan: Plan) -> None:
+    """Decrypt on the allowlist CMK via SSM for the one parameter; any other key via SSM is denied."""
+    statements = {s["Sid"]: s for s in _statements(plan.after(CONFIG_KMS_POLICY)["policy"])}
+    assert set(statements) == {
+        "DecryptConfigParameters",
+        "DenyConfigParameterDecryptUnderOtherKeys",
+    }
+    allow = statements["DecryptConfigParameters"]
+    assert allow["Effect"] == "Allow"
+    assert _as_list(allow["Action"]) == ["kms:Decrypt"]
+    assert _as_list(allow["Resource"]) == [ALLOWLIST_KMS_ARN]
+    assert allow["Condition"] == {
+        "StringEquals": {
+            "kms:ViaService": "ssm.us-east-1.amazonaws.com",
+            "kms:EncryptionContext:PARAMETER_ARN": ALLOWLIST_PARAMETER_ARN,
+        }
+    }
+    deny = statements["DenyConfigParameterDecryptUnderOtherKeys"]
+    assert deny["Effect"] == "Deny"
+    assert _as_list(deny["NotResource"]) == [ALLOWLIST_KMS_ARN]
 
 
 def test_no_gateway_or_other_invoke_permission_is_declared(plan: Plan) -> None:

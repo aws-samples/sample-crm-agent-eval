@@ -35,7 +35,7 @@ git config core.hooksPath githooks                      # or: pre-commit install
 - The git hooks run `check_no_account_id`, `check_no_vendor_keys`, `check_log_redaction` and
   gitleaks against staged content, then `check_secret_scan` over the working tree. Any non-zero
   `check_secret_scan` status fails the hook, including 3 (gitleaks absent).
-- Figures under `docs/figures/` are drawn and exported with draw.io desktop 32.5.5 (Homebrew
+- Figures under `docs/figures/` are drawn and exported with draw.io desktop 32.6.10 (Homebrew
   cask `drawio`, whose CLI is `drawio`), using `drawio -x -f svg --embed-svg-images --theme light`;
   see [`docs/figures/README.md`](figures/README.md).
 - Security-relevant pins: `cryptography` 50.0.2, `PyJWT` 2.15.1, `urllib3` 2.8.0 and

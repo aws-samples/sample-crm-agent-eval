@@ -668,7 +668,12 @@ def test_negative_control_is_one_bare_supervisor_answer() -> None:
 _SYNTHETIC_LOOKUP: dict[str, object] = {
     "id": "synthetic-oracle-lookup",
     "prompt": "What stage is opportunity opp-0000 in?",
-    "actor": {"rep_id": "rep-ashford", "book": ["acct-0000"], "full_visibility": False},
+    "actor": {
+        "rep_id": "rep-ashford",
+        "book": ["acct-0000"],
+        "full_visibility": False,
+        "principal_type": "user",
+    },
     "scoring_mode": "machine",
     "expected_tiers": {"subagent": {"outcome": "data"}, "tool": {"tools": ["get_opportunity"]}},
     "assertions": {

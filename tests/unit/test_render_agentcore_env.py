@@ -52,7 +52,9 @@ _STRIPPED_CREDENTIAL_VARS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_
 
 #: The account every stubbed `aws sts get-caller-identity` in this file reports, and so the
 #: `CRM_EXPECTED_ACCOUNT_ID` every sandbox sets by default (placeholder-allowlisted).
-SANDBOX_ACCOUNT: Final[str] = "111122223333"
+SANDBOX_ACCOUNT: Final[str] = (
+    "111122223333"  # nosemgrep: generic.secrets.security.detected-aws-account-id
+)
 
 
 def _sandbox_env(*, drop: Sequence[str] = (), **overrides: str) -> dict[str, str]:
@@ -439,7 +441,7 @@ class TestSandboxReachesTheApply:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -642,7 +644,7 @@ class TestProfileRegionResolutionOrder:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -761,7 +763,7 @@ class TestRestoreOnFailureAndInterrupt:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -963,7 +965,7 @@ class TestRestoreOnFailureAndInterrupt:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1012,7 +1014,7 @@ class TestBackupRefusesToOverwrite:
     def test_backup_raises_when_a_backup_already_exists(self, template_file: Path) -> None:
         backup_path = template_file.with_suffix(".yaml.orig")
         render_agentcore_env.backup(template_file, backup_path)
-        template_file.write_text("gateway_url: https://111122223333.gateway.example\n")
+        template_file.write_text(f"gateway_url: https://{SANDBOX_ACCOUNT}.gateway.example\n")
         with pytest.raises(FileExistsError) as excinfo:
             render_agentcore_env.backup(template_file, backup_path)
         assert "did not restore" in str(excinfo.value)
@@ -1032,7 +1034,7 @@ class TestBackupRefusesToOverwrite:
                 "--backup",
                 str(backup_path),
                 "--values-json",
-                '{"ACCOUNT_ID": "111122223333"}',
+                f'{{"ACCOUNT_ID": "{SANDBOX_ACCOUNT}"}}',
             ]
         )
         assert rc == 2
@@ -1078,7 +1080,7 @@ class TestNonInteractivity:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1287,7 +1289,7 @@ class TestRelayGuards:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1390,7 +1392,7 @@ class TestPostApplyParityGate:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1511,7 +1513,7 @@ class TestPostApplyDriftBound:
         (bin_dir / "aws").write_text(
             "#!/usr/bin/env bash\n"
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             "exit 0\n",
@@ -1683,7 +1685,7 @@ class TestFrontendPublishStep:
         "cognito_user_pool_id": {"value": "us-east-1_ABCDEFGHI"},
         "cognito_spa_client_id": {"value": "fakeclientid0000"},
         "agentcore_runtime_arn": {
-            "value": "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/crm-Ab"
+            "value": f"arn:aws:bedrock-agentcore:us-east-1:{SANDBOX_ACCOUNT}:runtime/crm-Ab"
         },
     }
 
@@ -1751,7 +1753,7 @@ class TestFrontendPublishStep:
             "#!/usr/bin/env bash\n"
             f'printf "aws %s\\n" "$*" >> "{call_log}"\n'
             'if [[ "$*" == *"get-caller-identity"* ]]; then\n'
-            '  echo \'{"Account": "111122223333"}\'\n'
+            f'  echo \'{{"Account": "{SANDBOX_ACCOUNT}"}}\'\n'
             "  exit 0\n"
             "fi\n"
             f"{fail_clause}"

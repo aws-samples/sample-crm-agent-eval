@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TEARDOWN_SH = REPO_ROOT / "scripts" / "teardown.sh"
 RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_agentcore_env.py"
 
-ACCOUNT = "111122223333"
+ACCOUNT = "111122223333"  # nosemgrep: generic.secrets.security.detected-aws-account-id
 REGION = "eu-west-2"
 PROFILE = "teardown-test-profile"
 ALB_ARN = f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT}:loadbalancer/app/crm-api-origin/50dc6c495c0c9188"
@@ -32,11 +32,13 @@ _STATE_WITH_ALB = "\n".join(
     ]
 )
 
-_FAKE_AWS = """#!/usr/bin/env bash
+_FAKE_AWS = (
+    """#!/usr/bin/env bash
 printf 'aws %s\\n' "$*" >> "$CALL_LOG"
 if [[ "$*" == *"get-caller-identity"* ]]; then
-  echo '{"Account": "111122223333"}'
-  exit 0
+"""
+    + f'  echo \'{{"Account": "{ACCOUNT}"}}\'\n'
+    + """  exit 0
 fi
 if [[ "$1" == "elbv2" && "$2" == "describe-load-balancers" ]]; then
   case "${FAKE_ALB_AFTER:-gone}" in
@@ -53,6 +55,7 @@ if [[ "$1" == "elbv2" ]]; then
 fi
 exit 0
 """
+)
 
 _FAKE_TERRAFORM = """#!/usr/bin/env bash
 printf 'terraform %s\\n' "$*" >> "$CALL_LOG"

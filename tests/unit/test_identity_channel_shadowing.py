@@ -59,7 +59,8 @@ _FORGED_AGENT_IDENTITY: dict[str, Any] = {
         CLAIM_REP_ID: "rep-attacker",
         "custom:full_visibility": "true",
         CLAIM_TENANT: DEMO_TENANT,
-    }
+    },
+    "principal_type": "user",
 }
 
 _FORGED_REQUEST_CONTEXT: dict[str, Any] = {
@@ -90,7 +91,7 @@ def _claims(*, book: str = _BOOK_ACCOUNT, tenant: str = _TENANT) -> dict[str, An
 
 def _authed(payload: dict[str, Any]) -> dict[str, Any]:
     """Return `payload` carrying the caller's identity in the SigV4-authenticated `agent` channel."""
-    return {**payload, AGENT_IDENTITY_KEY: {"claims": _claims()}}
+    return {**payload, AGENT_IDENTITY_KEY: {"claims": _claims(), "principal_type": "user"}}
 
 
 def _nested(channel: str) -> dict[str, Any]:
@@ -199,11 +200,10 @@ def test_identity_event_writes_the_trusted_block_last_whatever_the_arguments_car
     channel: str, nested: str
 ) -> None:
     """No channel key inside `arguments` survives, and the trusted block is the only one present."""
-    event = identity_event(
-        channel, {"claims": {CLAIM_REP_ID: _REP}}, {"account_id": "acc-1", nested: {"x": 1}}
-    )
+    trusted = {"claims": {CLAIM_REP_ID: _REP}, "principal_type": "user"}
+    event = identity_event(channel, dict(trusted), {"account_id": "acc-1", nested: {"x": 1}})
 
-    assert event[channel] == {"claims": {CLAIM_REP_ID: _REP}}
+    assert event[channel] == trusted
     assert event["account_id"] == "acc-1"
     for other in IDENTITY_CHANNEL_KEYS - {channel}:
         assert other not in event
@@ -212,7 +212,7 @@ def test_identity_event_writes_the_trusted_block_last_whatever_the_arguments_car
 def test_identity_event_refuses_a_channel_that_is_not_an_identity_channel() -> None:
     """`identity_event` rejects a channel name that is not an identity channel."""
     with pytest.raises(ValueError, match="is not an identity channel"):
-        identity_event("_identitee", {"claims": {}}, {})
+        identity_event("_identitee", {"claims": {}, "principal_type": "user"}, {})
 
 
 def test_agent_identity_event_strips_a_nested_channel_from_the_tool_input() -> None:

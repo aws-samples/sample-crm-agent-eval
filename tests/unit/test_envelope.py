@@ -153,6 +153,26 @@ def test_gateway_identity_with_an_unknown_principal_type_is_rejected() -> None:
         decode_identity(_gateway_event(principal_type="superuser"))
 
 
+def test_gateway_identity_refuses_an_absent_principal_type() -> None:
+    """An `_identity` block without a principal type is refused, never defaulted to `user`."""
+    event = _gateway_event()
+    del event[IDENTITY_KEY]["principal_type"]
+    with pytest.raises(AuthenticationFailed) as caught:
+        decode_identity(event)
+    assert "principal_type is absent" in (caught.value.detail or "")
+
+
+@pytest.mark.parametrize("declared", [None, "", "User", 0, ["user"]])
+def test_gateway_identity_refuses_a_null_empty_or_other_principal_type(declared: object) -> None:
+    with pytest.raises(AuthenticationFailed) as caught:
+        decode_identity(_gateway_event(principal_type=declared))
+    assert "principal_type is" in (caught.value.detail or "")
+
+
+def test_gateway_identity_decodes_a_declared_service_principal() -> None:
+    assert decode_identity(_gateway_event(principal_type="service")).principal_type == "service"
+
+
 def test_service_principal_claiming_full_visibility_is_rejected() -> None:
     """A service principal claiming full visibility is rejected."""
     with pytest.raises(AuthenticationFailed):
@@ -437,7 +457,7 @@ def test_apigw_transport_failure_reading_the_parameter_is_a_server_error(
 def test_apigw_allowlist_is_read_from_ssm_by_the_default_reader(
     apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The production reader resolves the named String parameter (moto SSM)."""
+    """The production reader resolves the named SecureString parameter (moto SSM)."""
     import boto3
     from moto import mock_aws
 
@@ -450,11 +470,63 @@ def test_apigw_allowlist_is_read_from_ssm_by_the_default_reader(
         boto3.client("ssm", region_name="us-east-1").put_parameter(
             Name=TEST_API_CLIENT_IDS_PARAMETER,
             Value=f"{_SPA_CLIENT_ID},other-client",
-            Type="String",
+            Type="SecureString",
         )
         assert decode_identity(_apigw_event()).rep_id == "rep-1"
         with pytest.raises(AuthenticationFailed):
             decode_identity(_apigw_event(aud=_MCP_CLIENT_ID))
+
+
+def _moto_ssm_reader_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.setattr(envelope, "_parameter_reader", envelope._ssm_parameter_reader)
+
+
+@pytest.mark.parametrize("parameter_type", ["String", "StringList"])
+def test_apigw_allowlist_stored_as_a_non_secure_string_is_refused_and_not_cached(
+    apigw_client_allowlist: StubAllowlist, monkeypatch: pytest.MonkeyPatch, parameter_type: str
+) -> None:
+    """A downgraded parameter refuses as a server error; once restored, the next request reads it."""
+    import boto3
+    from moto import mock_aws
+
+    _moto_ssm_reader_env(monkeypatch)
+    with mock_aws():
+        ssm = boto3.client("ssm", region_name="us-east-1")
+        ssm.put_parameter(
+            Name=TEST_API_CLIENT_IDS_PARAMETER, Value=_SPA_CLIENT_ID, Type=parameter_type
+        )
+        with pytest.raises(CrmError) as caught:
+            decode_identity(_apigw_event())
+        assert not isinstance(caught.value, AuthenticationFailed)
+        assert caught.value.http_status >= 500
+        assert "expected 'SecureString'" in (caught.value.detail or "")
+        assert envelope._allowed_client_ids_cache is None
+
+        ssm.delete_parameter(Name=TEST_API_CLIENT_IDS_PARAMETER)
+        ssm.put_parameter(
+            Name=TEST_API_CLIENT_IDS_PARAMETER, Value=_SPA_CLIENT_ID, Type="SecureString"
+        )
+        assert decode_identity(_apigw_event()).rep_id == "rep-1"
+
+
+def test_the_default_reader_requests_decryption(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GetParameter` is called with `WithDecryption=True` and returns the decrypted value."""
+    import boto3
+
+    calls: list[dict[str, Any]] = []
+
+    class _Client:
+        def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {"Parameter": {"Type": "SecureString", "Value": "a,b"}}
+
+    monkeypatch.setattr(boto3, "client", lambda *_a, **_k: _Client())
+    assert envelope._ssm_parameter_reader("/p") == "a,b"
+    assert calls == [{"Name": "/p", "WithDecryption": True}]
 
 
 def test_apigw_missing_ssm_parameter_is_a_server_error_not_a_401(
@@ -479,7 +551,13 @@ def test_gateway_and_agent_channels_ignore_the_apigw_allowlist(
 ) -> None:
     """The allowlist binds the ``apigw`` channel only; neither other channel reads it."""
     monkeypatch.delenv(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV, raising=False)
-    agent_event = {AGENT_IDENTITY_KEY: {"claims": {CLAIM_REP_ID: "rep-2"}, "session_id": "s"}}
+    agent_event = {
+        AGENT_IDENTITY_KEY: {
+            "claims": {CLAIM_REP_ID: "rep-2"},
+            "principal_type": "user",
+            "session_id": "s",
+        }
+    }
 
     assert decode_identity(_gateway_event()).source == "gateway"
     assert decode_identity(agent_event).source == "agent"
@@ -494,22 +572,58 @@ def test_gateway_and_agent_channels_ignore_the_apigw_allowlist(
 def test_agent_forwarded_claims_are_decoded() -> None:
     """The agent channel decodes the invoking user's forwarded identity and scope."""
     event = {
-        "_agent_identity": {
-            "claims": {CLAIM_REP_ID: "rep-7", CLAIM_BOOK: "A-3"},
-            "session_id": "chat-1",
-        },
+        "_agent_identity": _agent_block(),
         "opportunity_id": "opp-1",
     }
     identity = decode_identity(event)
     assert identity.rep_id == "rep-7"
     assert identity.source == "agent"
     assert identity.book == frozenset({"A-3"})
+    assert identity.principal_type == "user"
+
+
+def _agent_block(**overrides: Any) -> dict[str, Any]:
+    """An agent identity block as a producer sends it, ``principal_type`` included."""
+    block: dict[str, Any] = {
+        "claims": {CLAIM_REP_ID: "rep-7", CLAIM_BOOK: "A-3"},
+        "principal_type": "user",
+        "session_id": "chat-1",
+    }
+    block.update(overrides)
+    return block
+
+
+def test_agent_channel_decodes_a_declared_service_principal() -> None:
+    identity = decode_identity({AGENT_IDENTITY_KEY: _agent_block(principal_type="service")})
+    assert identity.principal_type == "service"
+
+
+def test_agent_channel_refuses_an_absent_principal_type() -> None:
+    """An agent block that declares no principal type is refused, never defaulted to `user`."""
+    block = _agent_block()
+    del block["principal_type"]
+    with pytest.raises(AuthenticationFailed) as caught:
+        decode_identity({AGENT_IDENTITY_KEY: block})
+    assert "principal_type is absent" in (caught.value.detail or "")
+
+
+@pytest.mark.parametrize("declared", [None, "", "User", "superuser", 0, ["user"]])
+def test_agent_channel_refuses_any_other_principal_type(declared: object) -> None:
+    with pytest.raises(AuthenticationFailed) as caught:
+        decode_identity({AGENT_IDENTITY_KEY: _agent_block(principal_type=declared)})
+    assert "principal_type is" in (caught.value.detail or "")
+
+
+def test_agent_channel_refuses_a_service_principal_with_full_visibility() -> None:
+    claims = {CLAIM_REP_ID: "svc-1", CLAIM_FULL_VISIBILITY: "true"}
+    with pytest.raises(AuthenticationFailed):
+        decode_identity({AGENT_IDENTITY_KEY: _agent_block(claims=claims, principal_type="service")})
 
 
 def test_agent_identity_without_claims_is_rejected() -> None:
     """The agent cannot invent an identity of its own for authorization purposes."""
     with pytest.raises(AuthenticationFailed):
-        decode_identity({"_agent_identity": {"session_id": "chat-1"}})
+        decode_identity({"_agent_identity": {"principal_type": "user", "session_id": "chat-1"}})
 
 
 # --------------------------------------------------------------------------------------
@@ -610,7 +724,12 @@ def test_strip_then_decode_yields_the_injected_not_the_supplied_identity() -> No
     """After stripping, decoding yields the injected identity, not the caller-supplied one."""
     supplied = {
         "opportunity_id": "opp-1",
-        IDENTITY_KEY: {"rep_id": "attacker", "full_visibility": True, "source": "gateway"},
+        IDENTITY_KEY: {
+            "rep_id": "attacker",
+            "full_visibility": True,
+            "principal_type": "user",
+            "source": "gateway",
+        },
     }
     cleaned = strip_identity(supplied)
     cleaned[IDENTITY_KEY] = {
@@ -738,7 +857,8 @@ def test_strip_identity_removes_the_second_caller_controllable_channel() -> None
                 CLAIM_REP_ID: "attacker",
                 CLAIM_FULL_VISIBILITY: "true",
                 CLAIM_BOOK: "",
-            }
+            },
+            "principal_type": "user",
         },
     }
     cleaned = strip_identity(hostile)

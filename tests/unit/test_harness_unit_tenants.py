@@ -86,7 +86,12 @@ def golden(tmp_path: Path) -> Path:
         "category": "lookup",
         "derived_from": "unit-tenant isolation test",
         "prompt": f"Look up contact {_CONTACT}.",
-        "actor": {"rep_id": "rep-unit", "book": [], "full_visibility": True},
+        "actor": {
+            "rep_id": "rep-unit",
+            "book": [],
+            "full_visibility": True,
+            "principal_type": "user",
+        },
         "scoring_mode": "machine",
         "unscored_reason": None,
         "assertions": {

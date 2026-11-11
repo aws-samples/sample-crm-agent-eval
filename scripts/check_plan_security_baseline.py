@@ -3080,8 +3080,9 @@ def check_relay_denies_command_execution(_plan: Plan) -> list[Finding]:
 #: whereas `EXPECTED_RESOURCE_COUNTS` counts plan instances.
 DECLARED_INFRA_BLOCK_COUNTS: dict[str, tuple[int, str]] = {
     'resource "aws_iam_role_policy"': (
-        22,
-        "`eval_trigger_artifacts` is one. One was removed with eval_worker: "
+        23,
+        "The lambda_action module's `config_parameter_kms` is one, decrypting the allowlist "
+        "SecureString. `eval_trigger_artifacts` is one. One was removed with eval_worker: "
         "`eval_trigger_invoke_worker`. Six more are `sweep_control_artifacts`, "
         "`sweep_task_invoke_runtime` and `eval_sweep` (`eval_sfn.tf`), `chat_target_invoke_runtime` "
         "and the mcp_chat_gateway module's `gateway`, and `eval_trigger_states`; the plan was "
@@ -3104,14 +3105,14 @@ DECLARED_INFRA_BLOCK_COUNTS: dict[str, tuple[int, str]] = {
         "plan re-capture is invisible to EXPECTED_RESOURCE_COUNTS, which is why this count exists.",
     ),
     'resource "aws_kms_key_policy"': (
-        4,
-        "`aws_kms_key_policy.eval_artifacts` and `aws_kms_key_policy.cursor` at the root, beside "
-        "`dynamodb` and the frontend module's `frontend`; `EXPECTED_RESOURCE_COUNTS` expects the "
-        "same four in the plan.",
+        5,
+        "`aws_kms_key_policy.eval_artifacts`, `aws_kms_key_policy.cursor` and "
+        "`aws_kms_key_policy.api_allowlist` at the root, beside `dynamodb` and the frontend "
+        "module's `frontend`; `EXPECTED_RESOURCE_COUNTS` expects the same five in the plan.",
     ),
     'data "aws_iam_policy_document"': (
-        43,
-        "`eval_trigger_artifacts` is one. Four were removed with eval_worker: "
+        44,
+        "The lambda_action module's `config_parameter_kms` is one. `eval_trigger_artifacts` is one. Four were removed with eval_worker: "
         "`eval_trigger_invoke_worker`, "
         "`eval_worker_invoke_tools` and the deleted async_failure_destination module's two. "
         "Nine more are `sweep_control_artifacts`, `sweep_task_invoke_runtime`, "
@@ -4505,6 +4506,57 @@ CURSOR_KEY_POLICY = StorePolicy(
 )
 
 
+#: Root locals naming the allowlist CMK's consumer roles, its SSM service and the parameter ARN.
+ALLOWLIST_KEY_CONSUMERS_LOCAL = "api_allowlist_key_consumer_arns"
+ALLOWLIST_SSM_SERVICE_LOCAL = "api_allowlist_ssm_service"
+ALLOWLIST_PARAMETER_ARN_LOCAL = "api_allowed_client_ids_parameter_arn"
+ALLOWLIST_KEY_REFERENCE = "aws_kms_key.api_allowlist.arn"
+ALLOWLIST_OPERATOR_SID = "AllowOperatorsUseThroughSsm"
+ALLOWLIST_OPERATOR_ACTIONS: tuple[str, ...] = ("kms:Encrypt", "kms:Decrypt", "kms:DescribeKey")
+ALLOWLIST_CONSUMER_SID = "AllowConsumersDecryptTheParameter"
+ALLOWLIST_WRITE_SID = "DenyKeyWriteToNonOperators"
+#: Every operation that writes under the allowlist CMK; refused to every principal but the operators.
+ALLOWLIST_WRITE_ACTIONS: tuple[str, ...] = (
+    "kms:Encrypt",
+    "kms:GenerateDataKey*",
+    "kms:ReEncrypt*",
+    "kms:CreateGrant",
+)
+ALLOWLIST_GRANT_SID = "DecryptConfigParameters"
+ALLOWLIST_GRANT_DENY_SID = "DenyConfigParameterDecryptUnderOtherKeys"
+
+#: The allowlist CMK's policy, read like `STORE_POLICIES` plus its operator write Deny.
+ALLOWLIST_KEY_POLICY = StorePolicy(
+    "allowlist_key",
+    "aws_kms_key_policy",
+    ".",
+    "api_allowlist",
+    (
+        "EnableIAMUserPermissions",
+        ALLOWLIST_OPERATOR_SID,
+        ALLOWLIST_CONSUMER_SID,
+        ALLOWLIST_WRITE_SID,
+        *_KEY_DENY_SIDS,
+    ),
+    (
+        StoreDeny(
+            ALLOWLIST_WRITE_SID,
+            ALLOWLIST_WRITE_ACTIONS,
+            ("*",),
+            CRM_OPERATOR_PRINCIPALS_VAR,
+            STORE_KEY_EXEMPTION_OPERATOR,
+        ),
+        *_key_denies(
+            f"concat(local.{ALLOWLIST_KEY_CONSUMERS_LOCAL}, {CRM_OPERATOR_PRINCIPALS_VAR})",
+            _STORE_ADMIN_ROOT,
+        ),
+    ),
+    root_sid="EnableIAMUserPermissions",
+    root_wired=True,
+    lockout_flag=True,
+)
+
+
 def _store_root_problems(statement: RenderedStatement) -> list[str]:
     problems: list[str] = []
     if statement.effect != "Allow":
@@ -5009,11 +5061,194 @@ def _cursor_principals_findings() -> list[Finding]:
     ]
 
 
+def _allowlist_allow_problems(
+    statement: RenderedStatement | None,
+    principal: str,
+    actions: tuple[str, ...],
+    condition: dict[str, tuple[HclValue, ...]],
+) -> list[str]:
+    if statement is None:
+        return ["statement absent"]
+    problems: list[str] = []
+    if statement.effect != "Allow":
+        problems.append(f"effect={statement.effect!r}, expected 'Allow'")
+    if statement.principal != {"AWS": HclExpr(principal)}:
+        problems.append(f"principal={statement.principal!r}, expected {{'AWS': {principal}}}")
+    if statement.actions != actions:
+        problems.append(f"actions={list(statement.actions)!r}, expected exactly {list(actions)!r}")
+    if statement.resources != ("*",):
+        problems.append(f"resources={list(statement.resources)!r}, expected exactly ['*']")
+    if statement.conditions != {"StringEquals": condition}:
+        problems.append(
+            f"conditions={statement.conditions!r}, expected exactly StringEquals {condition!r}"
+        )
+    return problems
+
+
+def _allowlist_allow_findings() -> list[Finding]:
+    """The allowlist CMK's two Allows: operators use it through SSM; consumers decrypt the parameter."""
+    address = f"./aws_kms_key_policy.{ALLOWLIST_KEY_POLICY.name}"
+    blocks = [
+        b
+        for d, n, b in tf_resource_blocks("aws_kms_key_policy")
+        if d == "." and n == ALLOWLIST_KEY_POLICY.name
+    ]
+    if len(blocks) != 1:
+        return [Finding(_STORE_CONTROL, address, "fail", f"found {len(blocks)} policy blocks")]
+    try:
+        statements = {s.sid: s for s in rendered_policy_statements(".", blocks[0])}
+    except ValueError as exc:
+        return [Finding(_STORE_CONTROL, address, "fail", f"policy unreadable: {exc}")]
+    via_ssm = HclExpr(f"local.{ALLOWLIST_SSM_SERVICE_LOCAL}")
+    expected = {
+        ALLOWLIST_OPERATOR_SID: _allowlist_allow_problems(
+            statements.get(ALLOWLIST_OPERATOR_SID),
+            CRM_OPERATOR_PRINCIPALS_VAR,
+            ALLOWLIST_OPERATOR_ACTIONS,
+            {"kms:ViaService": (via_ssm,)},
+        ),
+        ALLOWLIST_CONSUMER_SID: _allowlist_allow_problems(
+            statements.get(ALLOWLIST_CONSUMER_SID),
+            f"local.{ALLOWLIST_KEY_CONSUMERS_LOCAL}",
+            ("kms:Decrypt",),
+            {
+                "kms:ViaService": (via_ssm,),
+                "kms:EncryptionContext:PARAMETER_ARN": (
+                    HclExpr(f"local.{ALLOWLIST_PARAMETER_ARN_LOCAL}"),
+                ),
+            },
+        ),
+    }
+    return [
+        Finding(
+            _STORE_CONTROL,
+            f"{address}#{sid}",
+            "fail" if problems else "pass",
+            "; ".join(problems) or "matches the expected Allow statement",
+        )
+        for sid, problems in expected.items()
+    ]
+
+
+def _allowlist_parameter_finding() -> Finding:
+    """The allowlist parameter is a SecureString under the allowlist CMK."""
+    address = "./aws_ssm_parameter.api_allowed_client_ids"
+    blocks = [
+        b
+        for d, n, b in tf_resource_blocks("aws_ssm_parameter")
+        if d == "." and n == "api_allowed_client_ids"
+    ]
+    if len(blocks) != 1:
+        return Finding(_STORE_CONTROL, address, "fail", f"found {len(blocks)}, expected 1")
+    problems: list[str] = []
+    kind = _hcl_expression(blocks[0], "type")
+    if kind != "SecureString":
+        problems.append(f"type={kind!r}, expected 'SecureString'")
+    key = _hcl_expression(blocks[0], "key_id")
+    if key != ALLOWLIST_KEY_REFERENCE:
+        problems.append(f"key_id={key!r}, expected {ALLOWLIST_KEY_REFERENCE}")
+    return Finding(
+        _STORE_CONTROL,
+        address,
+        "fail" if problems else "pass",
+        "; ".join(problems) or "a SecureString under the allowlist CMK",
+    )
+
+
+def _allowlist_grant_finding() -> Finding:
+    """The `config_parameter_kms` document: Decrypt through SSM under the context, Deny other keys."""
+    address = "modules/lambda_action/data.aws_iam_policy_document.config_parameter_kms"
+    blocks = [
+        b
+        for d, n, b in tf_resource_blocks("aws_iam_policy_document", kind="data")
+        if d == "modules/lambda_action" and n == "config_parameter_kms"
+    ]
+    if len(blocks) != 1:
+        return Finding(_STORE_CONTROL, address, "fail", f"found {len(blocks)}, expected 1")
+    source = re.sub(r"\s*=\s*", " = ", _normalised_expression(blank_comments(blocks[0])))
+    expected = (
+        "statement { "
+        f'sid = "{ALLOWLIST_GRANT_SID}" effect = "Allow" actions = ["kms:Decrypt"] '
+        "resources = [var.config_parameter_kms_key_arn] "
+        'condition { test = "StringEquals" variable = "kms:ViaService" '
+        'values = ["ssm.${local.config_parameter_region}.amazonaws.com"] } '
+        'condition { test = "StringEquals" variable = "kms:EncryptionContext:PARAMETER_ARN" '
+        "values = var.config_parameter_arns } } "
+        "statement { "
+        f'sid = "{ALLOWLIST_GRANT_DENY_SID}" effect = "Deny" actions = ["kms:Decrypt"] '
+        "not_resources = [var.config_parameter_kms_key_arn] "
+        'condition { test = "StringLike" variable = "kms:ViaService" '
+        'values = ["ssm.*.amazonaws.com"] } }'
+    )
+    found = expected in source and source.count("statement {") == 2
+    return Finding(
+        _STORE_CONTROL,
+        address,
+        "pass" if found else "fail",
+        "Decrypt on the one key through SSM under each parameter's context, and a Deny on "
+        "decrypting through SSM under any other key"
+        if found
+        else "the document is not exactly the Decrypt-through-SSM statement under "
+        "kms:EncryptionContext:PARAMETER_ARN = var.config_parameter_arns plus the NotResource Deny "
+        "on kms:ViaService ssm.*.amazonaws.com",
+    )
+
+
+def _allowlist_consumers_finding() -> Finding:
+    """Every module call granted the parameter gets the key, and the key's consumer list is theirs."""
+    resource = f"local.{ALLOWLIST_KEY_CONSUMERS_LOCAL}"
+    try:
+        expression = _normalised_expression(_root_local_expression(ALLOWLIST_KEY_CONSUMERS_LOCAL))
+    except ValueError as exc:
+        return Finding(_STORE_CONTROL, resource, "fail", str(exc))
+    parameter = f"local.{ALLOWLIST_PARAMETER_ARN_LOCAL}"
+    problems: list[str] = []
+    readers: set[str] = set()
+    for name, body in _root_module_calls().items():
+        granted = _normalised_expression(_hcl_expression(body, "config_parameter_arns"))
+        key = _normalised_expression(_hcl_expression(body, "config_parameter_kms_key_arn"))
+        if parameter not in granted:
+            if key:
+                problems.append(f"module.{name} receives the key without the parameter")
+            continue
+        readers.add(name)
+        if name == "lambda_action":
+            wanted_key = (
+                f"contains(local.routed_tool_names, each.key) ? {ALLOWLIST_KEY_REFERENCE} : null"
+            )
+        else:
+            wanted_key = ALLOWLIST_KEY_REFERENCE
+        if key != wanted_key:
+            problems.append(
+                f"module.{name} config_parameter_kms_key_arn={key!r}, expected {wanted_key!r}"
+            )
+    listed = set(re.findall(r"module\.(lambda_action_\w+)\.role_arn", expression))
+    if "lambda_action" in readers:
+        loop = "[for name in local.routed_tool_names : module.lambda_action[name].role_arn]"
+        if loop not in expression:
+            problems.append(f"{resource} does not name the routed tools' roles by {loop}")
+    if listed != readers - {"lambda_action"}:
+        problems.append(
+            f"{resource} names {sorted(listed)!r}, the parameter readers are "
+            f"{sorted(readers - {'lambda_action'})!r}"
+        )
+    if not readers:
+        problems.append("no module call is granted the parameter, so this verified nothing")
+    return Finding(
+        _STORE_CONTROL,
+        resource,
+        "fail" if problems else "pass",
+        "; ".join(problems)
+        or "names exactly the roles granted the parameter, and each of them receives the key",
+    )
+
+
 def check_store_principal_deny(_plan: Plan) -> list[Finding]:
-    """The logs, CloudTrail, frontend, eval-artefacts and cursor key and bucket policies deny the
-    data plane, key use and administration outside each store's allowlist and the operators, the
-    cursor key refuses use outside its encryption context, and every key rotates. Read from
-    source."""
+    """The logs, CloudTrail, frontend, eval-artefacts, cursor and allowlist key and bucket policies
+    deny the data plane, key use and administration outside each store's allowlist and the
+    operators, the cursor key refuses use outside its encryption context, the allowlist key admits
+    writes from the operators only and decryption only through SSM, and every key rotates. Read
+    from source."""
     findings: list[Finding] = []
     for policy in STORE_POLICIES:
         findings += _store_policy_findings(policy)
@@ -5024,6 +5259,11 @@ def check_store_principal_deny(_plan: Plan) -> list[Finding]:
     findings.append(_cursor_purpose_finding())
     findings.append(_cursor_grant_finding())
     findings += _cursor_principals_findings()
+    findings += _store_policy_findings(ALLOWLIST_KEY_POLICY)
+    findings += _allowlist_allow_findings()
+    findings.append(_allowlist_parameter_finding())
+    findings.append(_allowlist_grant_finding())
+    findings.append(_allowlist_consumers_finding())
     findings += _key_rotation_findings()
     return findings
 
@@ -6539,11 +6779,13 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "Lambda groups, so the total exceeds the function count by five.",
     ),
     "aws_iam_role_policy": ExpectedCount(
-        per_tool=4,
-        fixed=51,
-        basis="FOUR per action Lambda -- `dynamodb`, `dynamodb_kms`, `logs`, and the `vpc_access` "
-        "Hyperplane ENI grant, without which the apply is green and every invocation fails "
-        "-- plus 51 elsewhere: four each on the interceptor, pre-token-generation, eval_trigger, "
+        per_tool=5,
+        fixed=53,
+        basis="FIVE per action Lambda -- `dynamodb`, `dynamodb_kms`, `logs`, `config_parameter_kms` "
+        "(decrypting the allowlist SecureString), and the `vpc_access` Hyperplane ENI grant, without "
+        "which the apply is green and every invocation fails -- plus 53 elsewhere: the "
+        "`config_parameter_kms` policies of eval_trigger, capabilities and user_settings (3), less "
+        "one for the agent-only `get_page_context`, which reads no parameter; and the 51 that follow: four each on the interceptor, pre-token-generation, eval_trigger, "
         "chat_interceptor, chat_target, user_settings, sweep_control and sweep_task lambda_action "
         "instantiations (32), capabilities' `logs`, `vpc_access` and `dynamodb` (3), the relay's four "
         "(invoke-runtime, logs, read-audience-parameter, vpc_access), nine at the root "
@@ -6558,10 +6800,12 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         per_managed_dynamodb=-1,
     ),
     "aws_iam_policy_document": ExpectedCount(
-        per_tool=3,
-        fixed=51,
-        basis="one document behind each of an action Lambda's `dynamodb`, `dynamodb_kms` and `logs` "
-        "role policies, plus 51: ten at the root (agentcore_gateway permissions, agentcore_runtime "
+        per_tool=4,
+        fixed=53,
+        basis="one document behind each of an action Lambda's `dynamodb`, `dynamodb_kms`, `logs` and "
+        "`config_parameter_kms` role policies, plus 53: the `config_parameter_kms` documents of "
+        "eval_trigger, capabilities and user_settings (3), less one for the agent-only "
+        "`get_page_context`; and the 51 that follow: ten at the root (agentcore_gateway permissions, agentcore_runtime "
         "permissions and logs, the two agent-runtime relay-only resource policies, "
         "chat_target_invoke_runtime, eval_sweep_permissions, eval_trigger_artifacts, sweep_control_artifacts, "
         "sweep_task_invoke_runtime), two in agent_relay, two in agentcore, one in api (its resource "
@@ -6646,14 +6890,15 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "uploads so the current SPA build is never expired",
     ),
     "aws_kms_key": ExpectedCount(
-        fixed=6,
+        fixed=7,
         basis="one CMK each for DynamoDB, the frontend, CloudTrail, CloudWatch Logs, the "
-        "eval-artifacts bucket and the pagination cursors. The last two are declared at the ROOT "
-        "(aws_kms_key.eval_artifacts, aws_kms_key.cursor) rather than inside a module, so their "
-        "policies render at plan time",
+        "eval-artifacts bucket, the pagination cursors and the API client-allowlist SecureString. "
+        "The last three are declared at the ROOT (aws_kms_key.eval_artifacts, aws_kms_key.cursor, "
+        "aws_kms_key.api_allowlist) rather than inside a module, so their policies render at plan "
+        "time",
     ),
     "aws_kms_alias": ExpectedCount(
-        fixed=6, basis="one alias per CMK above, so each key is addressable by a stable name"
+        fixed=7, basis="one alias per CMK above, so each key is addressable by a stable name"
     ),
     # --- relay, runtime, frontend and supporting resources ---
     "aws_bedrockagentcore_resource_policy": ExpectedCount(
@@ -6669,14 +6914,16 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
         "secret and a JWT check of its own",
     ),
     "aws_kms_key_policy": ExpectedCount(
-        fixed=4,
-        basis="four, each carrying the account-root statement and the Denies on key use and key "
+        fixed=5,
+        basis="five, each carrying the account-root statement and the Denies on key use and key "
         "administration outside its principal lists: the frontend CMK's, which also grants "
         "CloudFront's service principal decrypt against this distribution only; the DynamoDB table "
         "CMK's; the eval-artefacts CMK's, separate from its key because an inline policy would "
-        "cycle through the CodeBuild role; and the cursor CMK's, which also refuses every use "
-        "outside the `crm-cursor` encryption context. The logs and CloudTrail CMKs carry their "
-        "policy inline on the key resource, which is why this is 4 rather than 6 -- a discrepancy "
+        "cycle through the CodeBuild role; the cursor CMK's, which also refuses every use "
+        "outside the `crm-cursor` encryption context; and the allowlist CMK's, which admits writes "
+        "from the operators only and decryption only through SSM. The logs and CloudTrail CMKs "
+        "carry their policy inline on the key resource, which is why this is 5 rather than 7 -- a "
+        "discrepancy "
         "worth keeping visible in the basis",
     ),
     "aws_cloudfront_function": ExpectedCount(

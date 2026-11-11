@@ -4,7 +4,9 @@
 Token cost itself is computed by :func:`crm.metering.cost_for_usage`. This module adds:
 
 1. Per-model prompt-cache minimum checkpoint sizes, read from ``config/model_capabilities.yaml``.
-2. :func:`is_cost_provisional`: while ``config/pricing.yaml`` carries ``provisional: true``,
+2. :func:`inference_profile_for`: the inference profile a model's calls address, from the same
+   file, which selects the pricing route.
+3. :func:`is_cost_provisional`: while ``config/pricing.yaml`` carries ``provisional: true``,
    absolute currency figures are withheld from published eval output.
 """
 
@@ -95,3 +97,26 @@ def cache_min_checkpoint_tokens(
         raise KeyError(f"{model_id} has no entry in {capabilities_path}")
     threshold = models[model_id].get("prompt_cache_min_checkpoint_tokens")
     return int(threshold) if threshold is not None else None
+
+
+def inference_profile_for(
+    model_id: str, *, capabilities_path: Path = _DEFAULT_CAPABILITIES_PATH
+) -> str:
+    """Return the configured inference profile for model_id; raise ValueError if absent.
+
+    Read from ``config/model_capabilities.yaml``.
+
+    Args:
+        model_id: The Bedrock model identifier to look up.
+        capabilities_path: Path to ``config/model_capabilities.yaml``. Overridable for tests.
+
+    Raises:
+        ValueError: When ``model_id`` has no entry, or its entry has no non-empty string
+            ``inference_profile``.
+    """
+    models = _load_yaml_mapping(capabilities_path).get("models")
+    entry = models.get(model_id) if isinstance(models, dict) else None
+    profile = entry.get("inference_profile") if isinstance(entry, dict) else None
+    if not isinstance(profile, str) or not profile:
+        raise ValueError(f"{model_id!r} has no configured inference_profile in {capabilities_path}")
+    return profile

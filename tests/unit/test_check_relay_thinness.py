@@ -241,7 +241,10 @@ class TestIdentityConstruction:
                     "export interface TurnRequest {\n"
                     "  readonly claims: Readonly<Record<string, unknown>>;\n"
                     "}\n"
-                    "const payload = { _agent_identity: request.claims };\n"
+                    'export const RELAY_PRINCIPAL_TYPE = "user";\n'
+                    "const payload = {\n"
+                    "  _agent_identity: { claims: request.claims, principal_type: RELAY_PRINCIPAL_TYPE },\n"
+                    "};\n"
                 )
             },
         )
@@ -391,3 +394,103 @@ class TestEndToEndAgainstTheRealRelay:
         result = _run("--relay-dir", str(root))
         assert result.returncode == 1
         assert "identity-construction" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Check 4 — no identity attribute beyond the admitted principal_type declaration.
+# ---------------------------------------------------------------------------
+
+_ADMITTED_RUNTIME = (
+    'export const RELAY_PRINCIPAL_TYPE = "user";\n'
+    "export function build(claims: object) {\n"
+    "  return { _agent_identity: { claims, principal_type: RELAY_PRINCIPAL_TYPE } };\n"
+    "}\n"
+)
+
+
+def _relay_copy(tmp_path: Path) -> Path:
+    """A scratch copy of the real relay's source and tests, dependencies left behind."""
+    root = tmp_path / "relay"
+    for part in ("src", "tests"):
+        shutil.copytree(
+            RELAY_DIR / part, root / part, ignore=shutil.ignore_patterns("node_modules")
+        )
+    return root
+
+
+class TestIdentityAttributes:
+    def test_the_real_runtime_declares_exactly_the_admitted_attribute(self) -> None:
+        path = RELAY_DIR / gate.ADMITTED_ATTRIBUTE_FILE
+        code = gate.strip_comments(path.read_text(encoding="utf-8"))
+        assert gate.find_identity_attributes(path, code, RELAY_DIR) == []
+        assert code.count("principal_type: RELAY_PRINCIPAL_TYPE") == 1
+
+    def test_an_unmutated_copy_of_the_real_relay_passes(self, tmp_path: Path) -> None:
+        result = _run("--relay-dir", str(_relay_copy(tmp_path)))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize(
+        ("old", "new"),
+        [
+            ('RELAY_PRINCIPAL_TYPE = "user"', 'RELAY_PRINCIPAL_TYPE = "service"'),
+            ("principal_type: RELAY_PRINCIPAL_TYPE,", 'principal_type: "user",'),
+            ("principal_type: RELAY_PRINCIPAL_TYPE,", ""),
+        ],
+    )
+    def test_a_mutated_copy_of_the_real_runtime_fails(
+        self, tmp_path: Path, old: str, new: str
+    ) -> None:
+        root = _relay_copy(tmp_path)
+        runtime = root / gate.ADMITTED_ATTRIBUTE_FILE
+        text = runtime.read_text(encoding="utf-8")
+        assert text.count(old) == 1
+        runtime.write_text(text.replace(old, new), encoding="utf-8")
+        result = _run("--relay-dir", str(root))
+        assert result.returncode == 1
+        assert "identity-attribute" in result.stderr
+
+    def test_the_admitted_runtime_passes(self, tmp_path: Path) -> None:
+        root = _relay(tmp_path, {"src/runtime.ts": _ADMITTED_RUNTIME})
+        result = _run("--relay-dir", str(root))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_declaring_the_attribute_twice_fails(self, tmp_path: Path) -> None:
+        body = _ADMITTED_RUNTIME + "const again = { principal_type: RELAY_PRINCIPAL_TYPE };\n"
+        result = _run("--relay-dir", str(_relay(tmp_path, {"src/runtime.ts": body})))
+        assert result.returncode == 1
+        assert "2 times" in result.stderr
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            'const a = { principal_type: "user" };',
+            "const a = { rep_id: claims.sub };",
+            'const a = { "full_visibility": true };',
+            "const a = { 'principal_type': RELAY_PRINCIPAL_TYPE };",
+        ],
+    )
+    def test_an_identity_attribute_in_any_other_production_file_fails(
+        self, tmp_path: Path, line: str
+    ) -> None:
+        root = _relay(
+            tmp_path, {"src/runtime.ts": _ADMITTED_RUNTIME, "src/handler.ts": line + "\n"}
+        )
+        result = _run("--relay-dir", str(root))
+        assert result.returncode == 1
+        assert "handler.ts: [identity-attribute]" in result.stderr
+
+    def test_test_files_may_name_identity_attributes(self, tmp_path: Path) -> None:
+        root = _relay(
+            tmp_path,
+            {
+                "src/runtime.ts": _ADMITTED_RUNTIME,
+                "tests/runtime.test.ts": 'expect(x).toEqual({ principal_type: "user" });\n',
+            },
+        )
+        result = _run("--relay-dir", str(root))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_a_commented_attribute_is_not_flagged(self, tmp_path: Path) -> None:
+        root = _relay(tmp_path, {"src/handler.ts": '// { principal_type: "service" }\n'})
+        result = _run("--relay-dir", str(root))
+        assert result.returncode == 0, result.stdout + result.stderr

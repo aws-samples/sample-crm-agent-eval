@@ -303,6 +303,102 @@ class TestPriceTableHelpers:
             gate.all_rates_are_zero(bad_table)
 
 
+def _tiered_table(*, long_context_input: float = 0.0, provisional: bool = True) -> dict[str, Any]:
+    """A schema-2 price table: flat rates zero, one long-context block, a geo route multiplier."""
+    return {
+        "schema_version": 2,
+        "provisional": provisional,
+        "routes": {"global": {"multiplier": 1.0}, "geo": {"multiplier": 1.10}},
+        "models": {
+            "anthropic.claude-haiku-5-5": {
+                "input": 0.0,
+                "output": 0.0,
+                "cache_write": 0.0,
+                "cache_read": 0.0,
+                "long_context": {
+                    "above_prompt_tokens": 100000,
+                    "input": long_context_input,
+                    "output": 0.0,
+                    "cache_write": 0.0,
+                    "cache_read": 0.0,
+                },
+            },
+            "anthropic.claude-opus-5-5": {
+                "input": 0.0,
+                "output": 0.0,
+                "cache_write": 0.0,
+                "cache_read": 0.0,
+            },
+        },
+    }
+
+
+class TestTieredPriceTable:
+    """Check 3 reads flat and long-context rates; thresholds and route multipliers are not rates."""
+
+    def test_a_tiered_table_with_every_rate_zero_is_all_zero(self) -> None:
+        assert gate.all_rates_are_zero(_tiered_table()) is True
+
+    def test_a_nonzero_long_context_rate_alone_makes_the_table_nonzero(self) -> None:
+        assert gate.all_rates_are_zero(_tiered_table(long_context_input=0.5)) is False
+
+    def test_iter_rates_names_every_long_context_rate_and_skips_the_threshold(self) -> None:
+        paths = {(model, path) for model, path, _ in gate.iter_rates(_tiered_table())}
+        haiku = "anthropic.claude-haiku-5-5"
+        assert {
+            (haiku, f"long_context.{name}")
+            for name in ("input", "output", "cache_write", "cache_read")
+        } <= paths
+        assert (haiku, "long_context.above_prompt_tokens") not in paths
+        assert (haiku, "long_context") not in paths
+        assert not [path for _, path in paths if "multiplier" in path]
+
+    def test_a_route_multiplier_is_not_read_as_a_rate(self) -> None:
+        table = _tiered_table()
+        table["routes"]["geo"]["multiplier"] = 7.0
+        assert gate.all_rates_are_zero(table) is True
+
+    def test_a_non_mapping_long_context_block_raises(self) -> None:
+        table = _tiered_table()
+        table["models"]["anthropic.claude-haiku-5-5"]["long_context"] = 0.5
+        with pytest.raises(gate.CostWithholdingGateError, match="long_context"):
+            gate.all_rates_are_zero(table)
+
+    def test_a_non_numeric_long_context_rate_raises_naming_its_path(self) -> None:
+        table = _tiered_table()
+        table["models"]["anthropic.claude-haiku-5-5"]["long_context"]["output"] = "tbd"
+        with pytest.raises(gate.CostWithholdingGateError, match=r"long_context\.output"):
+            gate.all_rates_are_zero(table)
+
+    def test_the_forced_unwithheld_arm_is_caught_under_a_zeroed_tiered_table(
+        self, tmp_path: Path
+    ) -> None:
+        pricing_path = tmp_path / "pricing.yaml"
+        pricing_path.write_text(yaml.safe_dump(_tiered_table()), encoding="utf-8")
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        (results_dir / "matrix.json").write_text(
+            json.dumps({"arms": [_forced_unwithheld_arm()]}), encoding="utf-8"
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert [v for v in violations if "cost_withheld_provisional=False" in v], violations
+
+    def test_a_nonzero_long_context_rate_lifts_the_forced_unwithheld_check(
+        self, tmp_path: Path
+    ) -> None:
+        pricing_path = tmp_path / "pricing.yaml"
+        pricing_path.write_text(
+            yaml.safe_dump(_tiered_table(long_context_input=0.5)), encoding="utf-8"
+        )
+        results_dir = tmp_path / "results"
+        results_dir.mkdir()
+        (results_dir / "matrix.json").write_text(
+            json.dumps({"arms": [_forced_unwithheld_arm()]}), encoding="utf-8"
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert not [v for v in violations if "cost_withheld_provisional=False" in v], violations
+
+
 class TestCurrencyShapeDetection:
     """The gate detects a currency *figure* in prose, not only a currency *field name*."""
 

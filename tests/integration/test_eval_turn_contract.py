@@ -160,6 +160,32 @@ def test_the_runtime_accepts_the_request_sweep_task_builds(store: Store) -> None
         teardown_tenant(store, tenant=tenant)
 
 
+def test_every_request_declares_its_actors_principal_type() -> None:
+    """Each golden task's request carries the type its actor declares; gt-15 is a service."""
+    from eval.actor import actor_principal_type
+
+    tasks = _load_golden_tasks(_DEFAULT_GOLDEN_TASKS_PATH)
+    declared = {}
+    for index, task in enumerate(tasks):
+        identity = _request_for(index, tenant="eval-x")["_agent_identity"]
+        actor = task["actor"]
+        assert isinstance(actor, dict)
+        assert identity["principal_type"] == actor_principal_type(actor)
+        declared[task["id"]] = identity["principal_type"]
+    assert [task_id for task_id, kind in declared.items() if kind == "service"] == [
+        "gt-15-denial-service-principal-no-implicit-visibility"
+    ]
+
+
+def test_the_runtime_refuses_a_request_whose_principal_type_was_dropped(store: Store) -> None:
+    """Without `principal_type` the agent channel fails closed: a 401, and no turn runs."""
+    request = _request_for(0, tenant="eval-x")
+    del request["_agent_identity"]["principal_type"]
+    response = TestClient(runtime_server.app).post("/invocations", json=request)
+    assert response.status_code == 401, response.text
+    assert response.json()["error"]["code"] == "authentication_failed"
+
+
 def test_the_runtime_refuses_a_request_outside_an_eval_tenant(store: Store) -> None:
     """A `demo` identity is a 403; through sweep_task's client that is a raised failure."""
     request = _request_for(0, tenant="eval-x")
@@ -198,7 +224,13 @@ def test_an_identity_smuggled_on_another_channel_is_ignored(store: Store) -> Non
     seed_tenant(store, tenant=tenant)
     try:
         request = _request_for(0, tenant=tenant)
-        request["_identity"] = {"rep_id": "rep-intruder", "tenant": "demo", "full_visibility": True}
+        request["_identity"] = {
+            "rep_id": "rep-intruder",
+            "tenant": "demo",
+            "full_visibility": True,
+            "principal_type": "user",
+            "source": "gateway",
+        }
         response = TestClient(runtime_server.app).post("/invocations", json=request)
         assert response.status_code == 200, response.text
         assert deserialise_turn(response.json()).outcome.tenant == tenant
@@ -283,7 +315,7 @@ def test_a_state_machine_sweep_scores_exactly_as_the_in_process_harness(
     runtime = StarletteRuntime()
 
     def control(step: str, **fields: Any) -> dict[str, Any]:
-        if step in {"start", "teardown", "finalize"}:
+        if step in {"start", "seed", "aggregate", "teardown", "finalize"}:
             fields["execution_arn"] = f"arn:aws:states:us-east-1:123456789012:execution:x:{run_id}"
         return sweep_control_handler(
             {"step": step, "run_id": run_id, **fields}, store=store, s3=s3, config=CONTROL
@@ -344,7 +376,7 @@ def test_a_runtime_turn_flagged_usage_lower_bound_reaches_the_run_records_matrix
     runtime = StarletteRuntime()
 
     def control(step: str, **fields: Any) -> dict[str, Any]:
-        if step in {"start", "teardown", "finalize"}:
+        if step in {"start", "seed", "aggregate", "teardown", "finalize"}:
             fields["execution_arn"] = f"arn:aws:states:us-east-1:123456789012:execution:x:{run_id}"
         return sweep_control_handler(
             {"step": step, "run_id": run_id, **fields}, store=store, s3=s3, config=CONTROL
@@ -396,7 +428,7 @@ def test_the_runtimes_resolved_efforts_survive_the_stored_row(
     monkeypatch.setattr(runtime.client, "post", _recording_post)
 
     def control(step: str, **fields: Any) -> dict[str, Any]:
-        if step in {"start", "teardown", "finalize"}:
+        if step in {"start", "seed", "aggregate", "teardown", "finalize"}:
             fields["execution_arn"] = f"arn:aws:states:us-east-1:123456789012:execution:x:{run_id}"
         return sweep_control_handler(
             {"step": step, "run_id": run_id, **fields}, store=store, s3=s3, config=CONTROL

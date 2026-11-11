@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 /**
  * Tests for the auth context's sign-out: it clears the saved-settings store, so the next user to
- * sign in on the same page load fetches their own settings and never sees the previous user's.
+ * sign in on the same page load fetches their own settings and never sees the previous user's; and
+ * it waits for the session's revocation before clearing local state and ending the Hosted UI
+ * session.
  */
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,13 +24,23 @@ import { AuthProvider, useAuth, type AuthContextValue } from "./AuthProvider";
 import type { AuthSession } from "./CognitoAuthSession";
 import type { Identity } from "./identity";
 
-const { signInMock, restoreMock } = vi.hoisted(() => ({
-  signInMock: vi.fn(),
-  restoreMock: vi.fn(),
-}));
+const { signInMock, restoreMock, loadRuntimeConfigMock, endHostedUiSessionMock } = vi.hoisted(
+  () => ({
+    signInMock: vi.fn(),
+    restoreMock: vi.fn(),
+    loadRuntimeConfigMock: vi.fn(),
+    endHostedUiSessionMock: vi.fn(),
+  }),
+);
+
+const RUNTIME_CONFIG = { cognitoHostedUiDomain: "crm-example.auth.us-east-1.amazoncognito.com" };
 
 vi.mock("../config/runtimeConfig", () => ({
-  loadRuntimeConfig: vi.fn().mockResolvedValue({}),
+  loadRuntimeConfig: loadRuntimeConfigMock,
+}));
+
+vi.mock("./hostedUi", () => ({
+  endHostedUiSession: endHostedUiSessionMock,
 }));
 
 vi.mock("./CognitoAuthSession", () => ({
@@ -46,7 +58,7 @@ function fakeSession(userId: string): AuthSession {
   return {
     getIdentity: () => identity,
     getAccessToken: () => Promise.resolve(`token-${userId}`),
-    signOut: vi.fn(),
+    signOut: vi.fn(() => Promise.resolve()),
   };
 }
 
@@ -86,10 +98,20 @@ async function signInAs(auth: { current: () => AuthContextValue }, userId: strin
   });
 }
 
+/** Sign out and let the asynchronous revoke → clear → redirect sequence finish. */
+async function signOutAndSettle(auth: { current: () => AuthContextValue }): Promise<void> {
+  await act(async () => {
+    auth.current().signOut();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 beforeEach(() => {
   __resetSessionTuningForTests();
   signInMock.mockReset();
   restoreMock.mockReset().mockResolvedValue(undefined);
+  loadRuntimeConfigMock.mockReset().mockResolvedValue(RUNTIME_CONFIG);
+  endHostedUiSessionMock.mockReset().mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -108,7 +130,7 @@ describe("AuthProvider sign-out", () => {
     });
     expect(getSessionTuning().tiers.supervisor.model).toBe("model-of-a");
 
-    act(() => auth.current().signOut());
+    await signOutAndSettle(auth);
     expect(auth.current().status).toBe("signed-out");
     expect(getSessionTuning().tiers.supervisor).toEqual(EMPTY_TIER_SELECTION);
 
@@ -129,9 +151,104 @@ describe("AuthProvider sign-out", () => {
       await auth.current().signIn("user-a", "pw");
     });
 
-    act(() => auth.current().signOut());
+    await signOutAndSettle(auth);
 
     expect(session.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for the session's revocation before clearing state, then ends the Hosted UI session", async () => {
+    const auth = await renderAuth();
+    const revoked = deferred<undefined>();
+    const session = { ...fakeSession("user-a"), signOut: vi.fn(() => revoked.promise) };
+    signInMock.mockResolvedValueOnce(session);
+    await act(async () => {
+      await auth.current().signIn("user-a", "pw");
+    });
+    await act(async () => {
+      await loadUserSettings(settingsClient(() => Promise.resolve(viewFor("model-of-a"))));
+    });
+
+    await act(async () => {
+      auth.current().signOut();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(session.signOut).toHaveBeenCalledTimes(1);
+    expect(auth.current().status).toBe("signed-in");
+    expect(getSessionTuning().tiers.supervisor.model).toBe("model-of-a");
+    expect(endHostedUiSessionMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      revoked.resolve(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(auth.current().status).toBe("signed-out");
+    expect(getSessionTuning().tiers.supervisor).toEqual(EMPTY_TIER_SELECTION);
+    expect(endHostedUiSessionMock).toHaveBeenCalledTimes(1);
+    expect(endHostedUiSessionMock).toHaveBeenCalledWith(RUNTIME_CONFIG);
+  });
+
+  it("ignores a second sign-out while the first is still revoking", async () => {
+    const auth = await renderAuth();
+    const revoked = deferred<undefined>();
+    const session = { ...fakeSession("user-a"), signOut: vi.fn(() => revoked.promise) };
+    signInMock.mockResolvedValueOnce(session);
+    await act(async () => {
+      await auth.current().signIn("user-a", "pw");
+    });
+
+    await act(async () => {
+      auth.current().signOut();
+      auth.current().signOut();
+      revoked.resolve(undefined);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(session.signOut).toHaveBeenCalledTimes(1);
+    expect(endHostedUiSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still signs out locally and ends the Hosted UI session when the session's sign-out rejects", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const auth = await renderAuth();
+    const session = {
+      ...fakeSession("user-a"),
+      signOut: vi.fn(() => Promise.reject(new Error("revoke exploded"))),
+    };
+    signInMock.mockResolvedValueOnce(session);
+    await act(async () => {
+      await auth.current().signIn("user-a", "pw");
+    });
+
+    await signOutAndSettle(auth);
+
+    expect(auth.current().status).toBe("signed-out");
+    expect(endHostedUiSessionMock).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("signs out locally without redirecting when the runtime config cannot load", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const auth = await renderAuth();
+    await signInAs(auth, "user-a");
+    loadRuntimeConfigMock.mockRejectedValueOnce(new Error("runtime config: /config.json responded 503"));
+
+    await signOutAndSettle(auth);
+
+    expect(auth.current().status).toBe("signed-out");
+    expect(endHostedUiSessionMock).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
+  it("ends the Hosted UI session even when no local session exists", async () => {
+    const auth = await renderAuth();
+    expect(auth.current().status).toBe("signed-out");
+
+    await signOutAndSettle(auth);
+
+    expect(auth.current().status).toBe("signed-out");
+    expect(endHostedUiSessionMock).toHaveBeenCalledWith(RUNTIME_CONFIG);
   });
 });
 
@@ -218,7 +335,7 @@ describe("a save or reset in flight at sign-out", () => {
       });
       const writeA = write(clientA);
 
-      act(() => auth.current().signOut());
+      await signOutAndSettle(auth);
       await act(async () => {
         pendingA.resolve(viewFor("model-of-a-written"));
         await writeA;

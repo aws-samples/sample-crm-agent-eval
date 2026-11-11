@@ -7,6 +7,7 @@
  *
  * The flow is three calls across a full-page redirect:
  *   `beginHostedUiSignIn` → (browser leaves) → `completeHostedUiSignIn` on the callback URL.
+ * Sign-out calls `endHostedUiSession`, navigating to `hostedUiLogoutUrl`, which ends the Hosted UI session and returns to `/logout`.
  *
  * - A verifier is generated per attempt and consumed exactly once: `takePkceAttempt` deletes it
  *   before it returns, so a replayed callback URL cannot reuse it.
@@ -187,6 +188,47 @@ export async function beginHostedUiSignIn(
     state,
   });
   return `https://${config.cognitoHostedUiDomain}/login?${params.toString()}`;
+}
+
+/* --------------------------------------------------------------------------- logout */
+
+/** The SPA path the Hosted UI returns to after ending its session; registered as a logout URL. */
+export const HOSTED_UI_LOGOUT_PATH = "/logout";
+
+/** The `logout_uri` sent to the Hosted UI; must exactly match a registered logout URL. */
+export function hostedUiLogoutRedirectUri(origin: string): string {
+  return `${origin}${HOSTED_UI_LOGOUT_PATH}`;
+}
+
+/**
+ * The Hosted UI `/logout` URL that ends the Cognito domain session and returns to
+ * {@link hostedUiLogoutRedirectUri}. Throws `not_configured` when Hosted UI is disabled.
+ */
+export function hostedUiLogoutUrl(config: RuntimeConfig, origin: string): string {
+  if (!isHostedUiEnabled(config)) {
+    throw new HostedUiError("not_configured", "Hosted sign-in is not configured for this deployment.");
+  }
+  const params = new URLSearchParams({
+    client_id: config.cognitoClientId,
+    logout_uri: hostedUiLogoutRedirectUri(origin),
+  });
+  return `https://${config.cognitoHostedUiDomain}/logout?${params.toString()}`;
+}
+
+/** The part of `window.location` that {@link endHostedUiSession} uses. */
+export type LogoutNavigator = Pick<Location, "origin" | "assign">;
+
+/**
+ * Navigates to the Hosted UI `/logout` when Hosted UI is configured and reports whether it did.
+ * Does nothing and returns `false` otherwise.
+ */
+export function endHostedUiSession(
+  config: RuntimeConfig,
+  location: LogoutNavigator = window.location,
+): boolean {
+  if (!isHostedUiEnabled(config)) return false;
+  location.assign(hostedUiLogoutUrl(config, location.origin));
+  return true;
 }
 
 /* ------------------------------------------------------------------------ step two */

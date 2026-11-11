@@ -50,7 +50,7 @@ def _identity_block(claims: dict[str, Any], *, session_id: str | None = None) ->
 
     This block is the only channel by which identity reaches the container.
     """
-    block: dict[str, Any] = {"claims": claims}
+    block: dict[str, Any] = {"claims": claims, "principal_type": "user"}
     if session_id is not None:
         block["session_id"] = session_id
     return {AGENT_IDENTITY_KEY: block}
@@ -1124,7 +1124,8 @@ _FORGED_AGENT_IDENTITY: dict[str, Any] = {
         CLAIM_REP_ID: "rep-attacker",
         "custom:full_visibility": "true",
         CLAIM_TENANT: DEMO_TENANT,
-    }
+    },
+    "principal_type": "user",
 }
 
 #: The same forgery on the `apigw` channel, in the shape an API Gateway Cognito authorizer
@@ -2021,11 +2022,11 @@ def test_a_cancel_cannot_authenticate_itself_with_another_channel(client: TestCl
     ("block", "label"),
     [
         ("not-an-object", "not_an_object"),
-        ({}, "no_claims"),
-        ({"claims": "not-an-object"}, "claims_not_an_object"),
-        ({"claims": {}}, "empty_claims"),
-        ({"claims": {CLAIM_TENANT: _CANCEL_TENANT}}, "no_rep_id"),
-        ({"session_id": _CANCEL_SESSION}, "session_id_only"),
+        ({"principal_type": "user"}, "no_claims"),
+        ({"claims": "not-an-object", "principal_type": "user"}, "claims_not_an_object"),
+        ({"claims": {}, "principal_type": "user"}, "empty_claims"),
+        ({"claims": {CLAIM_TENANT: _CANCEL_TENANT}, "principal_type": "user"}, "no_rep_id"),
+        ({"session_id": _CANCEL_SESSION, "principal_type": "user"}, "session_id_only"),
     ],
 )
 def test_a_malformed_agent_identity_block_is_denied_rather_than_defaulted(
@@ -2045,9 +2046,9 @@ def test_a_malformed_agent_identity_block_is_denied_rather_than_defaulted(
     ("block", "label"),
     [
         ("not-an-object", "not_an_object"),
-        ({}, "no_claims"),
-        ({"claims": {}}, "empty_claims"),
-        ({"claims": {CLAIM_TENANT: "eval-smoke-unit"}}, "no_rep_id"),
+        ({"principal_type": "user"}, "no_claims"),
+        ({"claims": {}, "principal_type": "user"}, "empty_claims"),
+        ({"claims": {CLAIM_TENANT: "eval-smoke-unit"}, "principal_type": "user"}, "no_rep_id"),
     ],
 )
 def test_the_turn_path_denies_a_malformed_agent_identity_block(

@@ -124,8 +124,8 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
 
     strict_transport_security {
       access_control_max_age_sec = 31536000
-      include_subdomains         = false
-      preload                    = false
+      include_subdomains         = true
+      preload                    = true
       override                   = true
     }
 
@@ -164,6 +164,9 @@ resource "aws_cloudfront_function" "spa_history_fallback" {
   code    = file("${path.module}/functions/spa_history_fallback.js")
 }
 
+# The default *.cloudfront.net certificate fixes the viewer minimum protocol; only a custom-domain
+# certificate could set one.
+# nosemgrep: terraform.aws.security.aws-insecure-cloudfront-distribution-tls-version, terraform.aws.security.aws-cloudfront-insecure-tls.aws-insecure-cloudfront-distribution-tls-version
 resource "aws_cloudfront_distribution" "frontend" {
   # checkov:skip=CKV_AWS_68: no WAF on the distribution, an open known limitation
   # checkov:skip=CKV2_AWS_47: no WAF on the distribution, an open known limitation

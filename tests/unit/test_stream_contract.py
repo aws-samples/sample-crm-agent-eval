@@ -419,3 +419,17 @@ def test_registry_size_tracks_all_tools_when_a_definition_is_added(
     patched_registry = registry_module.full_registry()
 
     assert len(patched_registry) == len(patched_tools)
+
+
+def test_a_refused_request_ends_the_stream_with_the_budget_exhausted_terminal() -> None:
+    """A request refused for its prompt size is reported like any other exhausted dimension."""
+    budget = TurnBudget(max_tool_calls=EVAL_MAX_TOOL_CALLS)
+    budget.record_tool_call("called get_account")
+    budget.refuse_request(
+        estimated_prompt_tokens=95_001, limit=95_000, tier="tool", role="research"
+    )
+    event = budget.exhausted_event()
+    assert event.kind == "error"
+    assert event.error_kind == "budget_exhausted"
+    assert event.partial_work == "called get_account"
+    assert "request_prompt_limit: estimated 95001 > 95000" in (event.error_message or "")

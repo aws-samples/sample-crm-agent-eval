@@ -56,9 +56,8 @@ def _apigw_event(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _agent_event(arguments: dict[str, Any]) -> dict[str, Any]:
-    return identity_event(
-        AGENT_IDENTITY_KEY, {"claims": dict(_CLAIMS), "session_id": "sess-1"}, arguments
-    )
+    payload = {"claims": dict(_CLAIMS), "session_id": "sess-1", "principal_type": "user"}
+    return identity_event(AGENT_IDENTITY_KEY, payload, arguments)
 
 
 def _agent_service_event(arguments: dict[str, Any]) -> dict[str, Any]:

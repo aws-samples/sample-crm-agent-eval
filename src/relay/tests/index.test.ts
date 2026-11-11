@@ -202,6 +202,7 @@ describe("a successful turn", () => {
           output_tokens: 8,
           cache_read_tokens: 0,
           cache_write_tokens: 0,
+          long_context_calls: 0,
           cost_usd: 0.0002,
         },
         {
@@ -212,6 +213,7 @@ describe("a successful turn", () => {
           output_tokens: 40,
           cache_read_tokens: 0,
           cache_write_tokens: 0,
+          long_context_calls: 0,
           cost_usd: 0.00031,
         },
       ],

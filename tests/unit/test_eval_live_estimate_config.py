@@ -29,7 +29,9 @@ def test_every_family_and_tier_names_that_familys_tier_model() -> None:
 def test_every_model_is_priced() -> None:
     for tiers in runs.load_static_estimate()[0].values():
         for entry in tiers.values():
-            assert cost_for_usage(TokenUsage(1, 1), str(entry["model_id"])).total > 0
+            model_id = str(entry["model_id"])
+            profile = MATRIX.models[model_id].inference_profile
+            assert cost_for_usage(TokenUsage(1, 1), model_id, inference_profile=profile).total > 0
 
 
 @pytest.mark.parametrize(

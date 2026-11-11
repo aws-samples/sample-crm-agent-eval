@@ -39,6 +39,8 @@ _CACHE_READ_RATE: Final[float] = 0.3
 
 _MODEL_ID: Final[str] = "anthropic.claude-opus-5-5"
 _OPENAI_MODEL_ID: Final[str] = "openai.gpt-6-astra"
+_PROFILE: Final[str] = f"global.{_MODEL_ID}"
+_OPENAI_PROFILE: Final[str] = f"global.{_OPENAI_MODEL_ID}"
 _USAGE: Final[TokenUsage] = TokenUsage(
     input_tokens=1_000_000,
     output_tokens=100_000,
@@ -56,11 +58,12 @@ def _price_table(tmp_path: Path, *, provisional: bool) -> Path:
         "cache_read": _CACHE_READ_RATE,
     }
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "price_table_version": "test-1",
         "provisional": provisional,
         "currency": "USD",
         "unit": "per_1m_tokens",
+        "routes": {"global": {"multiplier": 1.0}, "geo": {"multiplier": 1.10}},
         "models": {_MODEL_ID: dict(rates), _OPENAI_MODEL_ID: dict(rates)},
     }
     path = tmp_path / "pricing.yaml"
@@ -145,7 +148,7 @@ def test_inclusive_accounting_subtracts_both_cached_read_and_cache_write_from_th
     _declare(monkeypatch, "anthropic", "inclusive")
     path = _price_table(tmp_path, provisional=True)
 
-    cost = cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+    cost = cost_for_usage(_USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path)
 
     # 1_000_000 - 400_000 cache_read - 50_000 cache_write = 550_000
     assert billable_input_tokens(_USAGE, "anthropic") == 550_000
@@ -162,7 +165,7 @@ def test_exclusive_accounting_charges_input_cache_read_and_cache_write_additivel
     _declare(monkeypatch, "anthropic", "exclusive")
     path = _price_table(tmp_path, provisional=True)
 
-    cost = cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+    cost = cost_for_usage(_USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path)
 
     assert billable_input_tokens(_USAGE, "anthropic") == 1_000_000
     assert cost.input == pytest.approx(1.0 * _INPUT_RATE)
@@ -174,7 +177,7 @@ def test_exclusive_accounting_charges_input_cache_read_and_cache_write_additivel
 def test_shipped_anthropic_prices_exclusively_with_a_non_zero_cached_read(tmp_path: Path) -> None:
     """Under the shipped declaration a non-zero cached read does not reduce Anthropic's input base."""
     path = _price_table(tmp_path, provisional=False)
-    cost = cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+    cost = cost_for_usage(_USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path)
     assert billable_input_tokens(_USAGE, "anthropic") == 1_000_000
     assert cost.input == pytest.approx(1.0 * _INPUT_RATE)
     assert cost.cache_read_accounting == "exclusive"
@@ -183,7 +186,9 @@ def test_shipped_anthropic_prices_exclusively_with_a_non_zero_cached_read(tmp_pa
 def test_shipped_openai_prices_inclusively_with_a_non_zero_cached_read(tmp_path: Path) -> None:
     """Under the shipped declaration cached reads and writes are subtracted from OpenAI's input base."""
     path = _price_table(tmp_path, provisional=False)
-    cost = cost_for_usage(_USAGE, _OPENAI_MODEL_ID, pricing_path=path)
+    cost = cost_for_usage(
+        _USAGE, _OPENAI_MODEL_ID, inference_profile=_OPENAI_PROFILE, pricing_path=path
+    )
     assert billable_input_tokens(_USAGE, "openai") == 550_000
     assert cost.input == pytest.approx(0.55 * _INPUT_RATE)
     assert cost.cache_read == pytest.approx(0.4 * _CACHE_READ_RATE)
@@ -198,7 +203,7 @@ def test_unconfirmed_accounting_prices_additively_while_the_table_is_provisional
     _declare(monkeypatch, "anthropic", "unconfirmed")
     path = _price_table(tmp_path, provisional=True)
 
-    cost = cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+    cost = cost_for_usage(_USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path)
 
     assert billable_input_tokens(_USAGE, "anthropic") == 1_000_000
     assert cost.input == pytest.approx(1.0 * _INPUT_RATE)
@@ -230,7 +235,7 @@ def test_clearing_provisional_under_an_unconfirmed_accounting_stops_rather_than_
     path = _price_table(tmp_path, provisional=False)
 
     with pytest.raises(UnconfirmedTokenAccountingError) as excinfo:
-        cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+        cost_for_usage(_USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path)
 
     assert "'anthropic'" in str(excinfo.value)
     assert "TOKEN_ACCOUNTING" in str(excinfo.value)
@@ -253,6 +258,7 @@ def test_the_guard_reaches_the_sole_record_constructor_path(
             family="anthropic",
             tier="supervisor",
             usage=_USAGE,
+            inference_profile=_PROFILE,
             pricing_path=path,
         )
 
@@ -263,10 +269,14 @@ def test_the_shipped_settled_families_price_a_publishable_table_without_raising(
     """Both shipped families price a non-provisional table under their declared accounting."""
     path = _price_table(tmp_path, provisional=False)
 
-    anthropic_cost = cost_for_usage(_USAGE, _MODEL_ID, pricing_path=path)
+    anthropic_cost = cost_for_usage(
+        _USAGE, _MODEL_ID, inference_profile=_PROFILE, pricing_path=path
+    )
     assert anthropic_cost.input == pytest.approx(1.0 * _INPUT_RATE)  # exclusive: whole input base
 
-    openai_cost = cost_for_usage(_USAGE, _OPENAI_MODEL_ID, pricing_path=path)
+    openai_cost = cost_for_usage(
+        _USAGE, _OPENAI_MODEL_ID, inference_profile=_OPENAI_PROFILE, pricing_path=path
+    )
     assert openai_cost.input == pytest.approx(0.55 * _INPUT_RATE)  # inclusive: read+write removed
 
 
@@ -283,6 +293,7 @@ def test_a_cost_figure_never_travels_without_the_accounting_that_produced_it(
         family="anthropic",
         tier="supervisor",
         usage=_USAGE,
+        inference_profile=_PROFILE,
         pricing_path=_price_table(tmp_path, provisional=True),
     )
     assert record.cost.cache_read_accounting == "exclusive"

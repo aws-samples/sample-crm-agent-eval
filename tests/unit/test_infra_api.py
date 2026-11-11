@@ -318,6 +318,7 @@ def test_the_resource_policy_denies_every_other_vpc_endpoint(plan: Plan) -> None
 _INFRA_DIR = Path(__file__).resolve().parents[2] / "infra"
 _ALLOWLIST_NAME = "local.api_allowed_client_ids_parameter_name"
 _ALLOWLIST_ARN = "local.api_allowed_client_ids_parameter_arn"
+_ALLOWLIST_KEY = "aws_kms_key.api_allowlist.arn"
 
 
 def _uncommented(path: Path) -> str:
@@ -376,6 +377,9 @@ def test_every_api_integrated_lambda_reads_the_client_allowlist_parameter() -> N
         assert re.search(
             rf"^  config_parameter_arns\s*=\s*\[{re.escape(_ALLOWLIST_ARN)}\]$", body, re.M
         ), f"module.{name} is not granted the allowlist parameter"
+        assert re.search(
+            rf"^  config_parameter_kms_key_arn\s*=\s*{re.escape(_ALLOWLIST_KEY)}$", body, re.M
+        ), f"module.{name} is not granted decrypt on the allowlist key"
 
 
 _ROUTED = r"contains\(local\.routed_tool_names, each\.key\)"
@@ -400,8 +404,14 @@ def test_the_tool_lambdas_get_the_allowlist_only_when_routed() -> None:
         body,
         re.M,
     ), "lambda_action's allowlist grant is not keyed on routed_tool_names"
+    assert re.search(
+        rf"^  config_parameter_kms_key_arn\s*=\s*{_ROUTED} \? {re.escape(_ALLOWLIST_KEY)} : null$",
+        body,
+        re.M,
+    ), "lambda_action's allowlist key grant is not keyed on routed_tool_names"
     assert body.count(API_ALLOWED_CLIENT_IDS_PARAMETER_ENV) == 1
     assert body.count(_ALLOWLIST_ARN) == 1
+    assert body.count(_ALLOWLIST_KEY) == 1
 
 
 def test_get_page_context_is_the_agent_only_tool_kept_off_the_allowlist() -> None:
@@ -424,6 +434,32 @@ def test_no_function_outside_the_api_channel_receives_the_allowlist() -> None:
         if name not in modules:
             assert API_ALLOWED_CLIENT_IDS_PARAMETER_ENV not in body, name
             assert _ALLOWLIST_ARN not in body, name
+            assert _ALLOWLIST_KEY not in body, name
+
+
+def test_the_allowlist_key_consumers_are_exactly_the_parameter_readers() -> None:
+    """The key policy's consumer list names every module granted the parameter, and no other."""
+    text = _uncommented(_INFRA_DIR / "main.tf")
+    match = re.search(r"^  api_allowlist_key_consumer_arns\s*=\s*concat\(", text, re.M)
+    assert match is not None
+    depth, end = 0, match.end() - 1
+    for end in range(match.end() - 1, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[end], 0)
+        if depth == 0:
+            break
+    expression = text[match.end() : end]
+    assert re.search(
+        r"\[for name in local\.routed_tool_names : module\.lambda_action\[name\]\.role_arn\]",
+        expression,
+    )
+    singletons = set(re.findall(r"module\.(lambda_action_\w+)\.role_arn", expression))
+    readers = {
+        name
+        for name, body in _root_module_calls().items()
+        if name != "lambda_action" and _ALLOWLIST_ARN in body
+    }
+    assert readers == _api_integrated_modules() - {"lambda_action"}
+    assert singletons == readers
 
 
 def test_the_allowlist_parameter_holds_the_spa_client_id_under_the_named_path() -> None:
@@ -432,7 +468,8 @@ def test_the_allowlist_parameter_holds_the_spa_client_id_under_the_named_path() 
     assert match is not None
     block = _column0_block(text, match.start())
     assert re.search(rf"^  name\s*=\s*{re.escape(_ALLOWLIST_NAME)}$", block, re.M)
-    assert re.search(r'^  type\s*=\s*"String"$', block, re.M)
+    assert re.search(r'^  type\s*=\s*"SecureString"$', block, re.M)
+    assert re.search(r"^  key_id\s*=\s*aws_kms_key\.api_allowlist\.arn$", block, re.M)
     assert re.search(r"^  value\s*=\s*module\.cognito\.spa_client_id$", block, re.M)
     assert '"data-classification" = "internal"' in block
     name = re.search(r'^  api_allowed_client_ids_parameter_name\s*=\s*"(.+)"$', text, re.M)

@@ -27,8 +27,9 @@ module "lambda_action_user_settings" {
     # Required for this zip's layout: the first-party packages live under `src/`.
     PYTHONPATH = "/var/task/src"
   }
-  environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
-  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
+  environment_kms_key_arn      = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns        = [local.api_allowed_client_ids_parameter_arn]
+  config_parameter_kms_key_arn = aws_kms_key.api_allowlist.arn
 
   reserved_concurrent_executions = local.reserved_concurrency["user_settings"]
 

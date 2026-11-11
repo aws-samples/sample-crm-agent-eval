@@ -651,7 +651,11 @@ def test_the_config_parameter_grant_is_get_parameter_on_exactly_the_named_arns(
 ) -> None:
     _skip_unless_terraform()
     plan = _plan_scratch_lambda_action(
-        tmp_path, {"config_parameter_arns": json.dumps([PARAMETER_ARN])}
+        tmp_path,
+        {
+            "config_parameter_arns": json.dumps([PARAMETER_ARN]),
+            "config_parameter_kms_key_arn": f'"{KEY_ARN}"',
+        },
     )
     statements = _logs_statements(plan)
     assert set(statements) == {"WriteOwnLogGroup", "ReadConfigParameters"}

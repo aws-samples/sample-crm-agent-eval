@@ -80,7 +80,8 @@
         "FunctionName": "${sweep_control_arn}",
         "Payload": {
           "step": "seed",
-          "run_id.$": "$.run_id"
+          "run_id.$": "$.run_id",
+          "execution_arn.$": "$$.Execution.Id"
         }
       },
       "ResultPath": null,
@@ -205,6 +206,7 @@
         "Payload": {
           "step": "aggregate",
           "run_id.$": "$.run_id",
+          "execution_arn.$": "$$.Execution.Id",
           "error.$": "$.error"
         }
       },

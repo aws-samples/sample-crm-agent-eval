@@ -32,7 +32,7 @@ from crm.store.store import Store
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
 _ENDPOINT = "https://dynamodb.us-east-1.amazonaws.com"
-_SECRET_TEXT = "internal-endpoint-detail"
+_SECRET_TEXT = "internal-endpoint-detail"  # nosec B105  # a redaction sentinel, not a credential
 _TENANT = "demo"
 _ACCOUNT = "acct-1"
 

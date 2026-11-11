@@ -165,7 +165,12 @@ def test_a_flat_event_carrying_a_tool_argument_named_body_is_not_a_proxy_event()
     )
 
     flat_event = {
-        "_identity": {"rep_id": _REP, "source": "gateway", "tenant": _TENANT},
+        "_identity": {
+            "rep_id": _REP,
+            "principal_type": "user",
+            "source": "gateway",
+            "tenant": _TENANT,
+        },
         "target_table": "accounts",
         "target_id": _IN_BOOK_ACCOUNT,
         "body": "Called the customer. Not JSON, and not an envelope body.",
@@ -279,6 +284,7 @@ def test_an_identity_key_planted_in_the_body_cannot_widen_scope(store: Store) ->
                     "rep_id": "attacker",
                     "book": [_OUT_OF_BOOK_ACCOUNT],
                     "full_visibility": True,
+                    "principal_type": "user",
                     "source": "gateway",
                     "tenant": _TENANT,
                 },
@@ -324,6 +330,7 @@ def test_the_flat_agent_channel_error_shape_is_unchanged(store: Store) -> None:
                 "custom:full_visibility": "false",
                 "custom:tenant": _TENANT,
             },
+            "principal_type": "user",
             "session_id": "sess-1",
         },
         "account_id": _IN_BOOK_ACCOUNT,
@@ -450,6 +457,7 @@ def test_an_identity_key_planted_in_a_format_1_0_body_cannot_widen_scope(store: 
                     "rep_id": "attacker",
                     "book": [_OUT_OF_BOOK_ACCOUNT],
                     "full_visibility": True,
+                    "principal_type": "user",
                     "source": "gateway",
                     "tenant": _TENANT,
                 },
@@ -511,7 +519,7 @@ def test_an_id_token_for_a_foreign_audience_is_a_401_through_the_full_handler(
     _seed_account(store, _IN_BOOK_ACCOUNT)
     served = _ENVELOPE_BUILDERS[fmt]({"account_id": _IN_BOOK_ACCOUNT})
     claims = _claims_of(served)
-    claims["token_use"] = "id"
+    claims["token_use"] = "id"  # nosec B105  # a token_use claim value, not a credential
     claims["aud"] = claims.pop("client_id")
     foreign = copy.deepcopy(served)
     _claims_of(foreign)["aud"] = "mcp-oauth-third-party-client"

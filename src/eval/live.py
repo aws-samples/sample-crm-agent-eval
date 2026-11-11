@@ -28,12 +28,14 @@ from providers.factory import build_provider_for_family
 
 #: Leading ``<prefix>:`` tokens of a retryable *throttle*: the provider refused for rate, quota or
 #: availability reasons. Bedrock's PascalCase exception type names, as the Anthropic adapter
-#: renders an in-band exception frame.
+#: renders an in-band exception frame, and the ``service_unavailable`` code of the
+#: OpenAI-compatible Responses surface.
 _THROTTLE_PREFIXES: Final[frozenset[str]] = frozenset(
     {
         "ThrottlingException",
         "TooManyRequestsException",
         "ServiceUnavailableException",
+        "service_unavailable",
         "ServiceQuotaExceededException",
         "ModelTimeoutException",
         "ModelNotReadyException",

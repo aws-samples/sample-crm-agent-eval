@@ -13,11 +13,13 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import boto3
+import jwt
 import pytest
 from moto import mock_aws
 
@@ -38,9 +40,16 @@ _V1_EVENT = (
     / "events"
     / "apigw_v1_proxy_post_get_account.json"
 )
-_FAKE_TOKEN = (
-    "eyJhbGciOiJSUzI1NiJ9.ZmFrZS1jbGFpbXMtZm9yLWxvZy10ZXN0.c2lnbmF0dXJlLXNlY3JldA"  # gitleaks:allow
-)
+
+
+def _mint_fake_token() -> str:
+    """Return a freshly signed HS256 JWT under a random per-process key."""
+    return jwt.PyJWS().encode(
+        b'{"sub":"fake-claims-for-log-test"}', secrets.token_bytes(32), algorithm="HS256"
+    )
+
+
+_FAKE_TOKEN = _mint_fake_token()
 _OUT_OF_BOOK_ACCOUNT = "acct-eval-smoke-9999"
 
 

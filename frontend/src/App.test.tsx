@@ -147,6 +147,13 @@ describe("App auth gating", () => {
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
+  it("renders the sign-in form on the /logout landing page when signed out", () => {
+    stubAuth({ status: "signed-out", identity: undefined });
+    renderAt("/logout");
+    expect(screen.getByRole("heading", { name: "page:sign-in" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Page not found" })).not.toBeInTheDocument();
+  });
+
   it("does not render any page route while signed out", () => {
     stubAuth({ status: "signed-out", identity: undefined });
     renderAt("/audit");
@@ -186,6 +193,13 @@ describe("route table", () => {
     stubAuth();
     renderAt("/");
     expect(screen.getByRole("heading", { name: "page:pipeline" })).toBeInTheDocument();
+  });
+
+  it("sends a signed-in user on /logout to the pipeline instead of a not-found page", () => {
+    stubAuth();
+    renderAt("/logout");
+    expect(screen.getByRole("heading", { name: "page:pipeline" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Page not found" })).not.toBeInTheDocument();
   });
 
   it("passes the runtime config's apiBaseUrl to the eval dashboard", () => {

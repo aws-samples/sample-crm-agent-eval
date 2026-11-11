@@ -7,7 +7,8 @@
 # runs named modules only; either marks the run PARTIAL. `--dry-run` prints what would run and makes no AWS
 # call. Provisions one smoke tenant before running and
 # tears it down on exit, failure or interrupt. Writes the per-run, unguarded
-# results/verification-inventory.run.{json,md}; the publishable
+# results/verification-inventory.run.{json,md} for a full run, or
+# results/verification-inventory.partial.run.{json,md} for a PARTIAL run; the publishable
 # results/verification-inventory.{json,md} are written only by `--layer inventory`
 # (scripts/consolidate_inventory.py). Requires `--i-understand-this-is-billable`.
 #
@@ -44,6 +45,8 @@ INVENTORY_MD="${REPO_ROOT}/results/verification-inventory.md"
 # A layer run writes its own unguarded per-run rendering to distinct paths.
 RUN_INVENTORY_JSON="${REPO_ROOT}/results/verification-inventory.run.json"
 RUN_INVENTORY_MD="${REPO_ROOT}/results/verification-inventory.run.md"
+PARTIAL_RUN_INVENTORY_JSON="${REPO_ROOT}/results/verification-inventory.partial.run.json"
+PARTIAL_RUN_INVENTORY_MD="${REPO_ROOT}/results/verification-inventory.partial.run.md"
 
 usage() {
   cat <<EOF
@@ -642,7 +645,14 @@ run_layer() {
 
 write_inventory() {
   # Per-run rendering only, without consolidate_inventory.py's publication guards.
-  local json_array not_run
+  local json_array not_run out_json out_md
+  if [[ "${PARTIAL_RUN}" == "true" ]]; then
+    out_json="${PARTIAL_RUN_INVENTORY_JSON}"
+    out_md="${PARTIAL_RUN_INVENTORY_MD}"
+  else
+    out_json="${RUN_INVENTORY_JSON}"
+    out_md="${RUN_INVENTORY_MD}"
+  fi
   not_run="$(not_run_modules "${EXECUTED_MODULES# }")"
   # A full run is a bare array of module results; a --only run is an object marked partial, so it
   # cannot be read as a full run's inventory.
@@ -675,8 +685,8 @@ document = (
 )
 print(json.dumps(document, indent=2))
 ')"
-  mkdir -p "$(dirname "${RUN_INVENTORY_JSON}")"
-  printf '%s\n' "${json_array}" > "${RUN_INVENTORY_JSON}"
+  mkdir -p "$(dirname "${out_json}")"
+  printf '%s\n' "${json_array}" > "${out_json}"
 
   printf '%s\n' "${json_array}" | "${PYTHON_BIN}" -c '
 import json
@@ -740,9 +750,9 @@ if partial:
     )
     lines.insert(6, "")
 print("\n".join(lines))
-' > "${RUN_INVENTORY_MD}"
+' > "${out_md}"
 
-  echo "${SCRIPT_NAME}: wrote ${RUN_INVENTORY_JSON} and ${RUN_INVENTORY_MD}"
+  echo "${SCRIPT_NAME}: wrote ${out_json} and ${out_md}"
   echo "${SCRIPT_NAME}: (per-run, unguarded — publish with --layer inventory)"
 }
 

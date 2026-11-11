@@ -144,7 +144,12 @@ def _machine_task(**overrides: object) -> dict[str, object]:
         "category": "enrichment",
         "derived_from": "low-risk write commits directly",
         "prompt": "test prompt",
-        "actor": {"rep_id": _REP, "book": ["acct-1"], "full_visibility": False},
+        "actor": {
+            "rep_id": _REP,
+            "book": ["acct-1"],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
         "scoring_mode": "machine",
         "unscored_reason": None,
         "assertions": {

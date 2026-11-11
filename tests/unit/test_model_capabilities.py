@@ -734,3 +734,228 @@ def test_a_config_only_edit_makes_opus_and_astra_the_supervisor_defaults(tmp_pat
     matrix = load_capability_matrix(models_path=path)
     assert matrix.model_for("anthropic", "supervisor").model_id == ANTHROPIC_UNASSIGNED
     assert matrix.model_for("openai", "supervisor").model_id == OPENAI_UNASSIGNED
+
+
+# --------------------------------------------------------------------------------------
+# Inference profiles, context windows and per-tier request prompt limits
+# --------------------------------------------------------------------------------------
+
+TIERS: tuple[str, ...] = ("supervisor", "subagent", "tool")
+EXPECTED_REQUEST_PROMPT_LIMITS: dict[str, int] = {
+    "supervisor": 270_000,
+    "subagent": 270_000,
+    "tool": 95_000,
+}
+
+
+def _write_models_with_limits(tmp_path: Path, limits: object) -> Path:
+    """Copy the real ``models.yaml`` with ``request_prompt_limits`` replaced (removed for None)."""
+    data = yaml.safe_load(MODELS_PATH.read_text(encoding="utf-8"))
+    if limits is None:
+        del data["request_prompt_limits"]
+    else:
+        data["request_prompt_limits"] = limits
+    path = tmp_path / "models.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def _write_capabilities_with_model_field(
+    tmp_path: Path, model_id: str, field: str, value: object
+) -> Path:
+    """Copy the real matrix with one model's ``field`` set (removed for None)."""
+    data = yaml.safe_load(CAPABILITIES_PATH.read_text(encoding="utf-8"))
+    entry = data["models"][model_id]
+    if value is None:
+        del entry[field]
+    else:
+        entry[field] = value
+    path = tmp_path / "model_capabilities.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def test_the_loaded_request_prompt_limits_match_the_configured_per_tier_values() -> None:
+    """Supervisor 270,000, subagent 270,000 and tool 95,000, each read through its accessor."""
+    matrix = load_capability_matrix()
+    assert dict(matrix.request_prompt_limits) == EXPECTED_REQUEST_PROMPT_LIMITS
+    for tier, limit in EXPECTED_REQUEST_PROMPT_LIMITS.items():
+        assert matrix.request_prompt_limit(tier) == limit  # type: ignore[arg-type]
+
+
+def test_the_limits_are_read_from_models_yaml(tier_config: dict[str, Any]) -> None:
+    assert tier_config["request_prompt_limits"] == EXPECTED_REQUEST_PROMPT_LIMITS
+
+
+def test_model_capabilities_yaml_carries_no_prompt_limit_field() -> None:
+    """The limit is a tier setting; no model entry or top-level key in the matrix carries one."""
+    assert "prompt_limit" not in CAPABILITIES_PATH.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_changing_one_tier_limit_moves_only_that_tier(tmp_path: Path, tier: str) -> None:
+    """Each tier key is independent: editing one leaves the other two at their configured values."""
+    limits = dict(EXPECTED_REQUEST_PROMPT_LIMITS)
+    limits[tier] = 12_345
+    matrix = load_capability_matrix(models_path=_write_models_with_limits(tmp_path, limits))
+    for other in TIERS:
+        expected = 12_345 if other == tier else EXPECTED_REQUEST_PROMPT_LIMITS[other]
+        assert matrix.request_prompt_limit(other) == expected  # type: ignore[arg-type]
+
+
+def test_an_unmutated_copy_of_the_limits_loads(tmp_path: Path) -> None:
+    """Control for the rejections below."""
+    path = _write_models_with_limits(tmp_path, dict(EXPECTED_REQUEST_PROMPT_LIMITS))
+    assert dict(load_capability_matrix(models_path=path).request_prompt_limits) == (
+        EXPECTED_REQUEST_PROMPT_LIMITS
+    )
+
+
+@pytest.mark.parametrize(
+    ("limits", "match"),
+    [
+        (None, "must be a mapping"),
+        ([270_000, 270_000, 95_000], "must be a mapping"),
+        ({"supervisor": 270_000, "subagent": 270_000}, r"missing \['tool'\]"),
+        ({"supervisor": 270_000, "tool": 95_000}, r"missing \['subagent'\]"),
+        ({"subagent": 270_000, "tool": 95_000}, r"missing \['supervisor'\]"),
+        (
+            {"supervisor": 270_000, "subagent": 270_000, "tool": 95_000, "planner": 1},
+            r"unknown \['planner'\]",
+        ),
+        ({"supervisor": 0, "subagent": 270_000, "tool": 95_000}, "supervisor 0 is not a positive"),
+        ({"supervisor": 270_000, "subagent": -1, "tool": 95_000}, "subagent -1 is not a positive"),
+        ({"supervisor": 270_000, "subagent": 270_000, "tool": True}, "tool True is not a positive"),
+        (
+            {"supervisor": "270000", "subagent": 270_000, "tool": 95_000},
+            "supervisor '270000' is not a positive",
+        ),
+        ({"supervisor": 270_000.0, "subagent": 270_000, "tool": 95_000}, "is not a positive"),
+    ],
+    ids=[
+        "absent",
+        "non-mapping",
+        "missing-tool",
+        "missing-subagent",
+        "missing-supervisor",
+        "extra-key",
+        "zero",
+        "negative",
+        "bool",
+        "string",
+        "float",
+    ],
+)
+def test_loader_rejects_a_malformed_request_prompt_limits(
+    tmp_path: Path, limits: object, match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        load_capability_matrix(models_path=_write_models_with_limits(tmp_path, limits))
+
+
+def test_a_tier_limit_above_a_models_window_is_refused(tmp_path: Path) -> None:
+    limits = {**EXPECTED_REQUEST_PROMPT_LIMITS, "supervisor": 1_000_001}
+    with pytest.raises(ValueError, match=r"supervisor 1000001 exceeds the 1000000-token"):
+        load_capability_matrix(models_path=_write_models_with_limits(tmp_path, limits))
+
+
+def test_a_limit_equal_to_the_smallest_window_loads(tmp_path: Path) -> None:
+    """The window bound is inclusive."""
+    smallest = min(m.context_window_tokens or 0 for m in load_capability_matrix().models.values())
+    limits = {**EXPECTED_REQUEST_PROMPT_LIMITS, "subagent": smallest}
+    matrix = load_capability_matrix(models_path=_write_models_with_limits(tmp_path, limits))
+    assert matrix.request_prompt_limit("subagent") == smallest
+
+
+@pytest.mark.parametrize(
+    ("model_id", "tier"),
+    [
+        (ANTHROPIC_UNASSIGNED, "supervisor"),
+        (OPENAI_UNASSIGNED, "supervisor"),
+        (ANTHROPIC_TOOL, "supervisor"),
+        (OPENAI_TOOL, "subagent"),
+    ],
+    ids=["opus-selectable", "astra-selectable", "haiku-user-selected", "luna-user-selected"],
+)
+def test_a_selectable_model_with_a_window_below_a_tier_limit_is_refused(
+    tmp_path: Path, model_id: str, tier: str
+) -> None:
+    """A model a turn may select for the tier, default or not, must fit that tier's limit.
+
+    Only ``tier`` carries a limit above the shrunken window, so the refusal names that tier.
+    """
+    path = _write_capabilities_with_model_field(
+        tmp_path, model_id, "context_window_tokens", 200_000
+    )
+    limits = {name: 270_000 if name == tier else 95_000 for name in TIERS}
+    with pytest.raises(ValueError, match=rf"{tier} 270000 exceeds the 200000-token") as exc_info:
+        load_capability_matrix(
+            models_path=_write_models_with_limits(tmp_path, limits), capabilities_path=path
+        )
+    assert model_id in str(exc_info.value)
+
+
+def test_a_window_between_the_tool_and_supervisor_limits_is_still_refused(tmp_path: Path) -> None:
+    """Haiku's window at 100,000 fits the tool limit but not the supervisor limit a user can pick."""
+    path = _write_capabilities_with_model_field(
+        tmp_path, ANTHROPIC_TOOL, "context_window_tokens", 100_000
+    )
+    with pytest.raises(ValueError, match="270000 exceeds the 100000-token"):
+        load_capability_matrix(capabilities_path=path)
+
+
+@pytest.mark.parametrize("model_id", ALL_MODELS)
+def test_every_model_loads_its_context_window_from_the_yaml(
+    models: dict[str, Any], model_id: str
+) -> None:
+    loaded = load_capability_matrix().models[model_id].context_window_tokens
+    assert loaded == models[model_id]["context_window_tokens"]
+    assert isinstance(loaded, int) and loaded > 0
+
+
+@pytest.mark.parametrize(
+    "window", [None, 0, -5, True, "1000000"], ids=["missing", "zero", "negative", "bool", "string"]
+)
+def test_loader_rejects_a_missing_or_non_positive_context_window(
+    tmp_path: Path, window: object
+) -> None:
+    path = _write_capabilities_with_model_field(
+        tmp_path, OPENAI_TOOL, "context_window_tokens", window
+    )
+    with pytest.raises(ValueError, match="context_window_tokens") as exc_info:
+        load_capability_matrix(capabilities_path=path)
+    assert OPENAI_TOOL in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("profile", "match"),
+    [
+        ("anthropic.claude-haiku-5-5", "no recognised route prefix"),
+        ("xx.anthropic.claude-haiku-5-5", "no recognised route prefix"),
+        ("", "empty"),
+        ("global.anthropic.claude-sonnet-5-5", "does not name model"),
+        ("us.anthropic.claude-sonnet-5-5", "does not name model"),
+        (42, "is not a string"),
+    ],
+    ids=["bare-id", "unknown-prefix", "empty", "global-other-model", "geo-other-model", "non-str"],
+)
+def test_loader_rejects_an_inference_profile_without_a_route_to_its_model(
+    tmp_path: Path, profile: object, match: str
+) -> None:
+    path = _write_capabilities_with_model_field(
+        tmp_path, ANTHROPIC_TOOL, "inference_profile", profile
+    )
+    with pytest.raises(ValueError, match=match) as exc_info:
+        load_capability_matrix(capabilities_path=path)
+    assert ANTHROPIC_TOOL in str(exc_info.value)
+
+
+@pytest.mark.parametrize("prefix", ["us.", "eu.", "apac.", "ca.", "jp.", "au."])
+def test_loader_accepts_a_geo_inference_profile(tmp_path: Path, prefix: str) -> None:
+    profile = f"{prefix}{ANTHROPIC_TOOL}"
+    path = _write_capabilities_with_model_field(
+        tmp_path, ANTHROPIC_TOOL, "inference_profile", profile
+    )
+    assert load_capability_matrix(capabilities_path=path).models[
+        ANTHROPIC_TOOL
+    ].inference_profile == (profile)

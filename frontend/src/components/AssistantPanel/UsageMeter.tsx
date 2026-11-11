@@ -7,7 +7,8 @@
  * `cost_withheld === true`.
  *
  * Cache counts are shown only when the model reported them, so a reported `0` is distinct from
- * "not reported".
+ * "not reported". Calls priced at long-context rates are counted only when there is at least one,
+ * whether or not the cost is withheld.
  */
 
 import type { JSX } from "react";
@@ -98,6 +99,18 @@ export function turnCost(events: readonly AgentEventFrame[]): TurnCost | undefin
   return undefined;
 }
 
+/** How many of the turn's calls were priced at long-context rates, summed over its cost lines. */
+function longContextCalls(lines: readonly CostLine[]): number {
+  return lines.reduce(
+    (total, line) => (line.long_context_calls > 0 ? total + line.long_context_calls : total),
+    0,
+  );
+}
+
+function longContextNote(count: number): string {
+  return count === 1 ? "1 call at long-context rates" : `${count} calls at long-context rates`;
+}
+
 function CostBreakdown({ lines, withheld }: { lines: readonly CostLine[]; withheld: boolean }) {
   return (
     <details data-testid="usage-cost-breakdown" className="flex flex-col gap-2">
@@ -124,7 +137,17 @@ function CostBreakdown({ lines, withheld }: { lines: readonly CostLine[]; withhe
             >
               <td className={CELL_CLASSES}>{TIER_LABEL[line.tier] ?? line.tier}</td>
               <td className={CELL_CLASSES}>{line.role}</td>
-              <td className={`${CELL_CLASSES} break-all`}>{line.model_id}</td>
+              <td className={`${CELL_CLASSES} break-all`}>
+                {line.model_id}
+                {line.long_context_calls > 0 ? (
+                  <span
+                    data-testid="usage-cost-line-long-context"
+                    className="block text-text-secondary"
+                  >
+                    {longContextNote(line.long_context_calls)}
+                  </span>
+                ) : null}
+              </td>
               <td className={NUMBER_CELL_CLASSES}>{line.input_tokens.toLocaleString()}</td>
               <td className={NUMBER_CELL_CLASSES}>{line.output_tokens.toLocaleString()}</td>
               {withheld ? null : (
@@ -142,6 +165,7 @@ export function UsageMeter({ events }: { events: readonly AgentEventFrame[] }): 
   const totals = usageTotals(events);
   const cost = turnCost(events);
   if (totals === undefined && cost === undefined) return null;
+  const longContext = cost === undefined ? 0 : longContextCalls(cost.lines);
 
   return (
     <section
@@ -185,6 +209,14 @@ export function UsageMeter({ events }: { events: readonly AgentEventFrame[] }): 
               </div>
             )}
           </>
+        )}
+        {longContext === 0 ? null : (
+          <div className={FIGURE_CLASSES}>
+            <dt className={FIGURE_LABEL_CLASSES}>Long-context calls</dt>
+            <dd data-testid="usage-long-context-calls" className={FIGURE_VALUE_CLASSES}>
+              {longContext.toLocaleString()}
+            </dd>
+          </div>
         )}
         {cost === undefined || cost.totalUsd === null ? null : (
           <div className={FIGURE_CLASSES}>

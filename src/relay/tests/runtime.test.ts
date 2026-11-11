@@ -14,8 +14,10 @@ import {
   ENV_REGION,
   ENV_RUNTIME_ARN,
   ENV_RUNTIME_QUALIFIER,
+  RELAY_PRINCIPAL_TYPE,
   RuntimeInvocationError,
   RuntimeValidationError,
+  buildCancelPayload,
   buildInvokeCommand,
   buildRuntimePayload,
   invokeRuntimeStream,
@@ -83,12 +85,31 @@ function decodePayload(command: InvokeAgentRuntimeCommand): Record<string, unkno
 }
 
 describe("the invocation payload carries identity through the retained agent channel", () => {
-  it("places the verified claims under _agent_identity, verbatim", () => {
+  it("places the verified claims under _agent_identity, verbatim, with principal_type user", () => {
     const payload = buildRuntimePayload(turn());
     expect(payload["_agent_identity"]).toEqual({
       claims: CLAIMS,
+      principal_type: "user",
       session_id: "session-11111111-2222-3333-4444-5555dddd6666",
     });
+    expect(RELAY_PRINCIPAL_TYPE).toBe("user");
+  });
+
+  it("gives a cancellation the same _agent_identity block as a turn", () => {
+    const cancel = buildCancelPayload({
+      sessionId: "session-11111111-2222-3333-4444-5555dddd6666",
+      claims: CLAIMS,
+    });
+    expect(cancel["_agent_identity"]).toEqual(buildRuntimePayload(turn())["_agent_identity"]);
+    expect((cancel["_agent_identity"] as Record<string, unknown>)["principal_type"]).toBe("user");
+  });
+
+  it("declares principal_type user whatever the claims carry", () => {
+    const payload = buildRuntimePayload(
+      turn({ claims: { ...CLAIMS, principal_type: "service", "custom:principal_type": "service" } }),
+    );
+    const identity = payload["_agent_identity"] as Record<string, unknown>;
+    expect(identity["principal_type"]).toBe("user");
   });
 
   it("carries the prompt and session id the Runtime's decode_invocation reads", () => {
@@ -97,14 +118,18 @@ describe("the invocation payload carries identity through the retained agent cha
     expect(payload["session_id"]).toBe("session-11111111-2222-3333-4444-5555dddd6666");
   });
 
-  it("constructs no identity of its own: no rep_id, tenant, book, or scope at any level", () => {
+  it("constructs no identity of its own beyond the channel's principal_type declaration", () => {
     const payload = buildRuntimePayload(turn({ pageContext: { kind: "opaque", reason: "test" } }));
-    const flat = JSON.stringify(payload);
+    const identity = payload["_agent_identity"] as Record<string, unknown>;
+    expect(Object.keys(identity).sort()).toEqual(["claims", "principal_type", "session_id"]);
+    const flat = JSON.stringify({ ...payload, _agent_identity: { ...identity, principal_type: undefined } });
     expect(Object.keys(payload)).not.toContain("identity");
     expect(Object.keys(payload)).not.toContain("requestContext");
     expect(flat).not.toContain('"rep_id"');
     expect(flat).not.toContain('"principal_type"');
     expect(flat).not.toContain('"full_visibility":');
+    expect(flat.match(/principal_type/g)).toBeNull();
+    expect(JSON.stringify(payload).match(/"principal_type"/g)).toHaveLength(1);
   });
 
   it("omits optional members rather than sending them as null", () => {

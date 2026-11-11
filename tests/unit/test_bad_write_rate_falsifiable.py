@@ -66,7 +66,12 @@ def _task(*, must_not_change: list[dict[str, str]], prompt: str = "do the thing"
         "id": "gt-badwrite-probe",
         "category": "enrichment",
         "prompt": prompt,
-        "actor": {"rep_id": _REP, "book": ["acct-1"], "full_visibility": False},
+        "actor": {
+            "rep_id": _REP,
+            "book": ["acct-1"],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
         "scoring_mode": "machine",
         "unscored_reason": None,
         "assertions": {

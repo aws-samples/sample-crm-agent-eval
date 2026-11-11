@@ -117,6 +117,22 @@ USAGE_LOWER_BOUND_TASK_IDS_KEY: Final[str] = "usage_lower_bound_task_ids"
 #: The optional arm report key carrying `eval.metrics.TierTaskMetrics.to_report_fields`.
 TIER_TASK_METRICS_KEY: Final[str] = "tier_task_metrics"
 
+#: Arm-level key of the all-tier cost total: ``None`` while cost is withheld.
+ARM_COST_TOTAL_KEY: Final[str] = "arm_cost_total"
+
+#: Arm-level key of the all-tier count of invocations priced at long-context rates.
+ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY: Final[str] = "arm_long_context_invocation_count"
+
+#: The all-tier arm keys, in report order.
+ARM_TOTAL_KEYS: Final[tuple[str, ...]] = (ARM_COST_TOTAL_KEY, ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY)
+
+#: ``matrix.csv`` column of each arm key; the cost column is ``arm_cost``, as a tier's is
+#: ``tier_<tier>_cost``.
+_ARM_TOTAL_CSV_COLUMNS: Final[dict[str, str]] = {
+    ARM_COST_TOTAL_KEY: "arm_cost",
+    ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY: ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
+}
+
 
 def errored_items_cost_note(errored_item_count: int) -> str | None:
     """The run-level cost qualifier for items that ended in an error, or ``None`` when none did."""
@@ -167,6 +183,9 @@ class ArmResult:
         tier_task_metrics_fields: The arm's `eval.metrics.TierTaskMetrics.to_report_fields`
             mapping. Written to the report only when non-empty; an archive without the key reads
             as empty.
+        arm_totals_fields: The arm's all-tier :data:`ARM_TOTAL_KEYS`, written as top-level arm
+            keys after ``model_metrics`` (whose figures cover the supervisor-tier arm model only).
+            Written only when non-empty; an archive without the keys reads as empty.
     """
 
     provenance: RunProvenance
@@ -179,12 +198,18 @@ class ArmResult:
     tier_summary_fields: dict[str, object] = field(default_factory=dict)
     usage_lower_bound_task_ids: tuple[str, ...] = field(default_factory=tuple)
     tier_task_metrics_fields: dict[str, object] = field(default_factory=dict)
+    arm_totals_fields: dict[str, object] = field(default_factory=dict)
 
     def to_report_fields(self) -> dict[str, object]:
         """Render this arm as a flat, JSON-safe mapping in a fixed key order."""
         fields: dict[str, object] = {
             "provenance": self.provenance.to_report_fields(),
             "model_metrics": self.model_metrics_fields,
+            **{
+                key: self.arm_totals_fields[key]
+                for key in ARM_TOTAL_KEYS
+                if key in self.arm_totals_fields
+            },
             "aggregate_score": self.aggregate_score_fields,
             "task_scores": list(self.task_score_fields),
             "tier_role_model_metrics": list(self.tier_role_model_fields),
@@ -323,6 +348,22 @@ _EFFORT_LABEL_SEMANTICS: Final[str] = (
     "each model's own default "
     "effort (the Anthropic subagent at `high`), so their subagent and tool tiers are not "
     "effort-comparable with this artifact's."
+)
+
+#: Boundary of the arm-level figures: ``model_metrics`` versus the all-tier arm totals.
+_ARM_TOTALS_SEMANTICS: Final[str] = (
+    "an arm's Usage and Cost (model_metrics) covers only the supervisor-tier calls to the arm's "
+    "model; the arm totals (the arm cost and arm_long_context_invocation_count) cover every call "
+    "the arm made at every tier, so the arm cost equals the sum of the three tiers' costs."
+)
+
+#: Boundary of the ``long_context_invocation_count`` figures.
+_LONG_CONTEXT_SEMANTICS: Final[str] = (
+    "counts the model invocations priced at the invoked model's long-context rates, i.e. a call "
+    "whose prompt (input plus cache-read plus cache-write tokens) exceeded the model's "
+    "long-context threshold in config/pricing.yaml; such a call's every token class is priced "
+    "at those rates. It is a count of calls, not of tokens, and a model with no long-context "
+    "tier never contributes. A run recorded before the count existed shows —, never 0."
 )
 
 #: Assertion-name prefix identifying a ``must_not_change`` assertion in a task's
@@ -706,6 +747,8 @@ def render_figure_semantics(matrix: MatrixResult) -> dict[str, object]:
         "retrieval_narrowing_magnitude": retrieval_conservatism_magnitude(matrix),
         "effort": _EFFORT_LABEL_SEMANTICS,
         "token_accounting": token_accounting_disclosure(),
+        "long_context_invocation_count": _LONG_CONTEXT_SEMANTICS,
+        "arm_totals": _ARM_TOTALS_SEMANTICS,
         "per_arm_bad_write_rate_basis": [bad_write_rate_basis(arm) for arm in matrix.arms],
         "per_arm_correctness_composition": [correctness_composition(arm) for arm in matrix.arms],
         "per_arm_retrieval_conservatism": [retrieval_conservatism(arm) for arm in matrix.arms],
@@ -751,7 +794,9 @@ _TIER_COMPARISON_DEFINITIONS_NOTE: Final[str] = (
     "task the arm ran. Latency per completed task sums the tier's measured call latencies within "
     "each completed task and takes the nearest-rank percentile over those tasks; a completed task "
     "with no measured call at the tier contributes no sample, and n counts the contributing "
-    "tasks. Model invocations sums the tier's included invocations. Self-corrected retries counts "
+    "tasks. Model invocations sums the tier's included invocations; Long-context invocations "
+    "counts those priced at the model's long-context rates, and reads — for a run recorded "
+    "before that count existed. Self-corrected retries counts "
     "the tier's tool calls whose tool_failure result was followed, later in the same task, by a "
     "call to the same tool from the same role that returned data or no_match; such a call does "
     "not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is "
@@ -916,6 +961,9 @@ def _tier_comparison_entry(arm: ArmResult, tier: str) -> dict[str, object]:
             by_tier.get("latency_sample_count") if by_tier is not None else None
         ),
         "invocation_count": invocation_count,
+        "long_context_invocation_count": (
+            summary.get("long_context_invocation_count") if summary is not None else None
+        ),
         "input_tokens": summary.get("input_tokens") if summary is not None else None,
         "output_tokens": summary.get("output_tokens") if summary is not None else None,
         "retry_count": by_tier.get("retry_count") if by_tier is not None else None,
@@ -1040,6 +1088,7 @@ _OPTIONAL_PROVENANCE_FIELDS: frozenset[str] = frozenset({"prompt_bundle_sha256"}
 _MODEL_METRICS_FIELDS: tuple[str, ...] = (
     "model_id",
     "included_invocation_count",
+    "long_context_invocation_count",
     "input_tokens",
     "output_tokens",
     "cache_write_tokens",
@@ -1092,6 +1141,7 @@ _TIER_SUMMARY_CSV_SUFFIXES: tuple[str, ...] = (
     "input_tokens",
     "output_tokens",
     "cost",
+    "long_context_invocation_count",
     "latency_p50_ms",
     "latency_p95_ms",
     "success_passed",
@@ -1120,6 +1170,7 @@ def _tier_summary_entry(summary: Mapping[str, object], tier: str) -> dict[str, o
         "input_tokens": entry.get("input_tokens"),
         "output_tokens": entry.get("output_tokens"),
         "cost": entry.get("cost_total"),
+        "long_context_invocation_count": entry.get("long_context_invocation_count"),
         "latency_p50_ms": entry.get("latency_p50_ms"),
         "latency_p95_ms": entry.get("latency_p95_ms"),
         "success_passed": success.get("passed"),
@@ -1252,6 +1303,7 @@ _TIER_ROLE_MODEL_FIELDS: tuple[str, ...] = (
     "role",
     "model_id",
     "included_invocation_count",
+    "long_context_invocation_count",
     "input_tokens",
     "output_tokens",
     "cache_read_tokens",
@@ -1380,6 +1432,24 @@ def _render_task_spread(fields_list: tuple[dict[str, object], ...]) -> list[str]
     ]
 
 
+def _render_arm_totals(arm: ArmResult) -> list[str]:
+    """Render the arm's all-tier totals as a Markdown sub-table; empty when the arm has none."""
+    if not arm.arm_totals_fields:
+        return []
+    withheld = bool(arm.model_metrics_fields.get("cost_withheld_provisional"))
+    rows: list[tuple[str, ...]] = [
+        (key, _format_scalar(arm.arm_totals_fields.get(key)))
+        for key in ARM_TOTAL_KEYS
+        if not (withheld and key == ARM_COST_TOTAL_KEY)
+    ]
+    return [
+        "All tiers (every call the arm made):",
+        "",
+        _markdown_table(("field", "value"), rows),
+        "",
+    ]
+
+
 def _render_arm_markdown(arm: ArmResult) -> str:
     """Render one arm's provenance, metrics, aggregate score, and per-task table as Markdown."""
     metrics_fields = arm.model_metrics_fields
@@ -1405,6 +1475,11 @@ def _render_arm_markdown(arm: ArmResult) -> str:
     sections.append("### Usage and Cost")
     sections.append("")
     sections.append(
+        f"Supervisor tier only: these figures cover the arm's supervisor-tier calls to "
+        f"{arm.provenance.model_id}."
+    )
+    sections.append("")
+    sections.append(
         _markdown_table(
             ("field", "value"),
             [
@@ -1418,6 +1493,7 @@ def _render_arm_markdown(arm: ArmResult) -> str:
     if bool(metrics_fields.get("cost_withheld_provisional")):
         sections.append("Cost figures are withheld: the price table is marked provisional.")
         sections.append("")
+    sections.extend(_render_arm_totals(arm))
     lower_bound_note = usage_lower_bound_note(arm)
     if lower_bound_note is not None:
         sections.append(lower_bound_note)
@@ -1490,6 +1566,8 @@ def _render_figure_semantics_markdown(matrix: MatrixResult) -> str:
             f"- retrieval narrowing — {_RETRIEVAL_CONSERVATISM_SEMANTICS}",
             f"- {str(retrieval_conservatism_magnitude(matrix)['note'])}",
             f"- `effort` (provenance) — {_EFFORT_LABEL_SEMANTICS}",
+            f"- `long_context_invocation_count` — {_LONG_CONTEXT_SEMANTICS}",
+            f"- arm totals — {_ARM_TOTALS_SEMANTICS}",
             f"- `input_tokens` comparability — {_TOKEN_ACCOUNTING_SEMANTICS} "
             f"({_TOKEN_ACCOUNTING_SOURCE})",
             *[
@@ -1605,6 +1683,10 @@ def _tier_comparison_rows(
             ],
         ),
         _row("Model invocations", [_format_scalar(e.get("invocation_count")) for e in entries]),
+        _row(
+            "Long-context invocations",
+            [_format_scalar(e.get("long_context_invocation_count")) for e in entries],
+        ),
         _row("Input tokens", [_format_scalar(e.get("input_tokens")) for e in entries]),
         _row("Output tokens", [_format_scalar(e.get("output_tokens")) for e in entries]),
         _row("Cost per task, all tasks", [_cost(e, "cost_per_task") for e in entries]),
@@ -1778,6 +1860,7 @@ _SUMMARY_CSV_TIER_SUFFIXES: Final[tuple[str, ...]] = (
     "completed_task_latency_ms_p95",
     "latency_sample_count",
     "invocation_count",
+    "long_context_invocation_count",
     "input_tokens",
     "output_tokens",
 )
@@ -1874,6 +1957,7 @@ def render_csv(matrix: MatrixResult) -> str:
         "usage_lower_bound",
         *_latency_csv_columns(),
         "cost_excluding_cache",
+        *_ARM_TOTAL_CSV_COLUMNS.values(),
         *_tier_summary_csv_columns(),
         *_summary_csv_columns(),
     )
@@ -1888,6 +1972,10 @@ def render_csv(matrix: MatrixResult) -> str:
         tier_summary_cells = _tier_summary_csv_row(arm.tier_summary_fields)
         cost_excluding_cache = arm.model_metrics_fields.get("cost_excluding_cache")
         cost_cell = _format_scalar(cost_excluding_cache) if cost_excluding_cache is not None else ""
+        arm_total_cells = {
+            column: _csv_cell(arm.arm_totals_fields.get(key))
+            for key, column in _ARM_TOTAL_CSV_COLUMNS.items()
+        }
         lower_bound_task_ids = set(arm.usage_lower_bound_task_ids)
         for task_fields in arm.task_score_fields:
             row: dict[str, object] = {
@@ -1898,6 +1986,7 @@ def render_csv(matrix: MatrixResult) -> str:
                     str(task_fields.get("task_id")) in lower_bound_task_ids
                 ),
                 "cost_excluding_cache": cost_cell,
+                **arm_total_cells,
             }
             for name in _TASK_SCORE_FIELDS:
                 value = task_fields.get(name)
@@ -2053,6 +2142,22 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
             "raw archive's 'tier_summary' is not an object, so it cannot be re-rendered"
         )
 
+    arm_totals = {key: fields[key] for key in ARM_TOTAL_KEYS if key in fields}
+    count = arm_totals.get(ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY)
+    if ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY in arm_totals and (
+        isinstance(count, bool) or not isinstance(count, int)
+    ):
+        raise ValueError(
+            f"raw archive's {ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY!r} is not an integer, so it "
+            "cannot be re-rendered"
+        )
+    cost = arm_totals.get(ARM_COST_TOTAL_KEY)
+    if cost is not None and not _is_number(cost):
+        raise ValueError(
+            f"raw archive's {ARM_COST_TOTAL_KEY!r} is not a number or null, so it cannot be "
+            "re-rendered"
+        )
+
     tier_task_metrics = fields.get(TIER_TASK_METRICS_KEY)
     if tier_task_metrics is None:
         tier_task_metrics = {}
@@ -2072,6 +2177,7 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
         tier_summary_fields=dict(cast(Mapping[str, object], tier_summary)),
         usage_lower_bound_task_ids=tuple(cast("list[str]", lower_bound_ids)),
         tier_task_metrics_fields=dict(cast(Mapping[str, object], tier_task_metrics)),
+        arm_totals_fields=arm_totals,
     )
 
 

@@ -13,6 +13,12 @@ The SPA client must have token revocation enabled (`describe_user_pool_client`).
 smoke user, the refresh token its sign-in issued is revoked with `RevokeToken`, and a following
 `InitiateAuth REFRESH_TOKEN_AUTH` with it must be refused with `NotAuthorizedException`.
 
+The Hosted UI sign-out endpoint is probed on the pool's own domain: `GET /logout` with the SPA client
+and its first registered `LogoutURLs` entry must answer 302 to exactly that URL
+(`hosted_ui_logout_registered_redirects`), and with an unregistered `logout_uri` must not redirect to
+it (`hosted_ui_logout_unregistered_refused`). An unreachable endpoint or a pool with no domain is a
+`defer` naming the unmet prerequisite, never a pass.
+
 Every token read is signature-verified against the pool's JWKS by
 `scripts.smoke.verified_claims`; tests point `jwks_url` at a local JWKS document.
 
@@ -35,7 +41,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Protocol
+from typing import Any, Final, Literal, Protocol
 
 from scripts.smoke.harness import (
     CheckResult,
@@ -502,7 +508,7 @@ class LiveSmokeUserProvisioner:
         self._username: str | None = None
         self._email: str | None = None
         self._jwks_url = jwks_url
-        self._refresh_token = ""
+        self._refresh_token = ""  # nosec B105  # empty until sign-in, not a credential
 
     # -- wiring ----------------------------------------------------------------------------
 
@@ -1043,6 +1049,114 @@ def _check_token_revocation_enabled(idp: Any, *, user_pool_id: str, client_id: s
     )
 
 
+#: Answers one Hosted UI request without following redirects: `(HTTP status, Location header)`.
+LogoutProbe = Callable[[str], tuple[int, str]]
+
+#: A `logout_uri` the SPA client never registers.
+UNREGISTERED_LOGOUT_URI: Final[str] = "https://smoke-unregistered.invalid/logout"
+
+_LOGOUT_CHECKS: Final[tuple[str, str]] = (
+    "hosted_ui_logout_registered_redirects",
+    "hosted_ui_logout_unregistered_refused",
+)
+
+
+def _live_logout_probe(url: str) -> tuple[int, str]:
+    """GET `url` once over HTTPS without following a redirect; return the status and `Location`."""
+    import http.client
+    import ssl
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise ValueError(f"refusing a non-HTTPS Hosted UI URL: {url!r}")
+    connection = http.client.HTTPSConnection(
+        parts.hostname, timeout=10, context=ssl.create_default_context()
+    )
+    try:
+        connection.request("GET", f"{parts.path}?{parts.query}")
+        response = connection.getresponse()
+        return int(response.status), str(response.getheader("Location") or "")
+    finally:
+        connection.close()
+
+
+def _hosted_ui_logout_checks(
+    idp: Any,
+    pool: Mapping[str, Any],
+    *,
+    user_pool_id: str,
+    client_id: str,
+    region: str,
+    probe: LogoutProbe | None,
+) -> Iterable[CheckResult]:
+    from urllib.parse import urlencode
+
+    def _all(
+        status: Literal["fail", "skip", "defer"], detail: str, reason: str = ""
+    ) -> Iterable[CheckResult]:
+        for check in _LOGOUT_CHECKS:
+            yield CheckResult(
+                resource="spa_client",
+                check=check,
+                status=status,
+                detail=detail,
+                **({"defer_reason": reason} if status == "defer" else {}),
+            )
+
+    if probe is None:
+        yield from _all("skip", "no Hosted UI probe supplied")
+        return
+    domain = str(pool.get("Domain") or "")
+    if not domain:
+        yield from _all(
+            "defer",
+            "describe_user_pool reports no Domain, so there is no Hosted UI /logout to probe",
+            "hosted_ui_domain_absent",
+        )
+        return
+    try:
+        described = idp.describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
+        registered = list((described.get("UserPoolClient") or {}).get("LogoutURLs") or [])
+    except Exception as exc:  # noqa: BLE001 - reported on both rows
+        yield from _all(
+            "fail", f"describe_user_pool_client failed: {error_code(exc) or type(exc).__name__}"
+        )
+        return
+    if not registered:
+        yield from _all("fail", "the SPA client registers no LogoutURLs")
+        return
+    base = f"https://{domain}.auth.{region}.amazoncognito.com/logout"
+    target = str(registered[0])
+    answers: list[tuple[int, str]] = []
+    for uri in (target, UNREGISTERED_LOGOUT_URI):
+        url = f"{base}?{urlencode({'client_id': client_id, 'logout_uri': uri})}"
+        try:
+            answers.append(probe(url))
+        except Exception as exc:  # noqa: BLE001 - an unreachable endpoint verified nothing
+            yield from _all(
+                "defer",
+                f"GET {base} raised {type(exc).__name__}: {exc}",
+                "hosted_ui_unreachable",
+            )
+            return
+    (status, location), (bad_status, bad_location) = answers
+    yield CheckResult(
+        resource="spa_client",
+        check=_LOGOUT_CHECKS[0],
+        status="pass" if status == 302 and location == target else "fail",
+        detail=f"logout_uri={target!r}: HTTP {status} Location={location!r}; expected 302 to it",
+    )
+    leaked = bad_location.startswith(UNREGISTERED_LOGOUT_URI)
+    yield CheckResult(
+        resource="spa_client",
+        check=_LOGOUT_CHECKS[1],
+        status="pass" if bad_status in {302, 400} and not leaked else "fail",
+        detail=f"logout_uri={UNREGISTERED_LOGOUT_URI!r}: HTTP {bad_status} "
+        f"Location={bad_location!r}; expected an error answer that does not redirect to it",
+    )
+
+
 def _check_revoked_refresh_token_refused(
     idp: Any, *, client_id: str, refresh_token: str
 ) -> CheckResult:
@@ -1103,6 +1217,7 @@ def checks(
     decode_id_token: Any = None,
     provisioner: SmokeUserProvisioner | None = None,
     signup_client: Any = None,
+    logout_probe: LogoutProbe | None = None,
 ) -> Iterable[CheckResult]:
     """Yield one `CheckResult` per (resource, check) pair.
 
@@ -1126,6 +1241,8 @@ def checks(
         signup_client: Sends the unauthenticated `SignUp` probe (`sign_up(**kwargs)`). When `None`
             `self_signup_refused` reports `skip`; the live entry point always supplies an
             `UnsignedSignUpClient`.
+        logout_probe: Sends the Hosted UI `/logout` requests. When `None` both logout rows report
+            `skip`; the live entry point always supplies `_live_logout_probe`.
     """
     idp = ctx.client("cognito-idp")
     user_pool_id = ctx.outputs.require_str("cognito_user_pool_id")
@@ -1139,6 +1256,14 @@ def checks(
     yield _check_pre_token_generation_v2(pool)
     yield _check_admin_create_user_only(pool)
     yield _check_token_revocation_enabled(idp, user_pool_id=user_pool_id, client_id=spa_client_id)
+    yield from _hosted_ui_logout_checks(
+        idp,
+        pool,
+        user_pool_id=user_pool_id,
+        client_id=spa_client_id,
+        region=ctx.region,
+        probe=logout_probe,
+    )
 
     if signup_client is None:
         yield CheckResult(
@@ -1344,6 +1469,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             decode_id_token=_live_decode_for(ctx),
             provisioner=LiveSmokeUserProvisioner(ctx),
             signup_client=UnsignedSignUpClient(ctx),
+            logout_probe=_live_logout_probe,
         ),
     )
 

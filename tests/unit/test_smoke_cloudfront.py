@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from scripts.smoke.cloudfront import (
+    _INLINE_SCRIPT,
     _UNAUTHENTICATED_API_METHOD,
     _UNAUTHENTICATED_API_PATH,
     HeaderCaller,
@@ -93,6 +94,9 @@ def _csp(
 
 
 HEALTHY_CSP = _csp()
+
+#: The `Strict-Transport-Security` value the response-headers policy serves.
+HEALTHY_HSTS = "max-age=31536000; includeSubDomains; preload"
 
 CACHING_DISABLED_POLICY_ID = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
 CACHING_OPTIMIZED_POLICY_ID = "658327ea-f89d-4fab-a63d-7e88639e58f6"
@@ -359,6 +363,7 @@ def _header_caller(
     status_by_path: dict[str, int] | None = None,
     transport_failure_paths: Iterable[str] = (),
     index_body: str = SERVED_INDEX,
+    hsts_by_path: dict[str, str | None] | None = None,
 ) -> HeaderCaller:
     """A served-header fake: `/` is the SPA, `/api/*` 401 and `/agent/*` 401, each with the CSP."""
     from urllib.parse import urlsplit
@@ -386,6 +391,9 @@ def _header_caller(
         report_only = (report_only_by_path or {}).get(path)
         if report_only is not None:
             headers["content-security-policy-report-only"] = report_only
+        hsts = (hsts_by_path or {}).get(path, HEALTHY_HSTS)
+        if hsts is not None:
+            headers["strict-transport-security"] = hsts
         return status, headers, body
 
     return caller
@@ -1020,7 +1028,9 @@ def test_api_behavior_routed_to_wrong_origin_is_detected() -> None:
 
 
 #: Behaviour-scoped checks that read the served response rather than the distribution config.
-_LIVE_RESPONSE_CHECKS = frozenset({"unauthenticated_api_still_refused", "csp_header_enforced"})
+_LIVE_RESPONSE_CHECKS = frozenset(
+    {"unauthenticated_api_still_refused", "csp_header_enforced", "hsts_header_served"}
+)
 
 
 def test_missing_api_behavior_fails_naming_the_path_pattern() -> None:
@@ -1037,7 +1047,7 @@ def test_missing_api_behavior_fails_naming_the_path_pattern() -> None:
         )
     )
 
-    # `unauthenticated_api_still_refused` and `csp_header_enforced` read the live response.
+    # `_LIVE_RESPONSE_CHECKS` read the live response.
     behavior_checks = [
         r
         for r in results
@@ -1767,6 +1777,80 @@ def test_a_second_inline_script_without_a_hash_fails() -> None:
     assert _failing(rows) == {("distribution", "served_csp_allows_every_inline_script")}
 
 
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "<SCRIPT>window.x = 1;</SCRIPT>",
+        '<script type="module">window.x = 1;</script>',
+        "<script>window.x = 1;</script >",
+        '<Script nonce="n">window.x = 1;</sCrIpT\t>',
+    ],
+    ids=["uppercase", "module-attribute", "space-before-close", "mixed-case-attribute-tab"],
+)
+def test_an_unhashed_inline_script_in_any_spelling_fails(tag: str) -> None:
+    extra = SERVED_INDEX.replace("</head>", f"{tag}</head>")
+    rows = _csp_results(header_caller=_header_caller(index_body=extra))
+    assert _failing(rows) == {("distribution", "served_csp_allows_every_inline_script")}
+    assert (
+        "browsers refuse" in rows[("distribution", "served_csp_allows_every_inline_script")].detail
+    )
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "<script>window.x = 1;</script>",
+        "<SCRIPT>window.x = 1;</SCRIPT>",
+        '<script type="module">window.x = 1;</script>',
+        "<script>window.x = 1;</script >",
+        '<Script nonce="n">window.x = 1;</sCrIpT\t>',
+    ],
+    ids=[
+        "plain",
+        "uppercase",
+        "module-attribute",
+        "space-before-close",
+        "mixed-case-attribute-tab",
+    ],
+)
+def test_the_inline_script_pattern_captures_exactly_the_body(tag: str) -> None:
+    document = f"<head>{tag}</head><body><script src='/a.js'></script></body>"
+    assert _INLINE_SCRIPT.findall(document) == ["window.x = 1;"]
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        '<script type="module" src="/assets/extra.js"></script>',
+        '<SCRIPT SRC="/assets/extra.js"></SCRIPT>',
+        '<script defer\nsrc = "/assets/extra.js"></script >',
+    ],
+    ids=["module-src", "uppercase-src", "spaced-src"],
+)
+def test_a_script_with_a_src_attribute_is_not_hashed(tag: str) -> None:
+    extra = SERVED_INDEX.replace("</head>", f"{tag}</head>")
+    rows = _csp_results(header_caller=_header_caller(index_body=extra))
+    assert _failing(rows) == set()
+
+
+def test_only_src_scripts_still_verify_nothing() -> None:
+    only_src = SERVED_INDEX.replace(f"<script>{THEME_SCRIPT}</script>", "").replace(
+        "</head>", '<SCRIPT TYPE="module" SRC="/a.js"></SCRIPT ></head>'
+    )
+    rows = _csp_results(header_caller=_header_caller(index_body=only_src))
+    row = rows[("distribution", "served_csp_allows_every_inline_script")]
+    assert row.status == "fail"
+    assert "verified nothing" in row.detail
+
+
+def test_an_uppercase_theme_script_is_hashed_like_the_lowercase_one() -> None:
+    shouted = SERVED_INDEX.replace(
+        f"<script>{THEME_SCRIPT}</script>", f"<SCRIPT>{THEME_SCRIPT}</SCRIPT >"
+    )
+    rows = _csp_results(header_caller=_header_caller(index_body=shouted))
+    assert _failing(rows) == set()
+
+
 def test_a_document_with_no_inline_script_fails_rather_than_passing_vacuously() -> None:
     bare = SERVED_INDEX.replace(f"<script>{THEME_SCRIPT}</script>", "")
     rows = _csp_results(header_caller=_header_caller(index_body=bare))
@@ -1814,3 +1898,78 @@ def test_a_policy_property_broken_fails_exactly_the_policy_row(
     rows = _csp_results(**client_kwargs)
     assert _failing(rows) == {("distribution", "response_headers_policy_enforces_csp")}
     assert fragment in rows[("distribution", "response_headers_policy_enforces_csp")].detail
+
+
+# ---------------------------------------------------------------------------
+# The served Strict-Transport-Security header.
+# ---------------------------------------------------------------------------
+
+#: The probe path and resource of each `hsts_header_served` row.
+HSTS_PROBES: tuple[tuple[str, str], ...] = (
+    ("/", "behavior:/*"),
+    (_UNAUTHENTICATED_API_PATH, "behavior:/api/*"),
+    ("/agent/csp-probe", "behavior:/agent/*"),
+)
+
+
+def _hsts_rows(header_caller: HeaderCaller) -> dict[str, CheckResult]:
+    """Run `checks()` and return each behaviour's `hsts_header_served` row, asserting exactly one."""
+    results = list(
+        checks(
+            _make_ctx(_distribution_config()),
+            http_caller=_healthy_caller,
+            http_method_caller=_as_method_caller(_healthy_caller),
+            tls_probe=_refused_probe,
+            http_header_caller=header_caller,
+        )
+    )
+    return {resource: _one(results, resource, "hsts_header_served") for _, resource in HSTS_PROBES}
+
+
+def test_every_behaviour_serving_the_designed_hsts_passes() -> None:
+    rows = _hsts_rows(_healthy_header_caller)
+    assert {resource: row.status for resource, row in rows.items()} == {
+        resource: "pass" for _, resource in HSTS_PROBES
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        (None, "no Strict-Transport-Security"),
+        ("max-age=31536000", "includesubdomains is absent"),
+        ("max-age=31536000; includeSubDomains", "preload is absent"),
+        ("max-age=31536000; preload", "includesubdomains is absent"),
+        ("max-age=86400; includeSubDomains; preload", "max-age is '86400'"),
+        ("includeSubDomains; preload", "max-age is None"),
+    ],
+    ids=[
+        "absent",
+        "max-age-only",
+        "no-preload",
+        "no-include-subdomains",
+        "short-max-age",
+        "no-max-age",
+    ],
+)
+@pytest.mark.parametrize(("path", "resource"), HSTS_PROBES)
+def test_a_behaviour_serving_a_weaker_hsts_fails_exactly_its_own_row(
+    path: str, resource: str, value: str | None, reason: str
+) -> None:
+    rows = _hsts_rows(_header_caller(hsts_by_path={path: value}))
+    failing = {name for name, row in rows.items() if row.status != "pass"}
+    assert failing == {resource}
+    assert reason in rows[resource].detail
+
+
+def test_hsts_directive_names_are_case_insensitive() -> None:
+    rows = _hsts_rows(
+        _header_caller(hsts_by_path={"/": "MAX-AGE=31536000;INCLUDESUBDOMAINS;PRELOAD"})
+    )
+    assert rows["behavior:/*"].status == "pass", rows["behavior:/*"].detail
+
+
+def test_a_transport_failure_fails_the_hsts_row_too() -> None:
+    rows = _hsts_rows(_header_caller(transport_failure_paths=["/agent/csp-probe"]))
+    assert rows["behavior:/agent/*"].status == "fail"
+    assert "transport error" in rows["behavior:/agent/*"].detail

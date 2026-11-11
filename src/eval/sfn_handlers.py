@@ -28,8 +28,9 @@
   unreadable ownership still releases a lock naming this run and execution, and a failure while
   summarising marks the run ``failed`` and releases the lock before raising.
 
-``teardown`` and ``finalize`` return ``refused`` and touch nothing when another execution owns the
-run.
+``seed`` and ``aggregate`` raise :class:`NotRunOwner` and write nothing when another execution owns
+the run, so the state machine's Catch routes to ``teardown``; ``teardown`` and ``finalize`` return
+``refused`` and touch nothing in that case.
 
 :func:`sweep_task_handler` runs one item in its unit tenant: a cancelled run records it
 ``skipped_cancelled`` without invoking the Runtime; otherwise one ``InvokeAgentRuntime`` in
@@ -61,6 +62,7 @@ from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 
 from crm.envelope import (
     AGENT_IDENTITY_KEY,
+    AGENT_PRINCIPAL_TYPE_KEY,
     CLAIM_BOOK,
     CLAIM_FULL_VISIBILITY,
     CLAIM_REP_ID,
@@ -75,6 +77,7 @@ from crm.errors import (
     bounded_detail_value,
 )
 from crm.store.store import Store
+from eval.actor import actor_principal_type
 from eval.artefacts import artefact_object_key
 from eval.harness import (
     _DEFAULT_GOLDEN_TASKS_PATH,
@@ -188,11 +191,11 @@ class EventKeys:
 #: ``sweep_control_handler``'s input keys per ``step``.
 STEP_EVENT_KEYS: Final[Mapping[str, EventKeys]] = {
     "start": EventKeys(frozenset({"step", "run_id", "execution_arn"})),
-    "seed": EventKeys(frozenset({"step", "run_id"})),
+    "seed": EventKeys(frozenset({"step", "run_id", "execution_arn"})),
     "item_failed": EventKeys(
         frozenset({"step", "run_id", "arm_index", "repeat_index", "task_id"}), frozenset({"error"})
     ),
-    "aggregate": EventKeys(frozenset({"step", "run_id"}), frozenset({"error"})),
+    "aggregate": EventKeys(frozenset({"step", "run_id", "execution_arn"}), frozenset({"error"})),
     "teardown": EventKeys(frozenset({"step", "run_id", "execution_arn"})),
     "finalize": EventKeys(
         frozenset({"step", "run_id", "execution_arn"}), frozenset({"error", "teardown_error"})
@@ -824,6 +827,19 @@ def _owns_run(store: Store, event: Mapping[str, Any], *, step: str) -> bool:
     return False
 
 
+class NotRunOwner(Conflict):
+    """A ``seed`` or ``aggregate`` event whose execution does not own its run; nothing was written."""
+
+
+def _require_ownership(store: Store, event: Mapping[str, Any], *, step: str) -> None:
+    """Raise :class:`NotRunOwner` unless the event's execution owns its run."""
+    if not _owns_run(store, event, step=step):
+        raise NotRunOwner(
+            "This execution does not own the evaluation run.",
+            detail=f"step={step} run_id={event.get('run_id')!r}",
+        )
+
+
 def _cancel_before_start(store: Store, run_id: str, refs: Sequence[TaskRef]) -> dict[str, Any]:
     """Record every item ``skipped_cancelled`` for a run cancelled before it started."""
     for ref in refs:
@@ -841,6 +857,7 @@ def _cancel_before_start(store: Store, run_id: str, refs: Sequence[TaskRef]) -> 
 
 def _seed(store: Store, event: Mapping[str, Any], now: datetime | None) -> dict[str, Any]:
     run_id = _required_str(event, "run_id")
+    _require_ownership(store, event, step="seed")
     record = require_run(store, run_id)
     tenant = _record_tenant(record)
     record_run_started(
@@ -881,6 +898,7 @@ def _aggregate(
     store: Store, s3: ObjectStore, config: SweepControlConfig, event: Mapping[str, Any]
 ) -> dict[str, Any]:
     run_id = _required_str(event, "run_id")
+    _require_ownership(store, event, step="aggregate")
     record = require_run(store, run_id)
     _record_tenant(record)
     step_error = _error_text(event.get("error"))
@@ -1191,7 +1209,12 @@ def _eval_turn_request(
     provider_mode: str,
     session_id: str,
 ) -> dict[str, Any]:
-    """The Runtime's ``eval_turn`` request for one task."""
+    """The Runtime's ``eval_turn`` request for one task, sending the actor's declared principal type.
+
+    Raises:
+        ValidationFailed: The task has no prompt or id, ``actor.book`` is not a list, or the
+            actor's ``principal_type`` is refused by :func:`eval.actor.actor_principal_type`.
+    """
     actor = task_actor(task)
     for key in ("prompt", "id"):
         if not isinstance(task.get(key), str) or not task.get(key):
@@ -1199,6 +1222,13 @@ def _eval_turn_request(
     book = actor.get("book") or []
     if not isinstance(book, list):
         raise ValidationFailed("actor.book must be a list of account ids.", source="actor.book")
+    try:
+        principal_type = actor_principal_type(actor)
+    except ValueError as exc:
+        raise ValidationFailed(
+            "The golden task's actor declares no usable principal_type.",
+            source="actor.principal_type",
+        ) from exc
     return {
         "mode": "eval_turn",
         AGENT_IDENTITY_KEY: {
@@ -1208,6 +1238,7 @@ def _eval_turn_request(
                 CLAIM_FULL_VISIBILITY: "true" if actor.get("full_visibility") else "false",
                 CLAIM_TENANT: tenant,
             },
+            AGENT_PRINCIPAL_TYPE_KEY: principal_type,
             "session_id": session_id,
         },
         "prompt": str(task.get("prompt") or ""),
@@ -1668,6 +1699,7 @@ __all__ = [
     "SWEEP_TASK_RESULT_KEYS",
     "TASK_REF_KEYS",
     "EventKeys",
+    "NotRunOwner",
     "SweepControlConfig",
     "SweepTaskConfig",
     "classify_runtime_failure",

@@ -26,6 +26,8 @@
 #     book: list[str]              — account ids in the acting rep's book. Empty when
 #                                     full_visibility is true.
 #     full_visibility: bool
+#     principal_type: str          — "user" or "service"; required. A service principal must
+#                                     declare full_visibility: false (`src/eval/actor.py`).
 #   scoring_mode: str               — one of:
 #       "machine"        — every assertion below is mechanically checkable; scoring.py computes a
 #                           pass/fail result per assertion, reported as a correctness rate.
@@ -122,6 +124,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -161,6 +164,7 @@ tasks:
       rep_id: rep-brixton
       book: [acct-0001, acct-0009, acct-0017, acct-0025, acct-0033]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -197,6 +201,7 @@ tasks:
       rep_id: rep-calder
       book: [acct-0002, acct-0010, acct-0018, acct-0026, acct-0034]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -230,6 +235,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -293,6 +299,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -348,6 +355,7 @@ tasks:
       rep_id: rep-calder
       book: [acct-0002, acct-0010, acct-0018, acct-0026, acct-0034]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -382,6 +390,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -414,6 +423,7 @@ tasks:
       rep_id: rep-calder
       book: [acct-0002, acct-0010, acct-0018, acct-0026, acct-0034]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -451,6 +461,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -486,6 +497,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -519,6 +531,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -551,6 +564,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -582,6 +596,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -613,6 +628,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -649,6 +665,7 @@ tasks:
       rep_id: svc-integration-1
       book: []
       full_visibility: false
+      principal_type: service
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -663,8 +680,8 @@ tasks:
       expected_denial: {outcome: denied, missing_scope: "account:*"}
       forbidden_outcomes: [data, no_match, tool_failure]
     notes: >-
-      A service principal never receives full_visibility implicitly; an empty book
-      plus full_visibility=false must deny a tenant-wide, unscoped listing rather than returning an
+      The actor is a service principal (principal_type: service), which never receives
+      full_visibility implicitly; an empty book plus full_visibility=false must deny a tenant-wide, unscoped listing rather than returning an
       empty result (`no_match`, which would incorrectly suggest zero opportunities exist) or a
       partial result presented as complete. The listing handlers refuse an empty book with
       `missing_scope: "account:*"` ("no book membership at all"), distinct from gt-11's single
@@ -680,6 +697,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -715,6 +733,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -749,6 +768,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -785,6 +805,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -818,6 +839,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -854,6 +876,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -890,6 +913,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -923,6 +947,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:
@@ -956,6 +981,7 @@ tasks:
       rep_id: rep-ashford
       book: [acct-0000, acct-0008, acct-0016, acct-0024, acct-0032]
       full_visibility: false
+      principal_type: user
     scoring_mode: machine
     unscored_reason: null
     expected_tiers:

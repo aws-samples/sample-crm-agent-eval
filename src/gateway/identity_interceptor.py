@@ -313,25 +313,25 @@ def _service_identity(
     try:
         item = rep_lookup(rep_id)
     except Exception:  # noqa: BLE001 - a lookup failure must fail closed, not raise a 500.
-        logger.info(json.dumps({"event": "gateway_service_identity_lookup_failed"}))
+        logger.warning(json.dumps({"event": "gateway_service_identity_lookup_failed"}))
         return None
 
     if item is None:
-        logger.info(json.dumps({"event": "gateway_service_identity_absent"}))
+        logger.warning(json.dumps({"event": "gateway_service_identity_absent"}))
         return None
 
     raw_book = item.get(_BOOK_ATTR)
     if not isinstance(raw_book, list | tuple):
-        logger.info(json.dumps({"event": "gateway_service_identity_book_not_explicit"}))
+        logger.warning(json.dumps({"event": "gateway_service_identity_book_not_explicit"}))
         return None
 
     tenant = str(item.get(_TENANT_ATTR) or "").strip()
     if not tenant:
-        logger.info(json.dumps({"event": "gateway_service_identity_tenant_absent"}))
+        logger.warning(json.dumps({"event": "gateway_service_identity_tenant_absent"}))
         return None
 
     if _truthy(item.get(_FULL_VISIBILITY_ATTR)):
-        logger.info(json.dumps({"event": "gateway_service_identity_full_visibility_refused"}))
+        logger.warning(json.dumps({"event": "gateway_service_identity_full_visibility_refused"}))
         return None
 
     return {
@@ -495,7 +495,7 @@ def _handle(event: dict[str, Any]) -> dict[str, Any]:
     if raw_body is None:
         raw_body = {}
     if not isinstance(raw_body, dict):
-        logger.info(json.dumps({"event": "gateway_auth_denied", "reason": "body_not_an_object"}))
+        logger.warning(json.dumps({"event": "gateway_auth_denied", "reason": "body_not_an_object"}))
         return _deny({})
     body: dict[str, Any] = raw_body
 
@@ -504,18 +504,20 @@ def _handle(event: dict[str, Any]) -> dict[str, Any]:
 
     params = body.get("params")
     if params is not None and not isinstance(params, dict):
-        logger.info(json.dumps({"event": "gateway_auth_denied", "reason": "params_not_an_object"}))
+        logger.warning(
+            json.dumps({"event": "gateway_auth_denied", "reason": "params_not_an_object"})
+        )
         return _deny(body)
 
     token = _extract_bearer_token(headers)
     if token is None:
-        logger.info(json.dumps({"event": "gateway_auth_denied", "reason": "no_bearer_token"}))
+        logger.warning(json.dumps({"event": "gateway_auth_denied", "reason": "no_bearer_token"}))
         return _deny(body)
 
     try:
         claims = _verify_jwt(token, config)
     except (InvalidTokenError, PyJWKClientError) as exc:
-        logger.info(
+        logger.warning(
             json.dumps(
                 {
                     "event": "gateway_auth_denied",

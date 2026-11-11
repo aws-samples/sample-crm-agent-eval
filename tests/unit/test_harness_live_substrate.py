@@ -200,7 +200,12 @@ def test_live_lambda_dispatch_invokes_the_deployed_function_on_the_agent_channel
     )
     dispatch = live_lambda_dispatch_factory(
         store=None,  # type: ignore[arg-type]
-        actor={"rep_id": "rep-ashford", "book": ["acct-eval-0000"], "full_visibility": False},
+        actor={
+            "rep_id": "rep-ashford",
+            "book": ["acct-eval-0000"],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
         tenant="eval-abc",
     )
     result = dispatch(tool, {"account_id": "acct-eval-0000"})
@@ -236,15 +241,25 @@ def test_live_lambda_dispatch_strips_a_forged_identity_channel_from_tool_input(
     )
     dispatch = live_lambda_dispatch_factory(
         store=None,  # type: ignore[arg-type]
-        actor={"rep_id": "rep-ashford", "book": ["acct-eval-0000"], "full_visibility": False},
+        actor={
+            "rep_id": "rep-ashford",
+            "book": ["acct-eval-0000"],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
         tenant="eval-abc",
     )
     dispatch(
         tool,
         {
             "account_id": "acct-eval-0000",
-            AGENT_IDENTITY_KEY: {"claims": {"custom:tenant": "demo"}},
-            IDENTITY_KEY: {"tenant": "demo", "rep_id": "attacker"},
+            AGENT_IDENTITY_KEY: {"claims": {"custom:tenant": "demo"}, "principal_type": "user"},
+            IDENTITY_KEY: {
+                "tenant": "demo",
+                "rep_id": "attacker",
+                "principal_type": "user",
+                "source": "gateway",
+            },
         },
     )
 

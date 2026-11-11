@@ -241,6 +241,7 @@ def test_caller_supplied_identity_key_is_stripped_and_never_reaches_the_handler(
             IDENTITY_KEY: {
                 "rep_id": "rep-attacker",
                 "book": ["acct-not-mine"],
+                "principal_type": "user",
                 "source": "gateway",
             },
         }
@@ -265,6 +266,7 @@ def test_agent_identity_channel_still_carries_a_valid_call(store: Store) -> None
                 "custom:book": _ACCOUNT,
                 "custom:tenant": _TENANT,
             },
+            "principal_type": "user",
             "session_id": "sess-1",
         },
         {

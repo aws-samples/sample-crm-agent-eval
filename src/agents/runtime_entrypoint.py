@@ -28,7 +28,6 @@ from typing import Any, Final, Protocol
 from agents.budget import (
     CHAT_BUDGET,
     CHAT_MAX_TOOL_CALLS,
-    DEFAULT_MAX_TOKENS,
     TurnBudget,
     TurnBudgetSpec,
 )
@@ -192,8 +191,12 @@ _EVENTS_PER_TOOL_CALL: Final[int] = 3
 #: The terminal events of one turn: ``usage`` plus ``completed``, or one ``error``.
 _TERMINAL_EVENTS_PER_TURN: Final[int] = 2
 
+#: Supervisor output tokens one chat turn's ``text_delta`` retention allows for, before the round
+#: that crosses it.
+_TEXT_DELTA_TOKEN_ALLOWANCE: Final[int] = 200_000
+
 #: The most ``text_delta`` frames one chat turn can record, at most one per supervisor output token.
-_MAX_TEXT_DELTAS_PER_TURN: Final[int] = DEFAULT_MAX_TOKENS + MAX_ROUND_OUTPUT_TOKENS
+_MAX_TEXT_DELTAS_PER_TURN: Final[int] = _TEXT_DELTA_TOKEN_ALLOWANCE + MAX_ROUND_OUTPUT_TOKENS
 
 #: The most tool calls one chat turn can record: the supervisor's, every charged leaf call, and the
 #: leaf calls of the one delegation that crosses the budget, at most one per output token.

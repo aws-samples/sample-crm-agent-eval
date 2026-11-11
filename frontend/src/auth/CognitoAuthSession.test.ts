@@ -2,13 +2,14 @@
 /**
  * Tests for sign-out against the real `amazon-cognito-identity-js`: a session restored from seeded
  * browser storage, with `fetch` stubbed so the only observable network effect is a `RevokeToken`
- * request. Asserts the refresh token is revoked when revocable, that cached tokens are gone before
- * `signOut` returns, and that a non-revocable token makes no request at all.
+ * request. Asserts the refresh token is revoked when revocable and before the cache is cleared, that
+ * revocation is bounded at `REVOKE_TIMEOUT_MS`, that cached tokens are gone once `signOut` resolves,
+ * and that a non-revocable token makes no request at all.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeConfig } from "../config/runtimeConfig";
-import { CognitoAuthSession } from "./CognitoAuthSession";
+import { CognitoAuthSession, REVOKE_TIMEOUT_MS } from "./CognitoAuthSession";
 
 const CLIENT_ID = "testclient123";
 const USERNAME = "rep-042";
@@ -85,10 +86,11 @@ describe("CognitoAuthSession.signOut", () => {
   });
 
   it("sends one RevokeToken request carrying the refresh token", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(new Response("{}", { status: 200 })));
     seedCachedSession({ revocable: true });
     const session = await restoredSession();
 
-    session.signOut();
+    await session.signOut();
 
     const requests = revokeRequests(fetchMock);
     expect(requests).toHaveLength(1);
@@ -98,27 +100,73 @@ describe("CognitoAuthSession.signOut", () => {
     });
   });
 
-  it("clears every cached Cognito key before it returns, with the revocation still pending", async () => {
+  it("keeps the cache until revocation succeeds, then clears it without waiting for the bound", async () => {
+    let respond: (response: Response) => void = () => {};
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          respond = resolve;
+        }),
+    );
     seedCachedSession({ revocable: true });
     const session = await restoredSession();
 
-    session.signOut();
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      let resolved = false;
+      const signingOut = session.signOut().then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(REVOKE_TIMEOUT_MS / 2);
+      expect(resolved).toBe(false);
+      expect(cognitoKeys().length).toBeGreaterThan(0);
 
-    expect(cognitoKeys()).toEqual([]);
+      respond(new Response("{}", { status: 200 }));
+      await signingOut;
+      expect(cognitoKeys()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("gives up on a revocation that hangs after the bound, warning once, and clears the cache", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    seedCachedSession({ revocable: true });
+    const session = await restoredSession();
+
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      let resolved = false;
+      const signingOut = session.signOut().then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(REVOKE_TIMEOUT_MS - 1);
+      expect(resolved).toBe(false);
+      expect(cognitoKeys().length).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await signingOut;
+    } finally {
+      vi.useRealTimers();
+    }
+
     expect(revokeRequests(fetchMock)).toHaveLength(1);
+    expect(cognitoKeys()).toEqual([]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(REFRESH_TOKEN);
   });
 
   it("makes no network call for a token without origin_jti, and still clears the cache", async () => {
     seedCachedSession({ revocable: false });
     const session = await restoredSession();
 
-    session.signOut();
+    await session.signOut();
 
     expect(fetchMock).not.toHaveBeenCalled();
     expect(cognitoKeys()).toEqual([]);
   });
 
-  it("reports a failed revocation without the token and keeps the cache cleared", async () => {
+  it("reports a failed revocation once, without the token, and clears the cache", async () => {
     fetchMock.mockImplementation(() => Promise.reject(new TypeError("network down")));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     seedCachedSession({ revocable: true });
@@ -126,24 +174,24 @@ describe("CognitoAuthSession.signOut", () => {
 
     vi.useFakeTimers({ toFake: ["setTimeout"] });
     try {
-      session.signOut();
+      const signingOut = session.signOut();
       await vi.advanceTimersByTimeAsync(120_000);
+      await signingOut;
     } finally {
       vi.useRealTimers();
     }
 
     expect(warn).toHaveBeenCalledTimes(1);
-
     expect(JSON.stringify(warn.mock.calls)).not.toContain(REFRESH_TOKEN);
     expect(cognitoKeys()).toEqual([]);
   });
 
   it("does not navigate away from the page", async () => {
-    seedCachedSession({ revocable: true });
+    seedCachedSession({ revocable: false });
     const session = await restoredSession();
     const before = window.location.href;
 
-    session.signOut();
+    await session.signOut();
 
     expect(window.location.href).toBe(before);
   });

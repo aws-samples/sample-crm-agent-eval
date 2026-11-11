@@ -784,3 +784,25 @@ def test_a_real_store_against_a_closed_port_raises_service_busy_and_the_gate_ski
     assert gate.main(
         ["--table-prefix", "crm-agent-eval", "--endpoint-url", "http://127.0.0.1:1"]
     ) == (GATE_SKIP_EXIT_STATUS)
+
+
+def _busy_with_context_only(cause: BaseException) -> ServiceBusy:
+    """A `ServiceBusy` raised while handling ``cause`` without `from`: ``__context__`` only."""
+    try:
+        try:
+            raise cause
+        except Exception:
+            raise ServiceBusy("The service is busy. Retry shortly.")  # noqa: B904
+    except ServiceBusy as busy:
+        return busy
+
+
+def test_a_connection_failure_reachable_only_through_context_is_not_unreachable() -> None:
+    """The cause walk follows ``__cause__`` alone; an implicit ``__context__`` is not a cause."""
+    import scripts.seed_demo_tenant as cli
+
+    busy = _busy_with_context_only(EndpointConnectionError(endpoint_url="http://127.0.0.1:1"))
+    assert busy.__cause__ is None
+    assert isinstance(busy.__context__, EndpointConnectionError)
+    assert gate.is_unreachable_failure(busy) is False
+    assert cli.is_unreachable_failure(busy) is False

@@ -55,6 +55,56 @@ resource "aws_iam_role_policy" "logs" {
   policy = data.aws_iam_policy_document.logs.json
 }
 
+locals {
+  config_parameter_region = length(var.config_parameter_arns) > 0 ? split(":", var.config_parameter_arns[0])[3] : null
+}
+
+# Decrypt for the SecureString config parameters, only through SSM under each parameter's encryption
+# context, and a refusal to decrypt through SSM under any other key.
+data "aws_iam_policy_document" "config_parameter_kms" {
+  count = length(var.config_parameter_arns) > 0 ? 1 : 0
+
+  statement {
+    sid       = "DecryptConfigParameters"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = [var.config_parameter_kms_key_arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${local.config_parameter_region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:PARAMETER_ARN"
+      values   = var.config_parameter_arns
+    }
+  }
+
+  statement {
+    sid           = "DenyConfigParameterDecryptUnderOtherKeys"
+    effect        = "Deny"
+    actions       = ["kms:Decrypt"]
+    not_resources = [var.config_parameter_kms_key_arn]
+
+    condition {
+      test     = "StringLike"
+      variable = "kms:ViaService"
+      values   = ["ssm.*.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "config_parameter_kms" {
+  count = length(var.config_parameter_arns) > 0 ? 1 : 0
+
+  name   = "${var.function_name}-config-kms"
+  role   = aws_iam_role.this.id
+  policy = data.aws_iam_policy_document.config_parameter_kms[0].json
+}
+
 # ---------------------------------------------------------------------------
 # Grants that take no resource-level scoping: Hyperplane ENI management for `vpc_config`, and
 # X-Ray trace writes for `tracing_config`.

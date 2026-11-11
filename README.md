@@ -31,7 +31,7 @@ This is a demo and a research instrument, not a production CRM.
 
 ![Concept overview: the React SPA (served from S3 via CloudFront), external MCP clients and the in-app Strands agents reach one enforcement boundary in the CRM action Lambdas through the apigw, gateway and agent identity channels; decode_identity, the input validator, authz and store.py lead to tenant-partitioned DynamoDB; the toolspec generates the validator, the MCP tool definitions and the agent tool registry; the eval run_sweep drives agent turns and writes results](docs/figures/readme-concept-overview.svg)
 
-![AWS user plane: the browser runs the React SPA it downloads through CloudFront. CloudFront's default behaviour serves the built SPA's static files from a private S3 bucket (OAC, SSE-KMS), which is where the UI is hosted; CloudFront also sends /api/* through a VPC origin, internal ALB and execute-api endpoint to the private REST API and the CRM action Lambdas on DynamoDB, which read their API client allowlist from Parameter Store, and sends /agent/* to the relay Lambda, the AgentCore Runtime and Amazon Bedrock; every behaviour carries an enforced security-headers and CSP policy; Cognito signs users in](docs/figures/readme-aws-user-plane.svg)
+![AWS user plane: the browser runs the React SPA it downloads through CloudFront. CloudFront's default behaviour serves the built SPA's static files from a private S3 bucket (OAC, SSE-KMS), which is where the UI is hosted; CloudFront also sends /api/* through a VPC origin, internal ALB and execute-api endpoint to the private REST API and the CRM action Lambdas on DynamoDB, which read their API client allowlist, a SecureString, from Parameter Store, and sends /agent/* to the relay Lambda, the AgentCore Runtime and Amazon Bedrock; every behaviour carries an enforced security-headers and CSP policy; Cognito signs users in, and signing out also ends the Cognito Hosted UI session](docs/figures/readme-aws-user-plane.svg)
 
 ![AWS agent plane: MCP clients get a Cognito token and call two AgentCore Gateways; the CRM tools Gateway runs an identity interceptor and invokes one action Lambda per tool, the chat Gateway runs its own interceptor and invokes chat_with_supervisor, which calls the AgentCore Runtime; the Runtime invokes the action Lambdas and Bedrock models and pulls its image from ECR, built by CodeBuild; eval_trigger starts the eval_sweep state machine, whose sweep_task sends eval turns to the Runtime and whose sweep_control writes artefacts to S3](docs/figures/readme-aws-agent-plane.svg)
 
@@ -408,11 +408,17 @@ instruments. `docs/eval-methodology.md` describes the bundle and the prompt-cach
 
 # Live mode: billable. Real models, the deployed tables and action Lambdas, a disposable tenant.
 EVAL_SUBSTRATE=live-aws CRM_TABLE_PREFIX=crm-agent-eval ACTION_LAMBDA_PREFIX=crm-agent-eval \
-  .venv/bin/python3 -m src.eval.harness --live --assert-artifacts
+  .venv/bin/python3 -m src.eval.harness --live --assert-artifacts --max-cost-usd <usd>
 ```
 
-`--live` without `EVAL_SUBSTRATE=live-aws` (or `--substrate live-aws`) exits 2. Other flags include
-`--dataset-seed`, `--repeats` and `--archive-raw`. `docs/eval-methodology.md` defines each metric.
+`--live` without `EVAL_SUBSTRATE=live-aws` (or `--substrate live-aws`) exits 2. `--max-cost-usd` is
+required with `--live`: before each (arm, repeat) unit, a sweep whose priced spend plus its largest
+completed unit would exceed the cap stops, tears down its tenants, writes no matrix and exits 4.
+Other flags include `--dataset-seed`, `--repeats` and `--archive-raw`. A sweep archived with
+`--archive-raw` can be re-priced against the current price table without calling a model:
+`.venv/bin/python3 -m src.eval.reprice --raw-dir <sweep>/raw --output-dir <out>`.
+`docs/eval-methodology.md` defines each metric, the per-call pricing and the per-request prompt
+limits.
 
 ## Teardown
 
@@ -535,6 +541,8 @@ docs/           guides
 - [`docs/runbook.md`](docs/runbook.md): build, deploy, verify, seed, troubleshoot and tear down
 - [`docs/security-baseline.md`](docs/security-baseline.md): the security controls the deployed stack
   must satisfy
+- [`SECURITY.md`](SECURITY.md): the threat model, OWASP mappings, accepted risks and how to report
+  a vulnerability
 - [`docs/relay-artefact.md`](docs/relay-artefact.md): building and staleness-checking the relay zip
 
 **Develop**

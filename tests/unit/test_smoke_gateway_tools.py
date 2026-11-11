@@ -1300,6 +1300,7 @@ def test_main_wires_the_minter_and_the_user_provisioner(
     assert isinstance(captured["provisioner"], LiveServicePrincipalProvisioner)
     assert isinstance(captured["user_provisioner"], LiveBareMfaUserProvisioner)
     assert callable(captured["expired_token_minter"])
+    assert callable(captured["denial_log_reader"])
 
 
 def test_the_underscoped_user_is_cleaned_up_even_when_its_provision_is_interrupted() -> None:
@@ -1873,3 +1874,112 @@ def test_no_token_fails_the_array_body_row_without_sending_it() -> None:
     rows = _array_rows(raw, token=None)
     assert rows[_ARRAY_ROW].status == "fail"
     assert raw.calls == []
+
+
+# --------------------------------------------------------------------------------------
+# The interceptor's denial decisions are logged at WARNING.
+# --------------------------------------------------------------------------------------
+
+from scripts.smoke import gateway_tools as _gateway_tools  # noqa: E402
+
+_WARN_LINE = (
+    '[WARNING]\t2026-11-08T00:00:00Z\treq-1\t{"event": "gateway_auth_denied", "reason": "x"}'
+)
+_INFO_LINE = '[INFO]\t2026-11-08T00:00:00Z\treq-1\t{"event": "gateway_auth_denied", "reason": "x"}'
+
+
+class _Reader:
+    def __init__(self, pages: list[list[str]]) -> None:
+        self.pages = pages
+        self.starts: list[int] = []
+
+    def __call__(self, start_ms: int) -> list[str]:
+        self.starts.append(start_ms)
+        return self.pages[min(len(self.starts) - 1, len(self.pages) - 1)]
+
+
+def _denial_row(reader: Any) -> CheckResult:
+    sleeps: list[float] = []
+    return _gateway_tools._check_interceptor_denial_logged(
+        reader, start_ms=1_000, sleeper=sleeps.append
+    )
+
+
+def test_a_denial_at_warning_passes() -> None:
+    row = _denial_row(_Reader([[_WARN_LINE]]))
+    assert row.status == "pass"
+
+
+def test_a_warning_that_appears_on_a_later_poll_passes() -> None:
+    reader = _Reader([[], [], [_WARN_LINE]])
+    assert _denial_row(reader).status == "pass"
+    assert reader.starts == [1_000, 1_000, 1_000]
+
+
+def test_denials_only_at_info_fail() -> None:
+    row = _denial_row(_Reader([[_INFO_LINE]]))
+    assert row.status == "fail"
+    assert "INFO" in row.detail
+
+
+def test_a_json_format_warning_passes() -> None:
+    line = '{"level": "WARN", "message": "{\\"event\\": \\"gateway_service_identity_absent\\"}"}'
+    assert _denial_row(_Reader([[line]])).status == "pass"
+
+
+def test_no_denial_line_defers_naming_the_unreached_path() -> None:
+    reader = _Reader([["[WARNING]\tunrelated line"]])
+    row = _denial_row(reader)
+    assert row.status == "defer"
+    assert row.defer_reason == "interceptor_denial_not_reached"
+    assert len(reader.starts) == _gateway_tools.DENIAL_LOG_POLL_ATTEMPTS
+
+
+def test_the_unreached_defer_states_the_observation_not_a_cause() -> None:
+    row = _denial_row(_Reader([["[WARNING]\tunrelated line"]]))
+    window = (
+        _gateway_tools.DENIAL_LOG_POLL_ATTEMPTS - 1
+    ) * _gateway_tools.DENIAL_LOG_POLL_INTERVAL_SECONDS
+    assert row.detail.startswith(f"no interceptor denial line observed within {window:g} s")
+    assert "expected to be refused before the interceptor" in row.detail
+    assert "were refused" not in row.detail
+    assert "was reached" not in row.detail
+
+
+def test_an_unreadable_log_group_fails() -> None:
+    def _broken(start_ms: int) -> list[str]:
+        raise RuntimeError("AccessDenied")
+
+    assert _denial_row(_broken).status == "fail"
+
+
+def test_no_reader_skips_never_passes() -> None:
+    assert _denial_row(None).status == "skip"
+
+
+def test_checks_emit_the_denial_row_after_the_probes() -> None:
+    reader = _Reader([[_WARN_LINE]])
+    results = list(
+        checks(
+            context_for_test(outputs=_OUTPUTS),
+            mcp_caller=_FakeCaller(tools_list=_tools_list_result()),
+            token="tok",  # nosec B106  # test placeholder, not a credential
+            denial_log_reader=reader,
+        )
+    )
+    assert results[-1].check == "interceptor_denial_logged_at_warning"
+    assert results[-1].status == "pass"
+
+
+def test_the_live_entry_point_supplies_the_denial_reader() -> None:
+    import inspect
+
+    assert "denial_log_reader=live_denial_log_reader(ctx)" in inspect.getsource(_gateway_tools.main)
+
+
+def test_the_array_body_premise_says_the_gateway_refuses_it_itself() -> None:
+    doc = _gateway_tools.__doc__ or ""
+    assert "Gateway refuses an array body itself" in doc
+    assert "the Gateway refuses it itself" in (
+        _gateway_tools._check_array_body_answers_no_tool_call.__doc__ or ""
+    )

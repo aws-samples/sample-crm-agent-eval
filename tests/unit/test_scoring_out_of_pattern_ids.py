@@ -159,7 +159,12 @@ def _contact_proposal_score(
         "category": "enrichment",
         "derived_from": "test",
         "prompt": "test prompt",
-        "actor": {"rep_id": _REP, "book": [_SEEDED_ACCOUNT], "full_visibility": False},
+        "actor": {
+            "rep_id": _REP,
+            "book": [_SEEDED_ACCOUNT],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
         "scoring_mode": "machine",
         "unscored_reason": None,
         "assertions": {

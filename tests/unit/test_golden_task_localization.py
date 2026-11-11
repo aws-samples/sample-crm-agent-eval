@@ -115,7 +115,12 @@ def test_localization_leaves_the_newly_created_id_sentinel_and_non_strings_intac
             "max_proposal_count": 0,
             "must_not_change": [],
         },
-        "actor": {"rep_id": "rep-1", "book": ["acct-0000"], "full_visibility": False},
+        "actor": {
+            "rep_id": "rep-1",
+            "book": ["acct-0000"],
+            "full_visibility": False,
+            "principal_type": "user",
+        },
     }
     localized = localize_task(task, tenant="t1")
     change: dict[str, Any] = localized["assertions"]["expected_field_changes"][0]

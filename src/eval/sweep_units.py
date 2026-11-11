@@ -14,6 +14,7 @@ Eval arms take their tuning from :class:`ArmSpec` only; no user settings are rea
 
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -25,7 +26,12 @@ from agents.tier_attribution import InvocationAttribution, ToolCallAttribution
 from agents.turn_driver import session_turn_tuning
 from crm.metering import TokenUsage, UsageRecord, build_usage_record
 from crm.store.store import Store
-from eval.matrix import ArmResult, RunProvenance
+from eval.matrix import (
+    ARM_COST_TOTAL_KEY,
+    ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
+    ArmResult,
+    RunProvenance,
+)
 from eval.metrics import (
     ALL_TIERS,
     TASK_SPREAD_REPORT_KEY,
@@ -45,6 +51,7 @@ from eval.metrics import (
     build_tier_report_fields,
     require_records_attributed,
 )
+from eval.pricing import inference_profile_for
 from eval.scoring import (
     AggregateScore,
     TaskScore,
@@ -127,7 +134,7 @@ class TaskUnitResult:
         task_score: The :func:`eval.scoring.score_task` result.
         tier_scores: The :func:`eval.scoring.score_tiers` result.
         turn: The observed turn the scores were computed from.
-        usage_records: One priced usage record per ``(tier, role, model_id)`` group of the turn.
+        usage_records: One priced usage record per invocation attribution of the turn.
     """
 
     task_id: str
@@ -201,32 +208,51 @@ def usage_records_for_turn(
     rep_id: str,
     family: Family,
 ) -> tuple[UsageRecord, ...]:
-    """One priced :class:`crm.metering.UsageRecord` per ``(tier, role, model_id)`` group.
+    """One priced :class:`crm.metering.UsageRecord` per invocation attribution.
 
-    Each group's tokens are summed, so several supervisor rounds in one turn yield one record.
+    Each call is priced on its own under its model's configured inference profile, so its
+    standard or long-context tier follows that call's prompt size. Records are ordered by
+    ``(tier, role, model_id)``, attribution order kept within a group.
+
+    Raises:
+        ValueError: An attributed model has no configured inference profile.
     """
-    grouped: dict[tuple[str, str, str], list[InvocationAttribution]] = {}
-    for attribution in invocations:
-        key = (attribution.tier, attribution.role, attribution.model_id)
-        grouped.setdefault(key, []).append(attribution)
+    ordered = sorted(invocations, key=lambda a: (a.tier, a.role, a.model_id))
+    profiles = {a.model_id: inference_profile_for(a.model_id) for a in ordered}
     return tuple(
         build_usage_record(
             correlation_id=task_id,
             turn_id=task_id,
             invocation_id=str(uuid.uuid4()),
             rep_id=rep_id,
-            model_id=model_id,
+            model_id=attribution.model_id,
             family=family,
-            tier=cast(Tier, tier_name),
+            tier=attribution.tier,
             usage=TokenUsage(
-                input_tokens=sum(a.tokens.input_tokens for a in group),
-                output_tokens=sum(a.tokens.output_tokens for a in group),
-                cache_write_tokens=sum(a.cache.write_tokens for a in group),
-                cache_read_tokens=sum(a.cache.read_tokens for a in group),
+                input_tokens=attribution.tokens.input_tokens,
+                output_tokens=attribution.tokens.output_tokens,
+                cache_write_tokens=attribution.cache.write_tokens,
+                cache_read_tokens=attribution.cache.read_tokens,
             ),
+            inference_profile=profiles[attribution.model_id],
         )
-        for (tier_name, _role, model_id), group in sorted(grouped.items())
+        for attribution in ordered
     )
+
+
+def arm_total_fields(records: Sequence[UsageRecord], *, withhold_cost: bool) -> dict[str, object]:
+    """Return an arm's all-tier totals over every one of its priced usage records.
+
+    ``arm_cost_total`` is the exactly rounded sum of every record's cost, so it does not depend on
+    record order, or ``None`` while cost is withheld;
+    ``arm_long_context_invocation_count`` counts the records priced at long-context rates.
+    """
+    return {
+        ARM_COST_TOTAL_KEY: None if withhold_cost else math.fsum(r.cost.total for r in records),
+        ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY: sum(
+            1 for r in records if r.cost.pricing_tier == "long_context"
+        ),
+    }
 
 
 def _tier_scores(
@@ -349,7 +375,8 @@ def assemble_arm(
 
     Raises:
         AssertionError: ``provider_stream_calls`` differs from the units' driven stream calls,
-            ``included_invocation_count`` exceeds the stream calls that could have produced it, or
+            a unit's or the arm's invocation attributions (every tier) outnumber the stream calls
+            that could have produced them, ``included_invocation_count`` exceeds those calls, or
             the units carry different prompt-bundle digests.
     """
     tuning = arm_tuning(arm_spec)
@@ -417,6 +444,20 @@ def assemble_arm(
     stream_calls = (
         provider_stream_calls if provider_stream_calls is not None else driven_stream_calls
     )
+    for unit in units:
+        if len(unit.turn.invocations) > unit.turn.stream_calls:
+            raise AssertionError(
+                f"task unit {unit.task_id!r} recorded {len(unit.turn.invocations)} invocation "
+                f"attribution(s) across its tiers but its driver made only "
+                f"{unit.turn.stream_calls} provider.stream call(s): each call yields at most one "
+                "attribution, so a surplus is a double-recorded usage"
+            )
+    if len(all_attributions) > stream_calls:
+        raise AssertionError(
+            f"this arm recorded {len(all_attributions)} invocation attribution(s) across its "
+            f"tiers but provider.stream was only called {stream_calls} time(s): each call yields "
+            "at most one attribution, so a surplus is a double-recorded usage"
+        )
     if model_metrics.included_invocation_count > stream_calls:
         raise AssertionError(
             f"included_invocation_count is {model_metrics.included_invocation_count} but "
@@ -498,6 +539,7 @@ def assemble_arm(
             unit.task_id for unit in units if unit.turn.usage_lower_bound
         ),
         tier_task_metrics_fields=tier_task_metrics.to_report_fields(),
+        arm_totals_fields=arm_total_fields(all_usage_records, withhold_cost=cost_withheld),
     )
     return ArmRunResult(
         arm_result=arm_result,
@@ -524,5 +566,6 @@ __all__ = [
     "run_task_unit",
     "task_actor",
     "task_refs",
+    "arm_total_fields",
     "usage_records_for_turn",
 ]

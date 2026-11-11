@@ -167,6 +167,7 @@ def _runtime_accepts(prompt: str) -> bool:
     payload = {
         AGENT_IDENTITY_KEY: {
             "claims": {CLAIM_REP_ID: "rep-1", CLAIM_TENANT: "demo", "custom:book": "acc-1"},
+            "principal_type": "user",
             "session_id": "s" * 40,
         },
         "prompt": prompt,

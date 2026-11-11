@@ -749,3 +749,23 @@ class TestARemoteSeedRequiresANamedTarget:
             option for action in cli.build_arg_parser()._actions for option in action.option_strings
         }
         assert "--outputs" in options, sorted(options)
+
+
+def test_the_seed_cause_walk_ignores_a_context_only_connection_failure() -> None:
+    """A connection error that is only ``__context__`` of a `ServiceBusy` is not its cause."""
+    from botocore.exceptions import EndpointConnectionError
+
+    from crm.errors import ServiceBusy
+
+    def _raise_without_from() -> None:
+        try:
+            raise EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+        except EndpointConnectionError:
+            raise ServiceBusy("The service is busy. Retry shortly.")  # noqa: B904
+
+    with pytest.raises(ServiceBusy) as raised:
+        _raise_without_from()
+
+    assert raised.value.__cause__ is None
+    assert isinstance(raised.value.__context__, EndpointConnectionError)
+    assert cli.is_unreachable_failure(raised.value) is False

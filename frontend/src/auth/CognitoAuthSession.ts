@@ -38,11 +38,14 @@ export interface AuthSession {
   /** Returns a valid, non-expired Cognito ID token, refreshing first if necessary. */
   getAccessToken(): Promise<string>;
   /**
-   * Signs the user out: starts revoking the refresh token, and clears all cached Cognito state for
-   * this pool before returning.
+   * Signs the user out: revokes the refresh token, waiting at most {@link REVOKE_TIMEOUT_MS}, then
+   * clears all cached Cognito state for this pool. Never rejects.
    */
-  signOut(): void;
+  signOut(): Promise<void>;
 }
+
+/** The longest sign-out waits for refresh-token revocation before clearing local state anyway. */
+export const REVOKE_TIMEOUT_MS = 3_000;
 
 /** `CognitoUser.revokeTokens`, present at runtime but missing from the library's type declarations. */
 interface RevocableUser {
@@ -134,14 +137,43 @@ export class CognitoAuthSession implements AuthSession {
   }
 
   /**
-   * Start revoking the refresh token, then clear every cached Cognito token synchronously. The
-   * revocation runs in the background; a token without `origin_jti` is not revocable and makes no
-   * network call, and a failed revocation is reported to the console only.
+   * Revoke the refresh token, then clear every cached Cognito token. Revocation is bounded at
+   * {@link REVOKE_TIMEOUT_MS}; a token without `origin_jti` is not revocable and makes no network
+   * call. A failed or timed-out revocation is reported to the console only, and the cache is
+   * cleared regardless.
    */
-  signOut(): void {
-    (this.user as unknown as RevocableUser).revokeTokens((err?: Error) => {
-      if (err) console.warn("Could not revoke the refresh token at sign-out", err.name);
+  async signOut(): Promise<void> {
+    try {
+      await this.revokeRefreshToken();
+    } finally {
+      this.user.signOut();
+    }
+  }
+
+  /** Resolves when revocation settles or times out; reports at most one warning, never rejects. */
+  private revokeRefreshToken(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const settle = (warning?: string): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (warning !== undefined) console.warn(warning);
+        resolve();
+      };
+      const timer = setTimeout(
+        () => settle("Refresh-token revocation did not finish in time; signed out locally"),
+        REVOKE_TIMEOUT_MS,
+      );
+      try {
+        (this.user as unknown as RevocableUser).revokeTokens((err?: Error) => {
+          settle(err ? `Could not revoke the refresh token at sign-out: ${err.name}` : undefined);
+        });
+      } catch (err) {
+        settle(
+          `Could not revoke the refresh token at sign-out: ${err instanceof Error ? err.name : "unknown"}`,
+        );
+      }
     });
-    this.user.signOut();
   }
 }

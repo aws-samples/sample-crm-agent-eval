@@ -7,6 +7,7 @@ Time is driven by an injected monotonic clock; expiry emits an ``error`` event c
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 
@@ -64,8 +65,8 @@ def test_the_eval_caps_are_25_tool_calls_and_120_seconds() -> None:
     assert EVAL_WALL_CLOCK_SECONDS == 120.0
 
 
-def test_the_token_cap_is_200k_and_shared_by_both_specs() -> None:
-    assert DEFAULT_MAX_TOKENS == 200_000
+def test_the_token_cap_is_1m_and_shared_by_both_specs() -> None:
+    assert DEFAULT_MAX_TOKENS == 1_000_000
     assert CHAT_BUDGET.max_tokens == DEFAULT_MAX_TOKENS
     assert EVAL_BUDGET.max_tokens == DEFAULT_MAX_TOKENS
 
@@ -381,3 +382,67 @@ def test_the_production_default_clock_is_monotonic_and_needs_no_injection() -> N
     budget = TurnBudget()
     assert budget.elapsed_seconds() >= 0.0
     assert budget.is_deadline_expired() is False
+
+
+# --------------------------------------------------------------------------------------
+# A refused request is the request_prompt_limit dimension
+# --------------------------------------------------------------------------------------
+
+
+def test_a_refused_request_exhausts_the_budget_on_its_own_dimension() -> None:
+    budget = TurnBudget(max_tool_calls=5, max_tokens=1_000)
+    assert not budget.is_exhausted()
+    budget.refuse_request(
+        estimated_prompt_tokens=312_000, limit=270_000, tier="tool", role="research"
+    )
+    assert budget.is_exhausted()
+    assert budget.exhausted_dimensions() == ("request_prompt_limit",)
+    assert budget.tokens_consumed == 0 and budget.tool_calls_made == 0
+
+
+def test_the_exhausted_event_names_the_estimate_the_limit_and_the_tier() -> None:
+    budget = TurnBudget(max_tool_calls=5, max_tokens=1_000)
+    budget.refuse_request(
+        estimated_prompt_tokens=312_000, limit=270_000, tier="tool", role="research"
+    )
+    event = budget.exhausted_event()
+    assert event.kind == "error" and event.error_kind == "budget_exhausted"
+    assert event.error_message is not None
+    assert event.error_message.startswith(
+        "Turn budget exhausted (request_prompt_limit: estimated 312000 > 270000 prompt tokens "
+        "for one request on the tool tier) after "
+    )
+
+
+def test_the_first_refusal_is_the_one_reported() -> None:
+    budget = TurnBudget()
+    budget.refuse_request(estimated_prompt_tokens=10, limit=5, tier="subagent", role="research")
+    budget.refuse_request(estimated_prompt_tokens=99, limit=7, tier="tool", role="research")
+    message = budget.exhausted_event().error_message or ""
+    assert "estimated 10 > 5" in message and "subagent tier" in message
+    assert "99" not in message
+
+
+def test_a_refusal_is_listed_after_the_other_exhausted_dimensions() -> None:
+    budget = TurnBudget(max_tool_calls=1, max_tokens=1_000)
+    budget.record_tool_call("called get_account")
+    budget.refuse_request(estimated_prompt_tokens=2, limit=1, tier="supervisor", role="supervisor")
+    assert budget.exhausted_dimensions() == ("tool_calls", "request_prompt_limit")
+    assert "(tool_calls, request_prompt_limit: estimated 2 > 1 " in (
+        budget.exhausted_event().error_message or ""
+    )
+
+
+def test_a_refusal_is_logged_at_warning(caplog: pytest.LogCaptureFixture) -> None:
+    budget = TurnBudget()
+    with caplog.at_level(logging.WARNING, logger="agents.budget"):
+        budget.refuse_request(estimated_prompt_tokens=8, limit=4, tier="tool", role="mutation")
+    records = [r for r in caplog.records if "model_request_refused" in r.getMessage()]
+    assert len(records) == 1 and records[0].levelno == logging.WARNING
+    assert "tier=tool role=mutation estimated_prompt_tokens=8 limit=4" in records[0].getMessage()
+
+
+def test_an_unrefused_budget_reports_no_request_prompt_limit_dimension() -> None:
+    budget = TurnBudget(max_tool_calls=1)
+    budget.record_tool_call("called get_account")
+    assert "request_prompt_limit" not in budget.exhausted_dimensions()

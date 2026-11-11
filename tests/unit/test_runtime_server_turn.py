@@ -49,7 +49,14 @@ def _payload(
     body: dict[str, Any] = {"prompt": prompt, "session_id": session_id}
     if tuning is not None:
         body["tuning"] = tuning
-    return {**body, AGENT_IDENTITY_KEY: {"claims": dict(_CLAIMS), "session_id": session_id}}
+    return {
+        **body,
+        AGENT_IDENTITY_KEY: {
+            "claims": dict(_CLAIMS),
+            "principal_type": "user",
+            "session_id": session_id,
+        },
+    }
 
 
 def _invocation(

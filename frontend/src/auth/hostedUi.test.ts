@@ -6,12 +6,14 @@
  *    attempt deletes it, and a replayed callback is rejected.
  * 2. Every token-exchange failure path is a `HostedUiError` whose message names what happened and
  *    what to do.
+ * 3. Sign-out navigates to the Hosted UI `/logout` with the SPA client and the `/logout` return URI,
+ *    and only when Hosted UI is configured.
  */
 
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createElement } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
   HostedUiError,
@@ -21,8 +23,11 @@ import {
   createCodeChallenge,
   createCodeVerifier,
   createState,
+  endHostedUiSession,
   exchangeCodeForTokens,
   extractAuthorizationCode,
+  hostedUiLogoutRedirectUri,
+  hostedUiLogoutUrl,
   hostedUiRedirectUri,
   isHostedUiCallback,
   isHostedUiEnabled,
@@ -446,6 +451,52 @@ describe("every failure is actionable, never blank", () => {
       REDIRECT_URI,
     ).catch((e: unknown) => e);
     expect(expectActionable(error).failure).toBe("attempt_missing");
+  });
+});
+
+describe("Hosted UI logout", () => {
+  const ORIGIN = "https://crm.example";
+
+  function fakeLocation(): { origin: string; assign: Mock<(url: string | URL) => void> } {
+    return { origin: ORIGIN, assign: vi.fn<(url: string | URL) => void>() };
+  }
+
+  it("builds the /logout URL on the Hosted UI domain with the client and the /logout return URI", () => {
+    const url = new URL(hostedUiLogoutUrl(config, ORIGIN));
+
+    expect(url.origin).toBe(`https://${config.cognitoHostedUiDomain}`);
+    expect(url.pathname).toBe("/logout");
+    expect(url.searchParams.get("client_id")).toBe(config.cognitoClientId);
+    expect(url.searchParams.get("logout_uri")).toBe(`${ORIGIN}/logout`);
+    expect([...url.searchParams.keys()].sort()).toEqual(["client_id", "logout_uri"]);
+  });
+
+  it("returns to the SPA's /logout path, not to the sign-in callback", () => {
+    expect(hostedUiLogoutRedirectUri(ORIGIN)).toBe(`${ORIGIN}/logout`);
+    expect(hostedUiLogoutRedirectUri(ORIGIN)).not.toBe(hostedUiRedirectUri(ORIGIN));
+  });
+
+  it("refuses to build a logout URL when Hosted UI is not configured", () => {
+    expect(() => hostedUiLogoutUrl({ ...config, cognitoHostedUiDomain: "" }, ORIGIN)).toThrow(
+      HostedUiError,
+    );
+  });
+
+  it("navigates to the logout URL when Hosted UI is configured", () => {
+    const location = fakeLocation();
+
+    expect(endHostedUiSession(config, location)).toBe(true);
+
+    expect(location.assign).toHaveBeenCalledTimes(1);
+    expect(location.assign).toHaveBeenCalledWith(hostedUiLogoutUrl(config, ORIGIN));
+  });
+
+  it("does not navigate when Hosted UI is not configured", () => {
+    const location = fakeLocation();
+
+    expect(endHostedUiSession({ ...config, cognitoHostedUiDomain: "" }, location)).toBe(false);
+
+    expect(location.assign).not.toHaveBeenCalled();
   });
 });
 

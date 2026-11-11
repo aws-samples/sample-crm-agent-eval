@@ -33,6 +33,10 @@ key policy, administration is explicitly denied to those roles, and key use is e
 to a role outside them. A ``create_note`` body one character over the toolspec's long-text cap is
 refused ``validation_failed``.
 
+``principal_type_checks`` invokes ``get_account`` with an ``_identity`` and with an
+``_agent_identity`` that omit ``principal_type``; each must be refused ``authentication_failed``.
+The same ``_agent_identity`` with ``principal_type: user`` must succeed.
+
 Operates under its own smoke tenant (`scripts/smoke/tenant.py`), never ``demo``. With no
 ``--tenant`` it allocates and seeds that tenant and tears it down when ``checks()`` returns; with
 ``--tenant`` the tenant is used as-is and the orchestrator owns teardown.
@@ -62,6 +66,15 @@ from scripts.smoke.tenant import (
 )
 
 from crm.cursor import CURSOR_KMS_KEY_ENV, CURSOR_PURPOSE
+from crm.envelope import (
+    AGENT_IDENTITY_KEY,
+    AGENT_PRINCIPAL_TYPE_KEY,
+    CLAIM_BOOK,
+    CLAIM_FULL_VISIBILITY,
+    CLAIM_REP_ID,
+    CLAIM_TENANT,
+    IDENTITY_KEY,
+)
 from crm.store.store import Store
 from crm.toolspec.definitions import ALL_TOOLS, LONG_TEXT_MAX_LENGTH, ToolDefinition
 
@@ -1734,11 +1747,104 @@ def check_long_text_cap(ctx: SmokeContext, *, tenant: str) -> CheckResult:
     )
 
 
+PRINCIPAL_TYPE_PROBE_TOOL: Final[str] = "get_account"
+GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK: Final[str] = "gateway_identity_without_principal_type_refused"
+AGENT_PRINCIPAL_TYPE_ABSENT_CHECK: Final[str] = "agent_identity_without_principal_type_refused"
+AGENT_PRINCIPAL_TYPE_DECLARED_CHECK: Final[str] = "agent_identity_with_principal_type_accepted"
+
+
+def _agent_identity_block(*, tenant: str, principal_type: str | None) -> dict[str, Any]:
+    """Build an `_agent_identity` forwarding the in-scope rep's claims under `tenant`."""
+    block: dict[str, Any] = {
+        "claims": {
+            CLAIM_REP_ID: _SEEDED_ACCOUNT_OWNER_REP_ID,
+            CLAIM_TENANT: tenant,
+            CLAIM_BOOK: seeded_in_scope_account_id(tenant),
+            CLAIM_FULL_VISIBILITY: "false",
+        },
+        "session_id": "smoke-session",
+    }
+    if principal_type is not None:
+        block[AGENT_PRINCIPAL_TYPE_KEY] = principal_type
+    return block
+
+
+def principal_type_events(*, tenant: str) -> dict[str, dict[str, Any]]:
+    """Return the event for each principal-type check, keyed by check name.
+
+    Each event carries exactly one identity channel.
+    """
+    tool = _tool_named(PRINCIPAL_TYPE_PROBE_TOOL)
+    base = in_scope_event(tool, tenant=tenant)
+    gateway_identity = dict(base.pop(IDENTITY_KEY))
+    gateway_identity.pop("principal_type")
+    return {
+        GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK: {**base, IDENTITY_KEY: gateway_identity},
+        AGENT_PRINCIPAL_TYPE_ABSENT_CHECK: {
+            **base,
+            AGENT_IDENTITY_KEY: _agent_identity_block(tenant=tenant, principal_type=None),
+        },
+        AGENT_PRINCIPAL_TYPE_DECLARED_CHECK: {
+            **base,
+            AGENT_IDENTITY_KEY: _agent_identity_block(tenant=tenant, principal_type="user"),
+        },
+    }
+
+
+def _principal_type_result(check: str, response: Mapping[str, Any]) -> CheckResult:
+    """Judge one principal-type response: refusals need `authentication_failed`, the control success."""
+    code = _error_code(response)
+    if _leaks_detail(response):
+        return CheckResult(
+            resource=PRINCIPAL_TYPE_PROBE_TOOL,
+            check=check,
+            status="fail",
+            detail=f"response leaks an internal 'detail' key: {response!r}",
+        )
+    if check == AGENT_PRINCIPAL_TYPE_DECLARED_CHECK:
+        if code is None and response.get("statusCode") == 200:
+            return CheckResult(resource=PRINCIPAL_TYPE_PROBE_TOOL, check=check, status="pass")
+        return CheckResult(
+            resource=PRINCIPAL_TYPE_PROBE_TOOL,
+            check=check,
+            status="fail",
+            detail=f"expected success for principal_type 'user', got {response!r}",
+        )
+    if code == "authentication_failed":
+        return CheckResult(
+            resource=PRINCIPAL_TYPE_PROBE_TOOL,
+            check=check,
+            status="pass",
+            detail="absent principal_type refused authentication_failed",
+        )
+    return CheckResult(
+        resource=PRINCIPAL_TYPE_PROBE_TOOL,
+        check=check,
+        status="fail",
+        detail=f"expected error code='authentication_failed' for an absent principal_type, got {response!r}",
+    )
+
+
+def principal_type_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[CheckResult]:
+    """Yield the absent-`principal_type` refusal rows and the declared-type control row."""
+    function_name = function_name_for(_tool_named(PRINCIPAL_TYPE_PROBE_TOOL))
+    for check, event in principal_type_events(tenant=tenant).items():
+        try:
+            response = _invoke(ctx, function_name, event)
+        except ValueError as exc:
+            yield CheckResult(
+                resource=PRINCIPAL_TYPE_PROBE_TOOL, check=check, status="fail", detail=str(exc)
+            )
+            continue
+        yield _principal_type_result(check, response)
+
+
 def guarded_extra_checks(ctx: SmokeContext, *, tenant: str) -> Iterable[CheckResult]:
-    """Yield the cursor, cursor-key and long-text-cap rows, in that order."""
+    """Yield the cursor, cursor-key, long-text-cap and principal-type rows, in that order."""
     yield from cursor_checks(ctx, tenant=tenant)
     yield from cursor_key_checks(ctx)
     yield check_long_text_cap(ctx, tenant=tenant)
+    yield from principal_type_checks(ctx, tenant=tenant)
 
 
 def checks(

@@ -159,6 +159,7 @@ class TestAdminOnly:
             AGENT_IDENTITY_KEY: {
                 "claims": {CLAIM_REP_ID: "rep-1", CLAIM_TENANT: "demo", CLAIM_GROUPS: ["admin"]},
                 "session_id": "s",
+                "principal_type": "user",
             },
             "action": "submit",
             "mode": "live",
@@ -699,6 +700,7 @@ class TestReadScope:
             AGENT_IDENTITY_KEY: {
                 "claims": {CLAIM_REP_ID: "rep-1", CLAIM_TENANT: "demo", CLAIM_GROUPS: ["admin"]},
                 "session_id": "s",
+                "principal_type": "user",
             },
             "action": "list",
         }

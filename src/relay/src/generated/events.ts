@@ -31,6 +31,7 @@ export interface CostLine {
   readonly cache_write_tokens: number;
   readonly cost_usd: number | null;
   readonly input_tokens: number;
+  readonly long_context_calls: number;
   readonly model_id: string;
   readonly output_tokens: number;
   readonly role: string;

@@ -5,7 +5,7 @@ See also: [documentation map](../../README.md#documentation). Pages embedding th
 Each figure is a draw.io source (`<name>.drawio`) next to its SVG export (`<name>.svg`); the
 markdown pages link the SVG. Edit the source, then re-export; never edit an SVG by hand.
 
-- **Toolchain.** draw.io desktop 32.5.5 (`brew install --cask drawio`). Export with:
+- **Toolchain.** draw.io desktop 32.6.10 (`brew install --cask drawio`). Export with:
 
   ```bash
   DRAWIO=/Applications/draw.io.app/Contents/MacOS/draw.io

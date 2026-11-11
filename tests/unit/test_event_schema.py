@@ -195,6 +195,7 @@ def _one_event_per_kind() -> list[AgentEvent]:
                     "output_tokens": 7,
                     "cache_read_tokens": 0,
                     "cache_write_tokens": 0,
+                    "long_context_calls": 0,
                     "cost_usd": 0.001,
                 },
             ),

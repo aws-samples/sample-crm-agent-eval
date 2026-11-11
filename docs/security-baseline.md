@@ -64,13 +64,54 @@ These controls narrow trust the stack already grants. Each fails closed when mis
   token to be issued to an allowed app client (`aud` on an ID token, `client_id` on an access token).
   The allowed client ids come from the SSM parameter named by `CRM_API_ALLOWED_CLIENT_IDS_PARAMETER`,
   read once per process. That parameter, `aws_ssm_parameter.api_allowed_client_ids` in `infra/main.tf`,
-  is a `String` named `/<name_prefix>/api/allowed-client-ids`, holding the SPA client id. A token from any other client gets `401`. An unset, unreadable or empty
-  allowlist admits nobody: the request fails as a server error, and neither a failed read nor an empty value is cached.
-  Unit: `tests/unit/test_envelope.py`.
+  is a Standard-tier `SecureString` named `/<name_prefix>/api/allowed-client-ids`, holding the SPA
+  client id. A token from any other client gets `401`. An unset, unreadable or empty allowlist admits
+  nobody: the request fails as a server error, and neither a failed read nor an empty value is cached.
+  The reader also refuses a parameter whose type is not `SecureString`, so a downgraded parameter is
+  refused rather than trusted. Unit: `tests/unit/test_envelope.py`.
+- **API allowlist key.** The parameter is encrypted under its own customer-managed key,
+  `aws_kms_key.api_allowlist` in `infra/main.tf` (alias `alias/<name_prefix>-api-allowlist`), with
+  rotation on and `data-classification = internal`. Its key policy:
+  - lets the operators in `crm_operator_principal_arns` encrypt and decrypt only through SSM;
+  - lets the consumer roles (every action Lambda that receives the parameter, plus `eval_trigger`,
+    `capabilities` and `user_settings`) decrypt only through SSM, and only under this parameter's
+    `PARAMETER_ARN` encryption context;
+  - denies encryption and data-key generation to every non-service principal outside the operators;
+  - denies all key use to every non-service principal outside the consumers and operators;
+  - denies key administration to every principal outside the operators and the account root.
+
+  Each consumer's own `<function>-config-kms` policy allows that one decrypt and explicitly denies
+  any decrypt through SSM under another key, `aws/ssm` included. No consumer may write, delete or
+  label the parameter. Plan time: `tests/unit/test_infra_allowlist_key.py`. Live: the Layer 4
+  `iam_roles` smoke simulates each consumer role. The deployed stack was also checked once by hand:
+  a run-scoped role outside the key policy's principals was refused decryption with an explicit deny
+  in the key policy.
+- **Known gap: parameter downgrade.** SSM accepts an overwrite that changes the parameter's type to
+  `String`, or re-encrypts it under `aws/ssm`, from any principal allowed `ssm:PutParameter` on it.
+  No project role is granted that; the operators, and any other principal whose own IAM policies
+  allow SSM writes in the account, can do it. Neither overwrite uses the allowlist key, so its key
+  policy does not stop them, and no control in this stack prevents it. What holds is that a
+  downgraded parameter fails closed: consumers are explicitly denied decryption under `aws/ssm`, and
+  the reader refuses any type other than `SecureString`, so every request is refused until the
+  parameter is restored. A `String` value is stored unencrypted and is readable by any principal
+  allowed `ssm:GetParameter` on it. Restoring it is an operator apply (`scripts/deploy.sh`), which
+  rewrites the parameter as a `SecureString` under the allowlist key.
+- **Declared principal type.** On the `gateway` and `agent` identity channels, `crm.envelope` requires
+  the identity to declare `principal_type` as `user` or `service`. An absent, empty or other value is
+  refused `401 authentication_failed`; there is no default. The Gateway interceptor and the relay
+  write it, and the in-app agents forward it. Unit: `tests/unit/test_envelope.py`. Live: the Layer 4
+  `lambda_actions` smoke invokes an action Lambda with each channel's identity minus the key and
+  expects the refusal, next to a control call that declares it.
 - **Refresh-token revocation at sign-out.** Every app client has token revocation enabled
   (`enable_token_revocation` in `infra/modules/cognito/main.tf`). Signing out of the SPA starts revoking the
   refresh token and clears the cached Cognito tokens at once (`frontend/src/auth/CognitoAuthSession.ts`);
   a failed revocation is logged to the browser console only, and the sign-out still completes.
+- **Hosted UI sign-out.** When the Hosted UI is enabled, signing out also navigates to the Cognito
+  domain's `/logout` endpoint (`frontend/src/auth/hostedUi.ts`), which ends the Hosted UI session, so
+  the next sign-in asks for credentials again. Cognito returns to the SPA's `/logout` path, which must
+  be registered as a logout URL on the SPA client (`spa_logout_urls`, `logout_urls` in
+  `infra/modules/cognito/main.tf`); an unregistered return URL is refused by Cognito. The Layer 4
+  `cognito_claims` smoke checks the registered and an unregistered logout URL.
 - **Free-text length caps.** Every free-text string a tool accepts carries a `maxLength`
   (`src/crm/toolspec/definitions.py`): 4000 characters for `description`, `notes`, `body` and `reason`,
   4000 for `cursor`, 1024 for the `revert_audit_record` reason, and 256 for any other string without a
@@ -231,8 +272,11 @@ scan-2 rows they account for therefore no longer apply: all of scan-2 H-2, and t
 of scan-2 H-4, H-5 and H-6. The 1 source row in each of those three still stands.
 The counts above are scan 2's and have not been re-measured.
 
-Scan 2 measured how Holmes treats inline suppressions. It honours bandit `# nosec Bxxx`. It ignores
-Semgrep `# nosemgrep` (92 of the 107 subprocess rows carry one) and `checkov:skip`.
+Scan 2 measured how Holmes treats inline suppressions. It honoured bandit `# nosec Bxxx` and ignored
+Semgrep `# nosemgrep` (92 of the 107 subprocess rows carried one) and `checkov:skip`. The re-scan of
+2026-11-10 (below) reports every row carrying `# nosemgrep` as suppressed, but with an empty status
+message. Its suppressed Checkov rows, by contrast, each carry their `checkov:skip` reason. So the re-scan
+cannot tell whether the marker or a portal action suppressed the Semgrep rows.
 
 On 2026-10-25, semgrep 1.172.0 reported 0 `dangerous-subprocess-use-audit` rows in the tree, run from
 the repository root:
@@ -278,6 +322,56 @@ The other Semgrep rows that scan 2 leaves standing are:
 - identifiers whose names match `*_key`.
 
 All of these Semgrep rows are filed in Holmes as false positives.
+
+**Holmes scan of 2026-11-09** (scan `84eb6441-08a2-40b4-a2e1-7f55f257b27a`).
+
+Baseline `HolmesContentSecurityReviewBaselinePolicy` v3 reported 45 rows. 19 are Checkov Highs that
+Holmes already shows as `suppressed`: H-4 to H-10 below cover them, and no code changed for them. The
+other 26 rows (8 High, 2 Medium, 16 Low) are dispositioned below. Row numbers are the scan's
+`findingId`.
+
+Fixed in code. The local scanner no longer reports these rows, and the code before the fix still does:
+
+| Rows | Rule | Site | Fix |
+|---|---|---|---|
+| 11 | `CKV_AWS_259` | `infra/modules/frontend_cdn/cloudfront.tf`, response-headers policy | HSTS sets `include_subdomains` and `preload` to true. `tests/unit/test_infra_csp.py` asserts the planned value. `scripts/smoke/cloudfront.py` asserts the served `Strict-Transport-Security` (max-age=31536000, includeSubDomains, preload) on every probed behaviour |
+| 21, 22 | `B105`, `detected-jwt-token` | `tests/unit/test_handler_error_logging.py` | the fake JWT is minted when the test module is imported, so no token literal remains |
+| 24 | `regex_dos` | `tests/unit/test_deploy_script.py` | the nested-quantifier regex is replaced by a line parser |
+| 25 to 34, 36 | `detected-aws-account-id` | `tests/unit/test_render_agentcore_env.py`, `tests/unit/test_teardown_deletion_protection.py` | the stubs interpolate one named placeholder constant per file |
+| 38 | gitleaks `generic-api-key` | `src/crm/metering.py` | the per-million divisor is renamed |
+
+Suppressed with `# nosec`, which Holmes honours. Each value is a test fixture or an empty or sentinel
+string, not a credential:
+
+| Row | Rule | Site |
+|---|---|---|
+| 37 | `B105` | `scripts/smoke/cognito_claims.py` |
+| 40 | `B105` | `tests/unit/test_handlers_apigw_proxy.py` |
+| 41 | `B106` | `tests/unit/test_identity_interceptor.py` |
+| 43 | `B105` | `tests/unit/test_smoke_cognito_claims.py` |
+| 45 | `B105` | `tests/unit/test_store_transport_errors.py` |
+
+Four more lines that local bandit flags under the same rules carry the same marker:
+`tests/unit/test_identity_interceptor.py` (2), `tests/unit/test_proposal_payload_allowlist.py` and
+`tests/unit/test_smoke_cognito_claims.py`.
+
+Residual rows. Each carries `# nosemgrep`, and the re-scan below reports each one it lists as
+suppressed:
+
+| Row | Severity | Rule | Site | Reason |
+|---|---|---|---|---|
+| 12 | Medium | `aws-insecure-cloudfront-distribution-tls-version` | `infra/modules/frontend_cdn/cloudfront.tf`, distribution | ACCEPT, see H-5. With the default `*.cloudfront.net` certificate, CloudFront fixes the minimum protocol. Only a custom-domain certificate could set one |
+| 35 | Low | `detected-aws-account-id` | `tests/unit/test_teardown_deletion_protection.py`, `ACCOUNT` | FP. The value is the AWS documentation example account id |
+| none | Low | `detected-aws-account-id` | `tests/unit/test_render_agentcore_env.py`, `SANDBOX_ACCOUNT` | FP, the same example id. The line is new and is not in this scan, so it may appear in the next one |
+| 39 | Low | gitleaks `generic-api-key` | `tests/integration/test_local_turn.py`, `transaction_key` | FP. A test value for an idempotency token, not a secret |
+| 42 | Low | gitleaks `generic-api-key` | `tests/unit/test_proposal_payload_allowlist.py`, `transaction_key` | FP, the same kind of test id |
+| 44 | Low | gitleaks `generic-api-key` | `tests/unit/test_smoke_iam_roles.py`, the in-scope account record key in the own-row test | FP. A test record key, not a secret |
+
+**Re-scan of 2026-11-10** (scan `f4c00713-dc00-4284-a2f1-7a91efae47f7`). This scan read the tree in
+which this block was first written. It reported 25 rows, 24 of them suppressed: the 19 Checkov rows,
+plus rows 12, 35, 39, 42 and 44, all of which carry `# nosemgrep`. `SANDBOX_ACCOUNT` was not reported.
+The one open row was a gitleaks `generic-api-key` Low on this document: the row-44 entry above had
+quoted the test's key assignment. That entry now describes the key instead of quoting it.
 
 ### H-4
 

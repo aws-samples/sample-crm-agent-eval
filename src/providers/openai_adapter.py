@@ -17,7 +17,8 @@ Anthropic adapter emits, ending in exactly one ``completed`` or ``error`` event.
 classified for :func:`eval.live.is_retryable_error`:
 
 * an in-band server fault — the SDK's raised ``openai.APIError`` at an SSE ``error`` frame, or a
-  yielded ``response.failed`` — leads with its code (``server_error: …``) and is retryable;
+  yielded ``response.failed`` — leads with its code (``server_error: …``,
+  ``service_unavailable: …``); those two codes are retryable;
 * a transport failure that reaches the adapter has already exhausted the SDK's own retries, so it is
   rendered by base type and status only (``APIStatusError(status=503)``, ``APIConnectionError``) and
   matches no retry marker.

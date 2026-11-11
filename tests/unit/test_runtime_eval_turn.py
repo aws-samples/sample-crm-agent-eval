@@ -51,6 +51,7 @@ def _request(
                 CLAIM_TENANT: tenant,
             },
             "session_id": "run123-00-gt-01-account-lookup-padded",
+            "principal_type": "user",
         },
         "prompt": "What is the status of Acme?",
         "task_id": "gt-01-account-lookup",

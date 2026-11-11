@@ -463,3 +463,88 @@ def test_cli_help_text_does_not_invoke_a_pager(capsys: pytest.CaptureFixture[str
         parser.parse_args(["--help"])
     captured = capsys.readouterr()
     assert "--live" in captured.out
+
+
+# --------------------------------------------------------------------------------------
+# Declared principal type on both identity channels
+# --------------------------------------------------------------------------------------
+
+_GT15_ID = "gt-15-denial-service-principal-no-implicit-visibility"
+
+
+def _golden_actor(task_id: str) -> dict[str, object]:
+    tasks = harness._load_golden_tasks(harness._DEFAULT_GOLDEN_TASKS_PATH)
+    (task,) = [t for t in tasks if t["id"] == task_id]
+    actor = task["actor"]
+    assert isinstance(actor, dict)
+    return dict(actor)
+
+
+def test_the_gateway_payload_carries_gt15s_declared_service_type() -> None:
+    payload = harness._identity_payload_for_actor(_golden_actor(_GT15_ID), tenant="eval-t")
+    assert payload["principal_type"] == "service"
+    assert payload["source"] == "gateway"
+
+
+def test_the_gateway_payload_carries_a_user_actors_declared_type() -> None:
+    actor = _golden_actor("gt-01-investigation-pd01-successor")
+    assert harness._identity_payload_for_actor(actor, tenant="eval-t")["principal_type"] == "user"
+
+
+def test_the_agent_identity_decodes_gt15_as_a_service_principal() -> None:
+    identity = harness._agent_identity_for_actor(_golden_actor(_GT15_ID), tenant="eval-t")
+    assert identity.principal_type == "service"
+    assert identity.source == "agent"
+    assert identity.full_visibility is False
+    assert identity.book == frozenset()
+
+
+def test_the_agent_identity_decodes_a_user_actor_as_a_user() -> None:
+    actor = _golden_actor("gt-01-investigation-pd01-successor")
+    assert harness._agent_identity_for_actor(actor, tenant="eval-t").principal_type == "user"
+
+
+@pytest.mark.parametrize(
+    "builder", [harness._identity_payload_for_actor, harness._agent_identity_for_actor]
+)
+def test_an_actor_without_a_principal_type_is_refused_on_both_channels(builder: object) -> None:
+    actor = _golden_actor(_GT15_ID)
+    del actor["principal_type"]
+    with pytest.raises(ValueError, match="declares no principal_type"):
+        builder(actor, tenant="eval-t")  # type: ignore[operator]
+
+
+# --------------------------------------------------------------------------------------
+# Pre-aggregation archive: per-call pricing keys
+# --------------------------------------------------------------------------------------
+
+
+def test_every_archived_call_carries_its_profile_pricing_tier_and_route(
+    store: Store, tmp_path: Path
+) -> None:
+    """The pre-aggregation writer adds the keys `eval.reprice` reads, from the configured profile."""
+    import json
+
+    from eval.pricing import inference_profile_for
+    from eval.reprice import ARCHIVED_PRICING_KEYS, PRE_AGGREGATION_DIRNAME
+
+    run_sweep(
+        store=store,
+        arm_specs=(ArmSpec(family="anthropic"),),
+        output_dir=tmp_path,
+        archive_raw=True,
+    )
+    (path,) = (tmp_path / "raw" / PRE_AGGREGATION_DIRNAME).glob("*.json")
+    entries = json.loads(path.read_text(encoding="utf-8"))["invocation_attributions"]
+    assert entries
+    for entry in entries:
+        assert set(ARCHIVED_PRICING_KEYS) <= set(entry)
+        assert entry["inference_profile"] == inference_profile_for(entry["model_id"])
+        assert entry["pricing_tier"] in {"standard", "long_context"}
+        assert entry["route"] == "global"
+
+
+def test_the_raw_records_writer_refuses_a_non_list_attribution_block(tmp_path: Path) -> None:
+    writer = harness._raw_records_writer(tmp_path)
+    with pytest.raises(ValueError, match="is not a list"):
+        writer(0, "anthropic.claude-sonnet-5-5", {"invocation_attributions": {"not": "a list"}})

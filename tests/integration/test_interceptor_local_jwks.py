@@ -460,7 +460,10 @@ def _forged_channel_payload(key: str) -> dict[str, Any]:
             }
         }
     if key == "_agent_identity":
-        return {"claims": {"custom:rep_id": "attacker", "custom:full_visibility": "true"}}
+        return {
+            "claims": {"custom:rep_id": "attacker", "custom:full_visibility": "true"},
+            "principal_type": "user",
+        }
     # "_identity"
     return {
         "rep_id": "attacker",

@@ -53,7 +53,7 @@ def _invocation(
     payload: dict[str, Any] = {
         "prompt": prompt,
         "session_id": _SESSION,
-        AGENT_IDENTITY_KEY: {"claims": claims, "session_id": _SESSION},
+        AGENT_IDENTITY_KEY: {"claims": claims, "session_id": _SESSION, "principal_type": "user"},
     }
     return decode_invocation(payload, load_capability_matrix())
 

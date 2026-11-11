@@ -26,6 +26,7 @@ from crm.metering import TokenUsage, cost_for_usage
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval import runs
+from eval.pricing import inference_profile_for
 from providers.capabilities import load_capability_matrix
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "events"
@@ -52,7 +53,11 @@ def store() -> Iterator[Store]:
 
 
 def _cost(model_id: str, input_tokens: float, output_tokens: float) -> float:
-    return cost_for_usage(TokenUsage(round(input_tokens), round(output_tokens)), model_id).total
+    return cost_for_usage(
+        TokenUsage(round(input_tokens), round(output_tokens)),
+        model_id,
+        inference_profile=inference_profile_for(model_id),
+    ).total
 
 
 def _matrix(arms: list[tuple[str, int, list[tuple[str, int, int]]]]) -> dict[str, Any]:
@@ -220,3 +225,15 @@ def test_the_payload_rounds_to_cents_and_names_the_basis(store: Store) -> None:
     assert "basis_run_id" not in payload
     assert payload["task_count"] == 20
     assert payload["estimate_usd"] == round(float(payload["estimate_usd"]), 2)  # type: ignore[arg-type]
+
+
+def test_the_estimate_prices_under_the_configured_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An estimate priced for a geo-configured model carries the geo multiplier."""
+    import eval.pricing
+
+    model_id = "anthropic.claude-haiku-5-5"
+    usage = {"input_tokens": 10_000.0, "output_tokens": 1_000.0}
+    global_price = runs._price(model_id, usage)
+    assert global_price == pytest.approx(10_000 / 1e6 * 0.10 + 1_000 / 1e6 * 0.50)
+    monkeypatch.setattr(eval.pricing, "inference_profile_for", lambda m: f"us.{m}")
+    assert runs._price(model_id, usage) == pytest.approx(global_price * 1.10)

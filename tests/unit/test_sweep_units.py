@@ -28,6 +28,7 @@ from eval.sweep_units import (
     run_task_unit,
     task_actor,
     task_refs,
+    usage_records_for_turn,
 )
 from eval.turn_observation import ObservedTurn
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
@@ -229,8 +230,8 @@ def test_run_task_unit_scores_meters_and_tier_scores_one_turn(store: Store) -> N
     assert unit.task_id == task["id"]
     assert unit.task_score.task_id == task["id"]
     assert unit.tier_scores.task_id == task["id"]
-    assert len(unit.usage_records) == 1
-    assert unit.usage_records[0].usage.input_tokens == 20
+    assert len(unit.usage_records) == 2
+    assert [record.usage.input_tokens for record in unit.usage_records] == [10, 10]
 
 
 def test_a_task_without_expected_tiers_is_not_applicable_at_every_tier(store: Store) -> None:
@@ -278,7 +279,7 @@ def test_assemble_arm_without_an_arm_counter_checks_against_the_units(store: Sto
         invocations=_turn(stream_calls=2).invocations,
         stream_calls=0,
     )
-    with pytest.raises(AssertionError, match="included_invocation_count"):
+    with pytest.raises(AssertionError, match="double-recorded usage"):
         _assemble([_unit(store, _golden(1)[0], overcounted)])
 
 
@@ -309,3 +310,117 @@ def test_assemble_arm_takes_latency_only_from_live_turns(store: Store) -> None:
     assert _assemble(units, mode="stub").model_metrics.latency.measured is False
     live = _assemble(units, mode="live").model_metrics.latency
     assert live.measured is True and live.task_p50_ms == pytest.approx(900.0)
+
+
+# --- per-call pricing --------------------------------------------------------------------------
+
+
+def _haiku_call(input_tokens: int) -> InvocationAttribution:
+    return InvocationAttribution(
+        tier="tool",
+        role="research",
+        model_id=MATRIX.model_for("anthropic", "tool").model_id,
+        tokens=TokenCounts(input_tokens=input_tokens, output_tokens=5),
+        cache=CacheCounts(),
+    )
+
+
+def test_usage_records_for_turn_prices_each_attribution_on_its_own() -> None:
+    """Two 60K calls stay standard; summed they would cross Haiku's 100K threshold."""
+    records = usage_records_for_turn(
+        (_haiku_call(60_000), _haiku_call(60_000)),
+        task_id="t-1",
+        rep_id="rep-1",
+        family="anthropic",
+    )
+    assert [r.usage.input_tokens for r in records] == [60_000, 60_000]
+    assert [r.cost.pricing_tier for r in records] == ["standard", "standard"]
+    assert {r.cost.route for r in records} == {"global"}
+    assert len({r.invocation_id for r in records}) == 2
+
+
+def test_usage_records_for_turn_prices_under_the_configured_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record's route follows the model's configured inference profile."""
+    monkeypatch.setattr(sweep_units, "inference_profile_for", lambda model_id: f"eu.{model_id}")
+    (record,) = usage_records_for_turn(
+        (_haiku_call(10_000),), task_id="t-1", rep_id="rep-1", family="anthropic"
+    )
+    assert record.cost.route == "geo"
+    assert record.cost.input == pytest.approx(10_000 / 1e6 * 0.10 * 1.10)
+
+
+def test_assemble_arm_reports_long_context_counts_per_tier_and_row(store: Store) -> None:
+    """The tool tier's summary and its row carry the count of long-context calls."""
+    base = _turn()
+    turn = ObservedTurn(
+        outcome=base.outcome,
+        tool_arguments=base.tool_arguments,
+        invocations=(*base.invocations, _haiku_call(30_000), _haiku_call(100_001)),
+        stream_calls=3,
+    )
+    arm = _assemble([_unit(store, _golden(1)[0], turn)])
+    summary = arm.arm_result.tier_summary_fields
+    assert summary["tool"]["long_context_invocation_count"] == 1
+    assert summary["supervisor"]["long_context_invocation_count"] == 0
+    assert arm.arm_result.model_metrics_fields["long_context_invocation_count"] == 0
+
+
+# --- attribution bound -------------------------------------------------------------------------
+
+
+def _delegating_turn(*, duplicate_supervisor: bool) -> ObservedTurn:
+    """Two supervisor rounds delegating to a subagent round and a tool call: four stream calls."""
+    base = _turn(stream_calls=2)
+    subagent = InvocationAttribution(
+        tier="subagent",
+        role="research",
+        model_id=MATRIX.model_for("anthropic", "subagent").model_id,
+        tokens=TokenCounts(input_tokens=40, output_tokens=4),
+        cache=CacheCounts(),
+    )
+    supervisor = base.invocations[:1] * (2 if duplicate_supervisor else 1)
+    return ObservedTurn(
+        outcome=base.outcome,
+        tool_arguments=base.tool_arguments,
+        invocations=(*supervisor, *base.invocations[1:], subagent, _haiku_call(500)),
+        stream_calls=4,
+    )
+
+
+def test_a_delegating_turn_with_every_call_attributed_once_assembles(store: Store) -> None:
+    turn = _delegating_turn(duplicate_supervisor=False)
+    assert len(turn.invocations) == turn.stream_calls == 4
+    arm = _assemble([_unit(store, _golden(1)[0], turn)], provider_stream_calls=4)
+    assert arm.arm_result.model_metrics_fields["included_invocation_count"] == 2
+
+
+def test_a_duplicated_supervisor_attribution_cannot_hide_under_delegated_calls(
+    store: Store,
+) -> None:
+    """One extra supervisor usage on a delegating turn: 3 supervisor records against 4 calls
+    passed the old supervisor-only bound, and the all-tier bound refuses it."""
+    turn = _delegating_turn(duplicate_supervisor=True)
+    supervisor_records = sum(1 for a in turn.invocations if a.tier == "supervisor")
+    assert supervisor_records < turn.stream_calls < len(turn.invocations)
+    with pytest.raises(AssertionError, match="task unit .* double-recorded usage"):
+        _assemble([_unit(store, _golden(1)[0], turn)], provider_stream_calls=4)
+
+
+def test_the_bound_is_per_unit_so_another_turns_slack_cannot_absorb_a_surplus(
+    store: Store,
+) -> None:
+    """A turn with a usage-less call does not cover a duplicate recorded in a different turn."""
+    tasks = _golden(2)
+    surplus = _delegating_turn(duplicate_supervisor=True)
+    slack = ObservedTurn(
+        outcome=_turn().outcome,
+        tool_arguments=_turn().tool_arguments,
+        invocations=_turn().invocations,
+        stream_calls=2,
+    )
+    units = [_unit(store, tasks[0], surplus), _unit(store, tasks[1], slack)]
+    assert sum(len(u.turn.invocations) for u in units) == sum(u.turn.stream_calls for u in units)
+    with pytest.raises(AssertionError, match="task unit .* double-recorded usage"):
+        _assemble(units, provider_stream_calls=6)

@@ -88,18 +88,30 @@ export interface TurnRequest {
   readonly resumeFrom?: number;
 }
 
+/** The principal type the relay declares: it serves only Cognito user tokens. */
+export const RELAY_PRINCIPAL_TYPE = "user";
+
+/** The `_agent_identity` block: the verified claims verbatim, the relay's principal type, the session. */
+function agentIdentity(
+  claims: Readonly<Record<string, unknown>>,
+  sessionId: string,
+): Record<string, unknown> {
+  return { claims, principal_type: RELAY_PRINCIPAL_TYPE, session_id: sessionId };
+}
+
 /**
  * Render a turn as the Runtime's invocation payload.
  *
  * The claims are copied in verbatim under `_agent_identity`, the key
- * `crm.envelope.decode_identity` reads on its `agent` branch. Optional members are omitted rather
+ * `crm.envelope.decode_identity` reads on its `agent` branch, beside the required
+ * `principal_type`, always {@link RELAY_PRINCIPAL_TYPE}. Optional members are omitted rather
  * than sent as `null`, so `decode_invocation` sees an absent field as absent.
  */
 export function buildRuntimePayload(request: TurnRequest): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     prompt: request.prompt,
     session_id: request.sessionId,
-    _agent_identity: { claims: request.claims, session_id: request.sessionId },
+    _agent_identity: agentIdentity(request.claims, request.sessionId),
   };
   if (request.pageContext !== undefined) {
     payload["page_context"] = request.pageContext;
@@ -228,13 +240,14 @@ export interface CancelRequest {
 /**
  * Render a cancellation as the Runtime's invocation payload.
  *
- * Carries no `prompt`. Identity travels under `_agent_identity` exactly as it does for a turn.
+ * Carries no `prompt`. Identity travels under `_agent_identity` exactly as it does for a turn,
+ * `principal_type` included.
  */
 export function buildCancelPayload(request: CancelRequest): Record<string, unknown> {
   return {
     [MODE_KEY]: CANCEL_MODE,
     session_id: request.sessionId,
-    _agent_identity: { claims: request.claims, session_id: request.sessionId },
+    _agent_identity: agentIdentity(request.claims, request.sessionId),
   };
 }
 

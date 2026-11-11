@@ -15,8 +15,23 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+/** Why journey 01's Hosted UI cases skip on a stack whose SPA signs in without the Hosted UI. */
+const HOSTED_UI_NOT_CONFIGURED =
+  "config-guarded: the deployed /config.json has an empty cognitoHostedUiDomain " +
+  "(Hosted UI not configured)";
+
 /** Skips a run may report, each with why it is legitimate. */
 export const ALLOWED_SKIPS = Object.freeze([
+  {
+    file: "01-signin.spec.ts",
+    title: "after sign-out, a Hosted UI sign-in asks for credentials again",
+    reason: HOSTED_UI_NOT_CONFIGURED,
+  },
+  {
+    file: "01-signin.spec.ts",
+    title: "a Hosted UI logout with no session still lands on the signed-out page",
+    reason: HOSTED_UI_NOT_CONFIGURED,
+  },
   {
     file: "02-pipeline.spec.ts",
     title: "a refused transition is explained and offers no way to submit it",

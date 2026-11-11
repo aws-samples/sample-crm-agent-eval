@@ -96,14 +96,16 @@ _FIXTURE_TERRAFORM_GRANTS: dict[str, set[tuple[str, str]]] = {
 }
 
 
-#: The real supplementary rows, kept before the autouse fixture below replaces them.
+#: The real supplementary and allowlist-key rows, kept before the autouse fixture replaces them.
 _REAL_SUPPLEMENTARY_CHECKS: Final = iam_roles.supplementary_checks
+_REAL_ALLOWLIST_KEY_CHECKS: Final = iam_roles.allowlist_key_checks
 
 
 @pytest.fixture(autouse=True)
 def _no_supplementary_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Matrix tests stub only the IAM client; the supplementary rows are tested on their own below."""
+    """Matrix tests stub only the IAM client; the extra row sets are tested on their own below."""
     monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter(()))
+    monkeypatch.setattr(iam_roles, "allowlist_key_checks", lambda _ctx: iter(()))
 
 
 @pytest.fixture(autouse=True)
@@ -1352,6 +1354,7 @@ def test_expected_check_count_is_derived_from_the_real_files_not_hardcoded(
         + conditioned_rows
         + roles * 4
         + iam_roles.SUPPLEMENTARY_ROW_COUNT
+        + iam_roles.ALLOWLIST_KEY_ROW_COUNT
     )
     assert str(roles) in expectation.basis and str(triples) in expectation.basis
     assert f"{scope_rows} index_scope_denied" in expectation.basis
@@ -1388,6 +1391,11 @@ def test_a_complete_run_satisfies_its_own_floor(monkeypatch: pytest.MonkeyPatch)
         for n in range(iam_roles.SUPPLEMENTARY_ROW_COUNT)
     ]
     monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter(supplementary))
+    allowlist = [
+        CheckResult(resource="a", check=check, status="pass", detail="")
+        for check in iam_roles.ALLOWLIST_KEY_CHECKS
+    ]
+    monkeypatch.setattr(iam_roles, "allowlist_key_checks", lambda _ctx: iter(allowlist))
     clients = _StubbedClientSet()
     for role_function in _SORTED_FUNCTIONS:
         clients.add_role_for(role_function)
@@ -2638,7 +2646,7 @@ class TestConditionedOwnGrant:
         return _row(_run_with_arn_deciding_iam(iam), "create_account", self._OWN_ROW)
 
     def test_the_own_row_sends_the_in_scope_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        key = "acct-eval-0001"  # gitleaks:allow
+        key = "acct-eval-0001"  # gitleaks:allow  # nosemgrep: generic.secrets.gitleaks.generic-api-key
         monkeypatch.setattr(
             iam_roles,
             "conditioned_own_keys",
@@ -4839,6 +4847,472 @@ def test_checks_appends_the_supplementary_rows_after_the_matrix(
     marker = CheckResult(resource="m", check="matrix_row", status="pass", detail="")
     extra = CheckResult(resource="s", check="supplementary_row", status="pass", detail="")
     monkeypatch.setattr(iam_roles, "_role_matrix_checks", lambda _ctx: iter([marker]))
+    allowlist = CheckResult(resource="a", check="allowlist_row", status="pass", detail="")
     monkeypatch.setattr(iam_roles, "supplementary_checks", lambda _ctx: iter([extra]))
+    monkeypatch.setattr(iam_roles, "allowlist_key_checks", lambda _ctx: iter([allowlist]))
     ctx = context_for_test(clients={}, outputs={})
-    assert [r.check for r in iam_roles.checks(ctx)] == ["matrix_row", "supplementary_row"]
+    assert [r.check for r in iam_roles.checks(ctx)] == [
+        "matrix_row",
+        "supplementary_row",
+        "allowlist_row",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# allowlist_key_checks: the API client-allowlist SecureString and its CMK.
+# ---------------------------------------------------------------------------
+
+_AK_KEY: Final = "arn:aws:kms:us-east-1:123456789012:key/aaaa1111-2222-3333-4444-555566667777"
+_AK_MANAGED: Final = "arn:aws:kms:us-east-1:123456789012:key/bbbb1111-2222-3333-4444-555566667777"
+_AK_PARAMETER: Final = "/crm-agent-eval/api/allowed-client-ids"
+_AK_PARAMETER_ARN: Final = f"arn:aws:ssm:us-east-1:123456789012:parameter{_AK_PARAMETER}"
+_AK_CONSUMERS: Final = {
+    "crm-agent-eval-search_accounts": _sup_role_arn("crm-agent-eval-search_accounts-role"),
+    "crm-agent-eval-eval-trigger": _sup_role_arn("crm-agent-eval-eval-trigger-role"),
+}
+_AK_OPERATOR: Final = _sup_role_arn("crm-agent-eval-operator")
+_AK_ROLES: Final = (
+    "crm-agent-eval-search_accounts-role",
+    "crm-agent-eval-eval-trigger-role",
+    "crm-agent-eval-sweep-task-role",
+    "crm-agent-eval-operator",
+    "unrelated-role",
+)
+_AK_TABLE_KEY: Final = "arn:aws:kms:us-east-1:123456789012:key/cccc1111-2222-3333-4444-555566667777"
+_AK_CURSOR_KEY: Final = (
+    "arn:aws:kms:us-east-1:123456789012:key/dddd1111-2222-3333-4444-555566667777"
+)
+_AK_TABLE: Final = "crm-agent-evalreps"
+
+
+def _ak_policy(*, drop: str | None = None, use_deny_extra: Sequence[str] = ()) -> str:
+    principals = sorted([*_AK_CONSUMERS.values(), _AK_OPERATOR, *use_deny_extra])
+    statements: list[dict[str, Any]] = [
+        {
+            "Sid": "EnableIAMUserPermissions",
+            "Effect": "Allow",
+            "Principal": {"AWS": "arn:aws:iam::123456789012:root"},
+            "Action": "kms:*",
+            "Resource": "*",
+        },
+        {
+            "Sid": "AllowOperatorsUseThroughSsm",
+            "Effect": "Allow",
+            "Principal": {"AWS": _AK_OPERATOR},
+        },
+        {
+            "Sid": "AllowConsumersDecryptTheParameter",
+            "Effect": "Allow",
+            "Principal": {"AWS": sorted(_AK_CONSUMERS.values())},
+            "Action": "kms:Decrypt",
+            "Resource": "*",
+        },
+        {"Sid": "DenyKeyWriteToNonOperators", "Effect": "Deny", "Principal": "*"},
+        {
+            "Sid": "DenyKeyUseToNonProjectPrincipals",
+            "Effect": "Deny",
+            "Principal": "*",
+            "Condition": {"ArnNotEquals": {"aws:PrincipalArn": principals}},
+        },
+        {"Sid": "DenyKeyAdministrationToNonOperators", "Effect": "Deny", "Principal": "*"},
+    ]
+    return json.dumps(
+        {"Version": "2012-10-17", "Statement": [s for s in statements if s["Sid"] != drop]}
+    )
+
+
+_AK_POLICY: Final = _ak_policy()
+_AK_TAGS: Final = {
+    "service": "crm-agent-eval",
+    "environment": "dev",
+    "owner": "team",
+    "cost-center": "crm-agent-eval",
+    "data-classification": "internal",
+    "AppName": "crm-agent-eval",
+}
+
+
+class _AkPaginator:
+    def __init__(self, pages: list[dict[str, Any]]) -> None:
+        self.pages = pages
+
+    def paginate(self) -> Any:
+        return iter(self.pages)
+
+
+class _AkIam:
+    """Simulates the healthy deployment unless `overrides` maps (role, action, resource) elsewhere."""
+
+    def __init__(
+        self, overrides: dict[tuple[str, str, str], str], *, context_blind: bool = False
+    ) -> None:
+        self.overrides = overrides
+        self.context_blind = context_blind
+        self.requests: list[dict[str, Any]] = []
+
+    def get_paginator(self, name: str) -> Any:
+        assert name == "list_roles"
+        return _AkPaginator(
+            [{"Roles": [{"RoleName": r, "Arn": _sup_role_arn(r)} for r in _AK_ROLES]}]
+        )
+
+    def simulate_principal_policy(self, **request: Any) -> dict[str, Any]:
+        self.requests.append(request)
+        role, action, resource = (
+            request["PolicySourceArn"],
+            request["ActionNames"][0],
+            request["ResourceArns"][0],
+        )
+        context = {
+            e["ContextKeyName"]: e["ContextKeyValues"][0] for e in request.get("ContextEntries", [])
+        }
+        decision = "implicitDeny"
+        if (action == "kms:Encrypt" and "ResourcePolicy" in request) or (
+            action == "kms:Decrypt" and resource == _AK_MANAGED
+        ):
+            decision = "explicitDeny"
+        elif (
+            (
+                action == "kms:Decrypt"
+                and resource == _AK_KEY
+                and role in _AK_CONSUMERS.values()
+                and (
+                    self.context_blind
+                    or (
+                        context.get("kms:EncryptionContext:PARAMETER_ARN") == _AK_PARAMETER_ARN
+                        and context.get("kms:ViaService") == "ssm.us-east-1.amazonaws.com"
+                    )
+                )
+            )
+            or (
+                resource == _AK_TABLE_KEY
+                and action in {"kms:Decrypt", "kms:GenerateDataKey"}
+                and context.get("kms:ViaService") == "dynamodb.us-east-1.amazonaws.com"
+            )
+            or (
+                resource == _AK_CURSOR_KEY
+                and action in {"kms:Encrypt", "kms:Decrypt"}
+                and context.get("kms:EncryptionContext:purpose") == "crm-cursor"
+            )
+        ):
+            decision = "allowed"
+        decision = self.overrides.get((role, action, resource), decision)
+        return {"EvaluationResults": [{"EvalDecision": decision, "MissingContextValues": []}]}
+
+
+class _AkLambda:
+    def __init__(self, names: dict[str, str]) -> None:
+        self.names = names
+
+    def get_paginator(self, name: str) -> Any:
+        assert name == "list_functions"
+        functions = [
+            {
+                "FunctionName": fn,
+                "Role": role,
+                "Environment": {
+                    "Variables": {
+                        iam_roles.ALLOWLIST_PARAMETER_ENV: self.names.get(fn, _AK_PARAMETER),
+                        iam_roles.TABLE_PREFIX_ENV: "crm-agent-eval",
+                        **(
+                            {iam_roles.CURSOR_KEY_ENV: _AK_CURSOR_KEY}
+                            if fn.endswith("search_accounts")
+                            else {}
+                        ),
+                    }
+                },
+            }
+            for fn, role in _AK_CONSUMERS.items()
+        ]
+        functions.append({"FunctionName": "crm-agent-eval-get_page_context", "Role": "r"})
+        return _AkPaginator([{"Functions": functions}])
+
+
+class _AkSsm:
+    def __init__(self, kind: str, key_id: str | None, value: str, tier: str = "Standard") -> None:
+        self.kind, self.key_id, self.value, self.tier = kind, key_id, value, tier
+        self.reads: list[dict[str, Any]] = []
+
+    def describe_parameters(self, ParameterFilters: Any) -> dict[str, Any]:  # noqa: N803
+        assert ParameterFilters[0]["Values"] == [_AK_PARAMETER]
+        meta: dict[str, Any] = {"Name": _AK_PARAMETER, "Type": self.kind, "Tier": self.tier}
+        if self.key_id is not None:
+            meta["KeyId"] = self.key_id
+        return {"Parameters": [meta]}
+
+    def get_parameter(self, Name: str, WithDecryption: bool) -> dict[str, Any]:  # noqa: N803
+        self.reads.append({"Name": Name, "WithDecryption": WithDecryption})
+        return {"Parameter": {"Type": self.kind, "Value": self.value}}
+
+
+class _AkKms:
+    def __init__(self, rotation: bool, tags: dict[str, str], policy: str, managed: bool) -> None:
+        self.rotation, self.tags, self.policy, self.managed = rotation, tags, policy, managed
+
+    def describe_key(self, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        if KeyId == iam_roles.AWS_SSM_KEY_ALIAS:
+            if not self.managed:
+                raise RuntimeError("NotFoundException")
+            return {"KeyMetadata": {"Arn": _AK_MANAGED}}
+        if KeyId in {_AK_KEY, "alias/crm-agent-eval-api-allowlist"}:
+            return {"KeyMetadata": {"Arn": _AK_KEY}}
+        return {"KeyMetadata": {"Arn": KeyId}}
+
+    def get_key_rotation_status(self, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        return {"KeyRotationEnabled": self.rotation}
+
+    def list_resource_tags(self, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        return {"Tags": [{"TagKey": k, "TagValue": v} for k, v in self.tags.items()]}
+
+    def get_key_policy(self, KeyId: str, PolicyName: str) -> dict[str, Any]:  # noqa: N803
+        assert (KeyId, PolicyName) == (_AK_KEY, "default")
+        return {"Policy": self.policy}
+
+
+class _AkDynamo:
+    def __init__(self, key: str | None) -> None:
+        self.key = key
+
+    def describe_table(self, TableName: str) -> dict[str, Any]:  # noqa: N803
+        assert TableName == _AK_TABLE
+        sse = {"KMSMasterKeyArn": self.key} if self.key else {}
+        return {"Table": {"TableName": TableName, "SSEDescription": sse}}
+
+
+def _ak_run(
+    *,
+    overrides: dict[tuple[str, str, str], str] | None = None,
+    context_blind: bool = False,
+    tier: str = "Standard",
+    table_key: str | None = _AK_TABLE_KEY,
+    kind: str = "SecureString",
+    key_id: str | None = "alias/crm-agent-eval-api-allowlist",
+    value: str = "client-a",
+    rotation: bool = True,
+    tags: dict[str, str] | None = None,
+    policy: str = _AK_POLICY,
+    managed: bool = True,
+    names: dict[str, str] | None = None,
+    outputs: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], _AkIam, _AkSsm]:
+    iam = _AkIam(overrides or {}, context_blind=context_blind)
+    ssm = _AkSsm(kind, key_id, value, tier)
+    ctx = context_for_test(
+        outputs={
+            iam_roles.ALLOWLIST_KEY_OUTPUT: _AK_KEY,
+            "crm_operator_principal_arns": [_AK_OPERATOR],
+            "dynamodb_table_names": {"reps": _AK_TABLE},
+        }
+        if outputs is None
+        else outputs,
+        clients={
+            "iam": iam,
+            "sts": _SupSts(),
+            "lambda": _AkLambda(names or {}),
+            "ssm": ssm,
+            "kms": _AkKms(rotation, _AK_TAGS if tags is None else tags, policy, managed),
+            "dynamodb": _AkDynamo(table_key),
+        },
+    )
+    results = list(_REAL_ALLOWLIST_KEY_CHECKS(ctx))
+    assert [r.check for r in results] == list(iam_roles.ALLOWLIST_KEY_CHECKS)
+    return {r.check: r for r in results}, iam, ssm
+
+
+def _ak_not_passing(rows: dict[str, Any]) -> set[str]:
+    return {name for name, row in rows.items() if row.status != "pass"}
+
+
+def test_allowlist_rows_all_pass_on_a_healthy_deployment() -> None:
+    rows, _, _ = _ak_run()
+    assert _ak_not_passing(rows) == set(), {n: r.detail for n, r in rows.items()}
+
+
+def test_the_parameter_is_read_with_decryption() -> None:
+    _, _, ssm = _ak_run()
+    assert ssm.reads == [{"Name": _AK_PARAMETER, "WithDecryption": True}]
+
+
+def test_the_kms_simulations_are_identity_only_and_send_the_ssm_context() -> None:
+    """The simulator rejects a key policy (`Resource: *`) as `ResourcePolicy`, so none is sent."""
+    _, iam, _ = _ak_run()
+    assert all("ResourcePolicy" not in r for r in iam.requests)
+    kms = [
+        r
+        for r in iam.requests
+        if r["ResourceArns"] == [_AK_KEY]
+        and {e["ContextKeyName"] for e in r.get("ContextEntries", [])} >= {"aws:PrincipalArn"}
+    ]
+    assert {r["ActionNames"][0] for r in kms} == {"kms:Encrypt", "kms:Decrypt"}
+    for request in kms:
+        context = {e["ContextKeyName"]: e["ContextKeyValues"] for e in request["ContextEntries"]}
+        assert context["kms:ViaService"] == ["ssm.us-east-1.amazonaws.com"]
+        assert context["aws:PrincipalArn"] == [request["PolicySourceArn"]]
+
+
+class _RejectsResourcePolicy(_AkIam):
+    def simulate_principal_policy(self, **request: Any) -> dict[str, Any]:
+        if "ResourcePolicy" in request:
+            raise RuntimeError("InvalidInput: ResourceNames are not in a valid ARN format: *.")
+        return super().simulate_principal_policy(**request)
+
+
+def test_rows_pass_against_a_simulator_that_rejects_a_key_policy_as_resource_policy() -> None:
+    iam = _RejectsResourcePolicy({})
+    ctx = context_for_test(
+        outputs={
+            iam_roles.ALLOWLIST_KEY_OUTPUT: _AK_KEY,
+            "crm_operator_principal_arns": [_AK_OPERATOR],
+            "dynamodb_table_names": {"reps": _AK_TABLE},
+        },
+        clients={
+            "iam": iam,
+            "sts": _SupSts(),
+            "lambda": _AkLambda({}),
+            "ssm": _AkSsm("SecureString", "alias/crm-agent-eval-api-allowlist", "client-a"),
+            "kms": _AkKms(True, _AK_TAGS, _AK_POLICY, True),
+            "dynamodb": _AkDynamo(_AK_TABLE_KEY),
+        },
+    )
+    rows = {r.check: r for r in _REAL_ALLOWLIST_KEY_CHECKS(ctx)}
+    assert _ak_not_passing(rows) == set(), {n: r.detail for n, r in rows.items()}
+
+
+def test_the_operators_and_unrelated_roles_are_not_simulated_as_project_roles() -> None:
+    _, iam, _ = _ak_run()
+    simulated = {r["PolicySourceArn"] for r in iam.requests}
+    assert _AK_OPERATOR not in simulated
+    assert _sup_role_arn("unrelated-role") not in simulated
+    assert _sup_role_arn("crm-agent-eval-sweep-task-role") in simulated
+
+
+_AK_SWEEP: Final = _sup_role_arn("crm-agent-eval-sweep-task-role")
+_AK_SEARCH: Final = _AK_CONSUMERS["crm-agent-eval-search_accounts"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        (
+            {"kind": "String", "key_id": None},
+            {
+                "allowlist_parameter_securestring_under_cmk",
+                "allowlist_parameter_read_with_decryption",
+            },
+        ),
+        (
+            {"key_id": "alias/aws/ssm"},
+            {"allowlist_parameter_securestring_under_cmk"},
+        ),
+        ({"value": ""}, {"allowlist_parameter_read_with_decryption"}),
+        ({"rotation": False}, {"allowlist_key_rotation_enabled"}),
+        (
+            {"tags": {k: v for k, v in _AK_TAGS.items() if k != "data-classification"}},
+            {"allowlist_key_tags"},
+        ),
+        ({"tags": {**_AK_TAGS, "data-classification": "public"}}, {"allowlist_key_tags"}),
+        (
+            {
+                "policy": json.dumps(
+                    {"Statement": [{"Sid": "Open", "Effect": "Allow", "Principal": {"AWS": "*"}}]}
+                )
+            },
+            {"allowlist_key_policy_no_wildcard_allow", "allowlist_key_policy_statements"},
+        ),
+        ({"tier": "Advanced"}, {"allowlist_parameter_securestring_under_cmk"}),
+        (
+            {"policy": _ak_policy(drop="DenyKeyWriteToNonOperators")},
+            {"allowlist_key_policy_statements"},
+        ),
+        (
+            {"policy": _ak_policy(use_deny_extra=[_AK_SWEEP])},
+            {"allowlist_key_policy_statements"},
+        ),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:GenerateDataKey", _AK_KEY): "allowed"}},
+            {"allowlist_consumer_other_key_operations_denied"},
+        ),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:GenerateDataKey", _AK_TABLE_KEY): "explicitDeny"}},
+            {"allowlist_consumer_dynamodb_key_unaffected"},
+        ),
+        ({"table_key": None}, {"allowlist_consumer_dynamodb_key_unaffected"}),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:Decrypt", _AK_CURSOR_KEY): "explicitDeny"}},
+            {"allowlist_cursor_key_unaffected"},
+        ),
+        (
+            {"overrides": {(_AK_SWEEP, "ssm:PutParameter", _AK_PARAMETER_ARN): "allowed"}},
+            {"allowlist_parameter_write_denied:project_roles"},
+        ),
+        (
+            {"overrides": {(_AK_SWEEP, "ssm:DeleteParameter", _AK_PARAMETER_ARN): "allowed"}},
+            {"allowlist_parameter_write_denied:project_roles"},
+        ),
+        (
+            {
+                "overrides": {
+                    (_AK_SEARCH, "ssm:LabelParameterVersion", _AK_PARAMETER_ARN): "allowed"
+                }
+            },
+            {"allowlist_parameter_write_denied:project_roles"},
+        ),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:Encrypt", _AK_KEY): "allowed"}},
+            {
+                "allowlist_key_encrypt_denied:project_roles",
+                "allowlist_consumer_other_key_operations_denied",
+            },
+        ),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:Decrypt", _AK_KEY): "implicitDeny"}},
+            {
+                "allowlist_consumer_decrypt_allowed",
+                "allowlist_consumer_decrypt_needs_parameter_context",
+            },
+        ),
+        (
+            {"overrides": {(_AK_SEARCH, "kms:Decrypt", _AK_MANAGED): "implicitDeny"}},
+            {"allowlist_consumer_aws_ssm_decrypt_denied"},
+        ),
+    ],
+)
+def test_each_defect_fails_exactly_its_own_row(kwargs: dict[str, Any], expected: set[str]) -> None:
+    rows, _, _ = _ak_run(**kwargs)
+    assert _ak_not_passing(rows) == expected, {n: r.detail for n, r in rows.items()}
+
+
+def test_a_context_blind_decrypt_fails_the_other_parameter_row_and_the_control() -> None:
+    rows, _, _ = _ak_run(context_blind=True)
+    assert _ak_not_passing(rows) == {
+        "allowlist_consumer_decrypt_other_parameter_denied",
+        "allowlist_consumer_decrypt_needs_parameter_context",
+    }
+
+
+def test_an_absent_managed_ssm_key_defers_with_a_reason_never_passes() -> None:
+    rows, _, _ = _ak_run(managed=False)
+    row = rows["allowlist_consumer_aws_ssm_decrypt_denied"]
+    assert row.status == "defer"
+    assert row.defer_reason == "aws_managed_ssm_key_absent"
+    assert iam_roles.AWS_SSM_KEY_ALIAS in row.detail
+    assert _ak_not_passing(rows) == {"allowlist_consumer_aws_ssm_decrypt_denied"}
+
+
+def test_a_missing_key_output_fails_every_row() -> None:
+    rows, _, _ = _ak_run(outputs={})
+    assert {r.status for r in rows.values()} == {"fail"}
+    assert iam_roles.ALLOWLIST_KEY_OUTPUT in rows["allowlist_key_tags"].detail
+
+
+def test_disagreeing_parameter_names_fail_every_row() -> None:
+    rows, _, _ = _ak_run(names={"crm-agent-eval-eval-trigger": "/other/name"})
+    assert {r.status for r in rows.values()} == {"fail"}
+
+
+def test_the_key_output_is_declared_in_infra() -> None:
+    root = Path(__file__).resolve().parents[2]
+    outputs = (root / "infra" / "outputs.tf").read_text(encoding="utf-8")
+    assert f'output "{iam_roles.ALLOWLIST_KEY_OUTPUT}"' in outputs
+    source = (root / "scripts" / "smoke" / "iam_roles.py").read_text(encoding="utf-8")
+    assert f'require_str("{iam_roles.ALLOWLIST_KEY_OUTPUT}")' in source

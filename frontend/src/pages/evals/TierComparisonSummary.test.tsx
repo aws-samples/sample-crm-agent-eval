@@ -165,6 +165,72 @@ describe("TierComparisonSummary — verbatim cells", () => {
   });
 });
 
+const LONG_CONTEXT_ROW = "Long-context invocations";
+
+function rowLabels(element: HTMLElement): string[] {
+  return within(element)
+    .getAllByRole("rowheader")
+    .map((cell) => cell.textContent ?? "");
+}
+
+describe("TierComparisonSummary — long-context invocations", () => {
+  it.each<FixtureCase>(["multi_arm", "single_arm"])(
+    "shows the row in every tier of the %s fixture, directly after Model invocations",
+    (name) => {
+      render(<TierComparisonSummary table={fixtureTable(name)} />);
+
+      for (const tier of ["supervisor", "subagent", "tool"]) {
+        const labels = rowLabels(screen.getByTestId(`tier-comparison-table-${tier}`));
+        const at = labels.indexOf(LONG_CONTEXT_ROW);
+        expect(at, tier).toBeGreaterThan(0);
+        expect(labels[at - 1], tier).toBe("Model invocations");
+      }
+    },
+  );
+
+  it("shows an em dash for every arm of a run recorded without the count", () => {
+    const table = fixtureTable("multi_arm");
+    render(<TierComparisonSummary table={table} />);
+
+    for (const section of table.sections) {
+      const row = within(screen.getByTestId(`tier-comparison-table-${section.tier}`))
+        .getByRole("rowheader", { name: LONG_CONTEXT_ROW })
+        .closest("tr");
+      expect(row).not.toBeNull();
+      const cells = within(row as HTMLElement).getAllByRole("cell").map((cell) => cell.textContent);
+      expect(cells).toEqual(table.headers.slice(1).map(() => "—"));
+    }
+  });
+
+  it("renders a recorded count exactly as sent, zero included", () => {
+    const base = fixtureTable("multi_arm");
+    const table: EvalTierComparisonTable = {
+      ...base,
+      sections: base.sections.map((section) => ({
+        ...section,
+        rows: section.rows.map((row) =>
+          row[0] === LONG_CONTEXT_ROW ? [LONG_CONTEXT_ROW, "0", "3"] : row,
+        ),
+      })),
+    };
+    render(<TierComparisonSummary table={table} />);
+
+    const row = within(screen.getByTestId("tier-comparison-table-subagent"))
+      .getByRole("rowheader", { name: LONG_CONTEXT_ROW })
+      .closest("tr");
+    expect(within(row as HTMLElement).getAllByRole("cell").map((cell) => cell.textContent)).toEqual([
+      "0",
+      "3",
+    ]);
+  });
+
+  it("defines the row in the notes, matrix.md's wording", () => {
+    render(<TierComparisonSummary table={fixtureTable("multi_arm")} />);
+    const notes = screen.getByRole("list", { name: /notes on the tier comparison/i });
+    expect(notes).toHaveTextContent(/Long-context invocations counts those priced at the model's long-context rates/);
+  });
+});
+
 describe("TierComparisonSummary — markdown code spans in notes", () => {
   const CODE_NOTE =
     'Effort labels are not equivalent across families; see `effort` under "Reading these figures".';

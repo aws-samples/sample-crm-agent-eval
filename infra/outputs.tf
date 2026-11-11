@@ -228,3 +228,8 @@ output "eval_trigger_function_name" {
   value       = module.lambda_action_eval_trigger.function_name
 }
 
+
+output "api_allowlist_kms_key_arn" {
+  description = "The CMK encrypting the API client-allowlist SecureString parameter. Read by the smoke checks to assert the parameter's key, the key policy and rotation, and to simulate the roles' KMS access."
+  value       = aws_kms_key.api_allowlist.arn
+}

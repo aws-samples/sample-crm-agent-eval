@@ -47,6 +47,7 @@ from eval.matrix import errored_items_cost_note
 from eval.runs import (
     acquire_lock,
     create_run,
+    job_row_id,
     read_lock,
     request_cancel,
     require_run,
@@ -57,8 +58,10 @@ from eval.sfn_handlers import (
     BUNDLE_MISMATCH_ATTRIBUTE,
     FINALIZE_RESULT_KEYS,
     START_RESULT_KEYS,
+    STEP_EVENT_KEYS,
     SWEEP_TASK_RESULT_KEYS,
     TASK_REF_KEYS,
+    NotRunOwner,
     SweepControlConfig,
     SweepTaskConfig,
     classify_runtime_failure,
@@ -86,7 +89,7 @@ TASK_CONFIG = SweepTaskConfig(
 )
 STARTER = Identity(rep_id="rep-admin", full_visibility=True)
 #: The steps whose event names the state machine execution.
-OWNED_STEPS = frozenset({"start", "teardown", "finalize"})
+OWNED_STEPS = frozenset({"start", "seed", "aggregate", "teardown", "finalize"})
 OTHER_EXECUTION = "arn:aws:states:us-east-1:123456789012:execution:eval-sweep:second"
 
 
@@ -1117,6 +1120,73 @@ def test_a_second_execution_is_refused_at_every_owned_step_and_changes_nothing(
     )
     assert after == before
     assert after[0].status == "running"
+
+
+def _job_row(sweep: Sweep) -> dict[str, object]:
+    row = sweep.store.get_item("eval_runs", {"run_id": job_row_id(sweep.run_id)}, consistent=True)
+    assert row is not None
+    return row
+
+
+def _run_items(sweep: Sweep, refs: list[dict[str, Any]]) -> None:
+    for ref in refs:
+        assert sweep.task(ref["arm_index"], ref["task_id"]) == {"item_status": "done"}
+
+
+@pytest.mark.parametrize("step", ["seed", "aggregate"])
+def test_seed_and_aggregate_require_the_execution_arn(step: str) -> None:
+    assert "execution_arn" in STEP_EVENT_KEYS[step].required
+
+
+def test_seed_by_the_owning_execution_records_and_seeds_the_unit_tenants(sweep: Sweep) -> None:
+    sweep.control("start")
+    assert sweep.control("seed") == {"run_id": sweep.run_id, "seeded": True}
+    catalog = sweep.store.get_item("eval_runs", {"run_id": sweep.run_id}, consistent=True)
+    assert catalog is not None and catalog["status"] == "running"
+    assert sweep.tenant_rows() > 0
+
+
+def test_seed_by_another_execution_is_refused_and_writes_nothing(
+    sweep: Sweep, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-owner's seed raises before the catalog row or any unit tenant is written."""
+    sweep.control("start")
+    job_before = _job_row(sweep)
+    with caplog.at_level("INFO"), pytest.raises(NotRunOwner):
+        sweep.control("seed", execution_arn=OTHER_EXECUTION)
+    assert sweep.store.get_item("eval_runs", {"run_id": sweep.run_id}, consistent=True) is None
+    assert sweep.tenant_rows() == 0
+    assert _job_row(sweep) == job_before
+    assert "sweep_seed_refused" in caplog.text and "owned_by_other:" in caplog.text
+
+
+def test_aggregate_by_the_owning_execution_writes_the_matrix(sweep: Sweep) -> None:
+    refs = sweep.control("start")["task_refs"]
+    sweep.control("seed")
+    _run_items(sweep, refs)
+    assert sweep.control("aggregate", error=None)["arms"] == len(DEFAULT_ARM_SPECS)
+    assert "matrix.json" in sweep.objects()
+    job = _job_row(sweep)
+    assert "matrix_report" in job and "artifact_links" in job
+
+
+def test_aggregate_by_another_execution_is_refused_and_writes_nothing(
+    sweep: Sweep, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-owner's aggregate raises before any artefact upload or job-row update."""
+    refs = sweep.control("start")["task_refs"]
+    sweep.control("seed")
+    _run_items(sweep, refs)
+    objects_before = sweep.objects()
+    job_before = _job_row(sweep)
+    with caplog.at_level("INFO"), pytest.raises(NotRunOwner):
+        sweep.control("aggregate", execution_arn=OTHER_EXECUTION, error=None)
+    assert sweep.objects() == objects_before
+    assert "matrix.json" not in objects_before
+    job_after = _job_row(sweep)
+    assert job_after == job_before
+    assert "matrix_report" not in job_after and "artifact_links" not in job_after
+    assert "sweep_aggregate_refused" in caplog.text and "owned_by_other:" in caplog.text
 
 
 def test_unrecorded_items_are_disclosed_and_fail_the_run(sweep: Sweep) -> None:

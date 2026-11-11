@@ -215,6 +215,7 @@ def _agent_block(task: _Gt16, *, tenant: str) -> dict[str, Any]:
             CLAIM_FULL_VISIBILITY: "false",
             CLAIM_TENANT: tenant,
         },
+        "principal_type": "user",
         "session_id": task.task_id,
     }
 

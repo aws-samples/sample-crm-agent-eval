@@ -60,6 +60,14 @@ opportunities table's `gsi_account` index (`approve_query_gsi_account_allowed`),
 `Query` on the base table (`approve_query_base_table_denied`) and on every other index
 `describe-table` lists (`approve_query_other_indexes_denied`), and `Scan` on the table and every
 index (`approve_scan_denied`). An unresolved input fails every row that needs it.
+
+`allowlist_key_checks` adds `ALLOWLIST_KEY_ROW_COUNT` rows over the API client-allowlist
+SecureString and its CMK (stack output `api_allowlist_kms_key_arn`): the parameter's type and key, a
+read with decryption, the key's rotation, tags and Allow principals, every project role (the
+operators excepted) refused `ssm:PutParameter`/`DeleteParameter`/`LabelParameterVersion` and
+`kms:Encrypt`, and every function naming the
+parameter allowed `kms:Decrypt` through SSM under its `PARAMETER_ARN` only and explicitly refused it
+under `alias/aws/ssm`.
 """
 
 from __future__ import annotations
@@ -1807,19 +1815,26 @@ def _simulate_evaluation(
     resource_arn: str,
     leading_keys: Sequence[str] | None = None,
     extra_context: Mapping[str, str] | None = None,
+    resource_policy: str | None = None,
+    resource_owner: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """Return `(decision, MissingContextValues)` for one simulated action.
 
     `decision` is one of `allowed`, `explicitDeny`, `implicitDeny`, or `no_result` (the simulate
     call returned no evaluation result for the requested action). `leading_keys` adds a
-    `dynamodb:LeadingKeys` context entry and `extra_context` one string entry per key. A throttled
-    call is retried up to `_SIMULATE_MAX_ATTEMPTS` times and then raised.
+    `dynamodb:LeadingKeys` context entry and `extra_context` one string entry per key.
+    `resource_policy` (with `resource_owner`) also evaluates that resource-based policy. A
+    throttled call is retried up to `_SIMULATE_MAX_ATTEMPTS` times and then raised.
     """
     request: dict[str, Any] = {
         "PolicySourceArn": role_arn,
         "ActionNames": [action],
         "ResourceArns": [resource_arn],
     }
+    if resource_policy is not None:
+        request["ResourcePolicy"] = resource_policy
+        if resource_owner is not None:
+            request["ResourceOwner"] = resource_owner
     entries: list[dict[str, Any]] = []
     if leading_keys is not None:
         entries.append(
@@ -2531,6 +2546,7 @@ def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
             + conditioned_rows
             + roles * _ROWS_PER_ROLE_OUTSIDE_THE_SIMULATE_MATRIX
             + SUPPLEMENTARY_ROW_COUNT
+            + ALLOWLIST_KEY_ROW_COUNT
         ),
         basis=(
             f"{simulate_rows} matrix row(s) over {roles} execution role(s) x {triples} "
@@ -2542,7 +2558,8 @@ def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
             f"{roles} x {_ROWS_PER_ROLE_OUTSIDE_THE_SIMULATE_MATRIX} per-role rows "
             "(intended_grants_parity, role_exists, no_dynamodb_wildcard, and at least one "
             "leading_keys row), derived from table_action_role_matrix.json and infra/main.tf, plus "
-            f"{SUPPLEMENTARY_ROW_COUNT} supplementary row(s)"
+            f"{SUPPLEMENTARY_ROW_COUNT} supplementary row(s), "
+            f"{ALLOWLIST_KEY_ROW_COUNT} allowlist-key row(s)"
         ),
     )
 
@@ -3342,10 +3359,511 @@ def supplementary_checks(ctx: SmokeContext) -> Iterator[CheckResult]:
     yield from _approve_rows(ctx, roles.get(APPROVE_FUNCTION), approve_problem, account_id)
 
 
+#: The stack output naming the CMK that encrypts the allowlist SecureString.
+ALLOWLIST_KEY_OUTPUT: Final[str] = "api_allowlist_kms_key_arn"
+#: Mandatory tags on the allowlist CMK, and the values fixed by the root's tags.
+ALLOWLIST_KEY_TAGS: Final[frozenset[str]] = frozenset(
+    {"service", "environment", "owner", "cost-center", "data-classification", "AppName"}
+)
+ALLOWLIST_KEY_TAG_VALUES: Final[Mapping[str, str]] = {
+    "data-classification": "internal",
+    "AppName": "crm-agent-eval",
+}
+#: The AWS managed SSM key a downgraded parameter would be re-encrypted under.
+AWS_SSM_KEY_ALIAS: Final[str] = "alias/aws/ssm"
+#: Rows `allowlist_key_checks` emits on every path, in order.
+ALLOWLIST_KEY_CHECKS: Final[tuple[str, ...]] = (
+    "allowlist_parameter_securestring_under_cmk",
+    "allowlist_parameter_read_with_decryption",
+    "allowlist_key_rotation_enabled",
+    "allowlist_key_tags",
+    "allowlist_key_policy_no_wildcard_allow",
+    "allowlist_parameter_write_denied:project_roles",
+    "allowlist_key_encrypt_denied:project_roles",
+    "allowlist_consumer_decrypt_allowed",
+    "allowlist_consumer_decrypt_other_parameter_denied",
+    "allowlist_consumer_aws_ssm_decrypt_denied",
+    "allowlist_key_policy_statements",
+    "allowlist_consumer_decrypt_needs_parameter_context",
+    "allowlist_consumer_other_key_operations_denied",
+    "allowlist_consumer_dynamodb_key_unaffected",
+    "allowlist_cursor_key_unaffected",
+)
+#: The allowlist CMK's key policy statements, by sid.
+ALLOWLIST_KEY_POLICY_SIDS: Final[frozenset[str]] = frozenset(
+    {
+        "EnableIAMUserPermissions",
+        "AllowOperatorsUseThroughSsm",
+        "AllowConsumersDecryptTheParameter",
+        "DenyKeyWriteToNonOperators",
+        "DenyKeyUseToNonProjectPrincipals",
+        "DenyKeyAdministrationToNonOperators",
+    }
+)
+#: KMS operations no consumer may perform on the allowlist CMK.
+ALLOWLIST_CONSUMER_REFUSED_ACTIONS: Final[tuple[str, ...]] = (
+    "kms:Encrypt",
+    "kms:GenerateDataKey",
+    "kms:ReEncryptFrom",
+    "kms:CreateGrant",
+)
+TABLE_PREFIX_ENV: Final[str] = "CRM_TABLE_PREFIX"
+ALLOWLIST_KEY_ROW_COUNT: Final[int] = len(ALLOWLIST_KEY_CHECKS)
+
+
+class _AllowlistInputs(NamedTuple):
+    account_id: str
+    key_arn: str
+    parameter_name: str
+    parameter_arn: str
+    key_policy: str
+    project_roles: dict[str, str]
+    consumer_roles: dict[str, str]
+    consumer_envs: dict[str, dict[str, str]]
+    operators: frozenset[str]
+
+
+def _allowlist_inputs(ctx: SmokeContext) -> _AllowlistInputs:
+    """Read every input the allowlist rows need; any failure raises with a reportable message."""
+    account_id = str(ctx.client("sts").get_caller_identity()["Account"])
+    key_arn = ctx.outputs.require_str("api_allowlist_kms_key_arn")
+    consumers: dict[str, str] = {}
+    envs: dict[str, dict[str, str]] = {}
+    names: set[str] = set()
+    paginator = ctx.client("lambda").get_paginator("list_functions")
+    for page in paginator.paginate():
+        for function in page.get("Functions", []):
+            name = str(function.get("FunctionName", ""))
+            env = (function.get("Environment") or {}).get("Variables") or {}
+            value = env.get(ALLOWLIST_PARAMETER_ENV)
+            if name.startswith(f"{_NAME_PREFIX}-") and value:
+                consumers[name] = str(function["Role"])
+                envs[name] = {str(k): str(v) for k, v in env.items()}
+                names.add(str(value))
+    if len(names) != 1:
+        raise ValueError(
+            f"the {ALLOWLIST_PARAMETER_ENV} values across {len(consumers)} function(s) are "
+            f"{sorted(names)!r}; expected exactly one parameter name"
+        )
+    (parameter_name,) = names
+    path = parameter_name if parameter_name.startswith("/") else f"/{parameter_name}"
+    parameter_arn = f"arn:aws:ssm:{ctx.region}:{account_id}:parameter{path}"
+    operators = frozenset(str(arn) for arn in ctx.outputs.get("crm_operator_principal_arns") or ())
+    project: dict[str, str] = {}
+    for page in ctx.client("iam").get_paginator("list_roles").paginate():
+        for role in page.get("Roles", []):
+            role_name = str(role.get("RoleName", ""))
+            if role_name.startswith(f"{_NAME_PREFIX}-") and str(role["Arn"]) not in operators:
+                project[role_name] = str(role["Arn"])
+    if not project:
+        raise ValueError(f"iam:ListRoles returned no role named {_NAME_PREFIX}-*")
+    key_policy = str(
+        ctx.client("kms").get_key_policy(KeyId=key_arn, PolicyName="default")["Policy"]
+    )
+    return _AllowlistInputs(
+        account_id,
+        key_arn,
+        parameter_name,
+        parameter_arn,
+        key_policy,
+        project,
+        consumers,
+        envs,
+        operators,
+    )
+
+
+def _kms_context(
+    role_arn: str, parameter_arn: str, region: str, service: str = "ssm"
+) -> dict[str, str]:
+    return {
+        "kms:ViaService": f"{service}.{region}.amazonaws.com",
+        "kms:EncryptionContext:PARAMETER_ARN": parameter_arn,
+        "aws:PrincipalArn": role_arn,
+        "aws:PrincipalIsAWSService": "false",
+    }
+
+
+def _decide(
+    ctx: SmokeContext,
+    role_arn: str,
+    action: str,
+    resource_arn: str,
+    context: Mapping[str, str] | None = None,
+    resource_policy: str | None = None,
+    owner: str | None = None,
+) -> str:
+    try:
+        return _simulate_evaluation(
+            ctx,
+            role_arn,
+            action,
+            resource_arn,
+            extra_context=context,
+            resource_policy=resource_policy,
+            resource_owner=owner,
+        )[0]
+    except Exception as exc:  # noqa: BLE001 - an unknown decision is never a pass
+        return f"error:{type(exc).__name__}"
+
+
+_REFUSED: Final[frozenset[str]] = frozenset({"implicitDeny", "explicitDeny"})
+
+
+def _per_role_row(
+    resource: str, check: str, decisions: Mapping[str, str], want: frozenset[str], what: str
+) -> CheckResult:
+    if not decisions:
+        return _row(resource, check, False, f"no role to simulate for {what}; verified nothing")
+    wrong = {role: d for role, d in decisions.items() if d not in want}
+    return _row(
+        resource,
+        check,
+        not wrong,
+        f"{what}: {len(decisions)} role(s); "
+        + (f"not {sorted(want)}: {wrong}" if wrong else f"all {sorted(want)}"),
+    )
+
+
+def _wildcard_allows(policy: Mapping[str, Any]) -> list[str]:
+    found: list[str] = []
+    statements = policy.get("Statement") or []
+    for statement in statements if isinstance(statements, list) else [statements]:
+        if statement.get("Effect") != "Allow":
+            continue
+        principal = statement.get("Principal")
+        values: list[Any] = []
+        if isinstance(principal, Mapping):
+            for value in principal.values():
+                values.extend(value if isinstance(value, list) else [value])
+        else:
+            values.append(principal)
+        if any(isinstance(v, str) and "*" in v for v in values) or "NotPrincipal" in statement:
+            found.append(str(statement.get("Sid", "<no sid>")))
+    return found
+
+
+def _allowlist_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[CheckResult]:
+    ssm = ctx.client("ssm")
+    kms = ctx.client("kms")
+    key = inputs.key_arn
+    try:
+        described = (
+            ssm.describe_parameters(
+                ParameterFilters=[
+                    {"Key": "Name", "Option": "Equals", "Values": [inputs.parameter_name]}
+                ]
+            ).get("Parameters")
+            or []
+        )
+        meta = described[0] if len(described) == 1 else {}
+        resolved = (
+            str(kms.describe_key(KeyId=str(meta["KeyId"]))["KeyMetadata"]["Arn"])
+            if meta.get("KeyId")
+            else None
+        )
+        yield _row(
+            inputs.parameter_name,
+            ALLOWLIST_KEY_CHECKS[0],
+            meta.get("Type") == "SecureString"
+            and resolved == key
+            and meta.get("Tier") == "Standard",
+            f"{len(described)} parameter(s); Type={meta.get('Type')!r}; key={resolved!r}; "
+            f"Tier={meta.get('Tier')!r}; expected a Standard SecureString under {key}",
+        )
+    except Exception as exc:  # noqa: BLE001 - reported on the row
+        yield _row(
+            inputs.parameter_name, ALLOWLIST_KEY_CHECKS[0], False, f"{type(exc).__name__}: {exc}"
+        )
+    try:
+        parameter = ssm.get_parameter(Name=inputs.parameter_name, WithDecryption=True)["Parameter"]
+        ids = [v for v in str(parameter.get("Value", "")).split(",") if v.strip()]
+        yield _row(
+            inputs.parameter_name,
+            ALLOWLIST_KEY_CHECKS[1],
+            parameter.get("Type") == "SecureString" and bool(ids),
+            f"GetParameter(WithDecryption=True) as the smoke identity: Type={parameter.get('Type')!r}, "
+            f"{len(ids)} client id(s) (values withheld)",
+        )
+    except Exception as exc:  # noqa: BLE001 - reported on the row
+        yield _row(
+            inputs.parameter_name, ALLOWLIST_KEY_CHECKS[1], False, f"{type(exc).__name__}: {exc}"
+        )
+    try:
+        enabled = bool(kms.get_key_rotation_status(KeyId=key).get("KeyRotationEnabled"))
+        yield _row(key, ALLOWLIST_KEY_CHECKS[2], enabled, f"KeyRotationEnabled={enabled}")
+    except Exception as exc:  # noqa: BLE001 - reported on the row
+        yield _row(key, ALLOWLIST_KEY_CHECKS[2], False, f"{type(exc).__name__}: {exc}")
+    try:
+        tags = {
+            str(t["TagKey"]): str(t["TagValue"])
+            for t in kms.list_resource_tags(KeyId=key).get("Tags") or []
+        }
+        missing = sorted(ALLOWLIST_KEY_TAGS - tags.keys())
+        wrong = {
+            k: tags[k] for k, v in ALLOWLIST_KEY_TAG_VALUES.items() if k in tags and tags[k] != v
+        }
+        yield _row(
+            key,
+            ALLOWLIST_KEY_CHECKS[3],
+            not missing and not wrong,
+            f"missing={missing} wrong={wrong}",
+        )
+    except Exception as exc:  # noqa: BLE001 - reported on the row
+        yield _row(key, ALLOWLIST_KEY_CHECKS[3], False, f"{type(exc).__name__}: {exc}")
+    try:
+        wildcards = _wildcard_allows(json.loads(inputs.key_policy))
+        yield _row(
+            key,
+            ALLOWLIST_KEY_CHECKS[4],
+            not wildcards,
+            f"Allow statements with a wildcard principal: {wildcards}" if wildcards else "none",
+        )
+    except ValueError as exc:
+        yield _row(key, ALLOWLIST_KEY_CHECKS[4], False, f"key policy unreadable: {exc}")
+    writes = {
+        f"{role}:{action}": _decide(ctx, arn, action, inputs.parameter_arn)
+        for role, arn in sorted(inputs.project_roles.items())
+        for action in PARAMETER_WRITE_ACTIONS
+    }
+    yield _per_role_row(
+        inputs.parameter_arn,
+        ALLOWLIST_KEY_CHECKS[5],
+        writes,
+        _REFUSED,
+        "/".join(PARAMETER_WRITE_ACTIONS),
+    )
+    encrypts = {
+        role: _decide(
+            ctx,
+            arn,
+            "kms:Encrypt",
+            key,
+            _kms_context(arn, inputs.parameter_arn, ctx.region),
+        )
+        for role, arn in sorted(inputs.project_roles.items())
+    }
+    yield _per_role_row(key, ALLOWLIST_KEY_CHECKS[6], encrypts, _REFUSED, "kms:Encrypt via SSM")
+    allowed = {
+        name: _decide(
+            ctx,
+            arn,
+            "kms:Decrypt",
+            key,
+            _kms_context(arn, inputs.parameter_arn, ctx.region),
+        )
+        for name, arn in sorted(inputs.consumer_roles.items())
+    }
+    yield _per_role_row(
+        key,
+        ALLOWLIST_KEY_CHECKS[7],
+        allowed,
+        frozenset({"allowed"}),
+        "kms:Decrypt via SSM under the parameter's PARAMETER_ARN",
+    )
+    other_parameter = f"{inputs.parameter_arn}-smoke-other"
+    other = {
+        name: _decide(
+            ctx,
+            arn,
+            "kms:Decrypt",
+            key,
+            _kms_context(arn, other_parameter, ctx.region),
+        )
+        for name, arn in sorted(inputs.consumer_roles.items())
+    }
+    yield _per_role_row(
+        key,
+        ALLOWLIST_KEY_CHECKS[8],
+        other,
+        _REFUSED,
+        f"kms:Decrypt under PARAMETER_ARN={other_parameter}",
+    )
+    try:
+        managed = str(kms.describe_key(KeyId=AWS_SSM_KEY_ALIAS)["KeyMetadata"]["Arn"])
+    except Exception as exc:  # noqa: BLE001 - the managed key may not exist yet
+        yield CheckResult(
+            resource=AWS_SSM_KEY_ALIAS,
+            check=ALLOWLIST_KEY_CHECKS[9],
+            status="defer",
+            defer_reason="aws_managed_ssm_key_absent",
+            detail=(
+                f"describe_key({AWS_SSM_KEY_ALIAS}) raised {type(exc).__name__}: {exc}; the "
+                "account's AWS managed SSM key ARN is unknown, so the Deny on decrypting under it "
+                "was not simulated"
+            ),
+        )
+    else:
+        managed_decisions = {
+            name: _decide(
+                ctx,
+                arn,
+                "kms:Decrypt",
+                managed,
+                _kms_context(arn, inputs.parameter_arn, ctx.region),
+            )
+            for name, arn in sorted(inputs.consumer_roles.items())
+        }
+        yield _per_role_row(
+            managed,
+            ALLOWLIST_KEY_CHECKS[9],
+            managed_decisions,
+            frozenset({"explicitDeny"}),
+            f"kms:Decrypt via SSM under {AWS_SSM_KEY_ALIAS}",
+        )
+    yield from _allowlist_identity_rows(ctx, inputs)
+
+
+def _use_deny_principals(policy: Mapping[str, Any]) -> set[str] | None:
+    statements = policy.get("Statement") or []
+    for statement in statements if isinstance(statements, list) else [statements]:
+        if statement.get("Sid") == "DenyKeyUseToNonProjectPrincipals":
+            listed = (
+                (statement.get("Condition") or {}).get("ArnNotEquals", {}).get("aws:PrincipalArn")
+            )
+            return {str(v) for v in (listed if isinstance(listed, list) else [listed]) if v}
+    return None
+
+
+def _allowlist_identity_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[CheckResult]:
+    """The key-policy statement set, then the consumer identity-side simulations."""
+    key = inputs.key_arn
+    try:
+        policy = json.loads(inputs.key_policy)
+        statements = policy.get("Statement") or []
+        sids = {str(s.get("Sid")) for s in statements if isinstance(s, Mapping)}
+        listed = _use_deny_principals(policy)
+        wanted = set(inputs.consumer_roles.values()) | set(inputs.operators)
+        problems = []
+        if sids != ALLOWLIST_KEY_POLICY_SIDS:
+            problems.append(f"sids={sorted(sids)} expected {sorted(ALLOWLIST_KEY_POLICY_SIDS)}")
+        if listed != wanted:
+            problems.append(
+                "DenyKeyUseToNonProjectPrincipals admits "
+                f"{sorted(listed or ())}, expected the consumer roles plus operators "
+                f"{sorted(wanted)}"
+            )
+        yield _row(
+            key,
+            ALLOWLIST_KEY_CHECKS[10],
+            not problems,
+            "; ".join(problems) or "the six statements; the use-Deny admits exactly them",
+        )
+    except ValueError as exc:
+        yield _row(key, ALLOWLIST_KEY_CHECKS[10], False, f"key policy unreadable: {exc}")
+    ssm_only = {"kms:ViaService": f"ssm.{ctx.region}.amazonaws.com"}
+    with_context = {**ssm_only, "kms:EncryptionContext:PARAMETER_ARN": inputs.parameter_arn}
+    control: dict[str, str] = {}
+    for name, arn in sorted(inputs.consumer_roles.items()):
+        allowed = _decide(ctx, arn, "kms:Decrypt", key, with_context)
+        without = _decide(ctx, arn, "kms:Decrypt", key, ssm_only)
+        control[name] = (
+            "discriminates"
+            if allowed == "allowed" and without in _REFUSED
+            else f"{allowed}/{without}"
+        )
+    yield _per_role_row(
+        key,
+        ALLOWLIST_KEY_CHECKS[11],
+        control,
+        frozenset({"discriminates"}),
+        "identity-only kms:Decrypt allowed with PARAMETER_ARN and refused without it",
+    )
+    refused = {
+        f"{name}:{action}": _decide(ctx, arn, action, key, with_context)
+        for name, arn in sorted(inputs.consumer_roles.items())
+        for action in ALLOWLIST_CONSUMER_REFUSED_ACTIONS
+    }
+    yield _per_role_row(
+        key,
+        ALLOWLIST_KEY_CHECKS[12],
+        refused,
+        _REFUSED,
+        "/".join(ALLOWLIST_CONSUMER_REFUSED_ACTIONS),
+    )
+    table_users = {
+        name: arn
+        for name, arn in inputs.consumer_roles.items()
+        if inputs.consumer_envs.get(name, {}).get(TABLE_PREFIX_ENV)
+    }
+    try:
+        tables = ctx.outputs.require_mapping("dynamodb_table_names")
+        described = ctx.client("dynamodb").describe_table(TableName=str(tables["reps"]))["Table"]
+        table_key = str((described.get("SSEDescription") or {}).get("KMSMasterKeyArn") or "")
+        if not table_key:
+            raise ValueError("the reps table reports no KMSMasterKeyArn")
+        via_dynamodb = {"kms:ViaService": f"dynamodb.{ctx.region}.amazonaws.com"}
+        table_decisions = {
+            f"{name}:{action}": _decide(ctx, arn, action, table_key, via_dynamodb)
+            for name, arn in sorted(table_users.items())
+            for action in ("kms:Decrypt", "kms:GenerateDataKey")
+        }
+        yield _per_role_row(
+            table_key,
+            ALLOWLIST_KEY_CHECKS[13],
+            table_decisions,
+            frozenset({"allowed"}),
+            f"table-key use via DynamoDB by the consumers setting {TABLE_PREFIX_ENV}",
+        )
+    except Exception as exc:  # noqa: BLE001 - reported on the row
+        yield _row(
+            "dynamodb_table_key",
+            ALLOWLIST_KEY_CHECKS[13],
+            False,
+            f"the table key is unreadable: {type(exc).__name__}: {exc}",
+        )
+    cursor_users = {
+        name: (arn, inputs.consumer_envs[name][CURSOR_KEY_ENV])
+        for name, arn in inputs.consumer_roles.items()
+        if inputs.consumer_envs.get(name, {}).get(CURSOR_KEY_ENV)
+    }
+    cursor_decisions = {
+        f"{name}:{action}": _decide(ctx, arn, action, cursor_key, CURSOR_CONTEXT)
+        for name, (arn, cursor_key) in sorted(cursor_users.items())
+        for action in CURSOR_KEY_ACTIONS
+    }
+    yield _per_role_row(
+        "cursor_key",
+        ALLOWLIST_KEY_CHECKS[14],
+        cursor_decisions,
+        frozenset({"allowed"}),
+        "cursor-key Encrypt/Decrypt under the crm-cursor context by the cursor tools",
+    )
+
+
+def allowlist_key_checks(ctx: SmokeContext) -> Iterator[CheckResult]:
+    """Yield exactly `ALLOWLIST_KEY_ROW_COUNT` rows over the allowlist SecureString and its CMK.
+
+    The parameter is a SecureString under the `api_allowlist_kms_key_arn` CMK and reads back with
+    decryption; the key rotates, carries the mandatory tags and no Allow names a wildcard
+    principal; every `crm-agent-eval-*` role is refused `PARAMETER_WRITE_ACTIONS` on the parameter and
+    `kms:Encrypt` on the key (the `crm_operator_principal_arns` excepted); every function naming the parameter in its environment is allowed
+    `kms:Decrypt` through SSM under its `PARAMETER_ARN`, refused it under another parameter's, and
+    explicitly refused decrypting under `alias/aws/ssm` (`defer` when that key does not exist).
+    The key policy holds exactly the six designed statements and its use-Deny admits exactly the
+    consumer roles plus operators. Identity-side simulations: a consumer's Decrypt is allowed with
+    the `PARAMETER_ARN` context and refused without it (the control), Encrypt, GenerateDataKey,
+    ReEncryptFrom and CreateGrant are refused, and the DynamoDB table key and the cursor key stay
+    usable by the consumers that use them.
+    The KMS simulations are identity-side only: the simulator rejects a key policy as a resource
+    policy (its `Resource` is `*`), so the key policy is asserted structurally instead. An
+    unreadable input fails every row.
+    """
+    try:
+        inputs = _allowlist_inputs(ctx)
+    except Exception as exc:  # noqa: BLE001 - reported on every row
+        detail = f"allowlist inputs unreadable: {type(exc).__name__}: {exc}"
+        for check in ALLOWLIST_KEY_CHECKS:
+            yield _row(ALLOWLIST_KEY_OUTPUT, check, False, detail)
+        return
+    yield from _allowlist_rows(ctx, inputs)
+
+
 def checks(ctx: SmokeContext) -> Iterator[CheckResult]:
-    """The per-role allow/deny matrix (`_role_matrix_checks`), then `supplementary_checks`."""
+    """The per-role matrix, then `supplementary_checks`, then `allowlist_key_checks`."""
     yield from _role_matrix_checks(ctx)
     yield from supplementary_checks(ctx)
+    yield from allowlist_key_checks(ctx)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

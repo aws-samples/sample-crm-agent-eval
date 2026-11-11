@@ -152,7 +152,12 @@ def _write_single_task_golden(path: Path) -> None:
         "category": "lookup",
         "derived_from": "multi-role rehearsal",
         "prompt": "Look up the account.",
-        "actor": {"rep_id": "rep-rehearsal", "book": [], "full_visibility": True},
+        "actor": {
+            "rep_id": "rep-rehearsal",
+            "book": [],
+            "full_visibility": True,
+            "principal_type": "user",
+        },
         "scoring_mode": "machine",
         "unscored_reason": None,
         "assertions": {
