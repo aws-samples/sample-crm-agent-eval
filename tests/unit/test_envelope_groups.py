@@ -66,6 +66,7 @@ def _agent_event(**block: Any) -> dict[str, Any]:
     """Build an agent-channel event whose claims include an admin `cognito:groups`."""
     identity_block: dict[str, Any] = {
         "claims": {CLAIM_REP_ID: "rep-1", CLAIM_GROUPS: ["admin"]},
+        "principal_type": "user",
         "session_id": "sess-1",
     }
     identity_block.update(block)
@@ -175,6 +176,7 @@ def test_gateway_channel_ignores_a_groups_field() -> None:
     event = {
         IDENTITY_KEY: {
             "rep_id": "rep-1",
+            "principal_type": "user",
             "source": "gateway",
             "groups": ["admin"],
             CLAIM_GROUPS: ["admin"],
@@ -198,9 +200,12 @@ def test_agent_channel_ignores_forwarded_groups_claim() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_agent_principal_type_defaults_to_user_when_absent() -> None:
-    """Today's payloads carry no `principal_type` and still decode as a user."""
-    assert decode_identity(_agent_event()).principal_type == "user"
+def test_agent_principal_type_absent_fails_authentication() -> None:
+    """An agent block with no `principal_type` is refused, never defaulted to a user."""
+    event = _agent_event()
+    del event[AGENT_IDENTITY_KEY]["principal_type"]
+    with pytest.raises(AuthenticationFailed, match="Authentication is required"):
+        decode_identity(event)
 
 
 @pytest.mark.parametrize("value", ["user", "service"])

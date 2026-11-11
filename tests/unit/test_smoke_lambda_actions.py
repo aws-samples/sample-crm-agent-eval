@@ -22,6 +22,8 @@ from scripts.smoke.lambda_actions import (
     _PRIMARY_CONTACT_CHECKS,
     _PRIMARY_CONTACT_TOOL,
     _T3_PENDING_TOOLS,
+    AGENT_PRINCIPAL_TYPE_ABSENT_CHECK,
+    AGENT_PRINCIPAL_TYPE_DECLARED_CHECK,
     CONTACT_DEPARTED_MISSING_SCOPE,
     CURSOR_ENV_CHECK,
     CURSOR_KEY_ARN_CHECK,
@@ -41,6 +43,7 @@ from scripts.smoke.lambda_actions import (
     EMPTY_BOOK_MISSING_SCOPE,
     EXPLICIT_FILTER_CHECK,
     FUNCTION_NAME_PREFIX,
+    GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK,
     KMS_ADMIN_DENIED_CHECK,
     KMS_NO_CONTEXT_CHECK,
     KMS_OTHER_ACTIONS_CHECK,
@@ -52,6 +55,7 @@ from scripts.smoke.lambda_actions import (
     MALFORMED_PAGE_CONTEXT_CHECK,
     NO_SECOND_PAGE_DEFER_REASON,
     NON_CURSOR_PROBE_TOOL,
+    PRINCIPAL_TYPE_PROBE_TOOL,
     SMOKE_PHONE,
     _check_explicit_filter_denied,
     _check_foreign_primary_contact_refused,
@@ -70,6 +74,7 @@ from scripts.smoke.lambda_actions import (
     out_of_scope_event,
     page_context_tools,
     primary_contact_event,
+    principal_type_events,
     seeded_active_contact_id,
     seeded_departed_contact_id,
     seeded_in_account_contact_id,
@@ -81,6 +86,8 @@ from scripts.smoke.lambda_actions import (
 from scripts.smoke.tenant import SmokeTenant, TenantTeardownError
 
 from crm.cursor import CURSOR_KMS_KEY_ENV, CURSOR_PURPOSE
+from crm.envelope import AGENT_IDENTITY_KEY, IDENTITY_KEY, decode_identity
+from crm.errors import AuthenticationFailed
 from crm.toolspec.definitions import ALL_TOOLS, LONG_TEXT_MAX_LENGTH, ToolDefinition
 
 _TEST_TENANT = "eval-smoke-testfixedrunid"
@@ -270,6 +277,13 @@ def _authentication_failed_body() -> dict[str, Any]:
     return {
         "statusCode": 401,
         "error": {"code": "authentication_failed", "message": "The request was not authorised."},
+    }
+
+
+def _principal_type_refusal() -> dict[str, Any]:
+    return {
+        "statusCode": 401,
+        "error": {"code": "authentication_failed", "message": "Authentication is required."},
     }
 
 
@@ -1499,6 +1513,9 @@ class _CursorLambda:
         refusal_body: dict[str, Any] | None = None,
         env_overrides: dict[str, str | None] | None = None,
         long_text_body: dict[str, Any] | None = None,
+        accept_absent_principal_type: bool = False,
+        refuse_agent_channel: bool = False,
+        absent_principal_type_body: dict[str, Any] | None = None,
     ) -> None:
         self.issuing = set(issuing)
         self.page_two_error = set(page_two_error)
@@ -1508,6 +1525,9 @@ class _CursorLambda:
         self.refusal_body = refusal_body or _cursor_refusal_body()
         self.env_overrides = env_overrides or {}
         self.long_text_body = long_text_body or _validation_failed_body()
+        self.accept_absent_principal_type = accept_absent_principal_type
+        self.refuse_agent_channel = refuse_agent_channel
+        self.absent_principal_type_body = absent_principal_type_body or _principal_type_refusal()
         self.events: list[tuple[str, dict[str, Any]]] = []
 
     def invoke(self, **kwargs: Any) -> dict[str, Any]:
@@ -1517,6 +1537,15 @@ class _CursorLambda:
         return _payload_response(self._answer(tool, event))
 
     def _answer(self, tool: str, event: dict[str, Any]) -> dict[str, Any]:
+        channel = event.get(IDENTITY_KEY) or event.get(AGENT_IDENTITY_KEY)
+        if (
+            isinstance(channel, dict)
+            and "principal_type" not in channel
+            and not self.accept_absent_principal_type
+        ):
+            return self.absent_principal_type_body
+        if AGENT_IDENTITY_KEY in event and self.refuse_agent_channel:
+            return _principal_type_refusal()
         if tool == "create_note":
             return self.long_text_body
         cursor = event.get("cursor")
@@ -1693,10 +1722,14 @@ def test_every_extra_row_passes_against_the_intended_deployment() -> None:
         CURSOR_KEY_SHAPE_CHECK,
         CURSOR_KEY_TAG_CHECK,
     } == checks_by_resource[CURSOR_KEY_RESOURCE]
+    assert PRINCIPAL_TYPE_PROBE_TOOL == NON_CURSOR_PROBE_TOOL
     assert {
         CURSOR_ENV_CHECK,
         KMS_OUTSIDE_IDENTITY_CHECK,
         KMS_OUTSIDE_KEY_POLICY_CHECK,
+        GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK,
+        AGENT_PRINCIPAL_TYPE_ABSENT_CHECK,
+        AGENT_PRINCIPAL_TYPE_DECLARED_CHECK,
     } == checks_by_resource[NON_CURSOR_PROBE_TOOL]
     assert LONG_TEXT_CAP_CHECK in checks_by_resource["create_note"]
     every_tool = {tool.name for tool in ALL_TOOLS}
@@ -1981,3 +2014,86 @@ def test_the_tool_checks_end_with_the_extra_rows(monkeypatch: pytest.MonkeyPatch
     stubber.deactivate()
     assert seen == [_TEST_TENANT]
     assert (results[-1].resource, results[-1].check) == ("sentinel", "extra")
+
+
+# ---------------------------------------------------------------------------
+# Absent principal_type is refused on the gateway and agent channels
+# ---------------------------------------------------------------------------
+
+_PRINCIPAL_TYPE_CHECKS = (
+    GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK,
+    AGENT_PRINCIPAL_TYPE_ABSENT_CHECK,
+    AGENT_PRINCIPAL_TYPE_DECLARED_CHECK,
+)
+
+
+def _principal_type_rows(lam: _CursorLambda) -> dict[str, Any]:
+    rows = _rows(_extra_ctx(lam=lam))
+    return {r.check: r for r in rows if r.check in _PRINCIPAL_TYPE_CHECKS}
+
+
+def test_the_principal_type_rows_invoke_the_probe_tool_once_each_on_one_channel() -> None:
+    lam = _CursorLambda()
+    rows = _principal_type_rows(lam)
+    assert {check: row.status for check, row in rows.items()} == dict.fromkeys(
+        _PRINCIPAL_TYPE_CHECKS, "pass"
+    )
+    sent = [event for tool, event in lam.events if tool == PRINCIPAL_TYPE_PROBE_TOOL]
+    assert len(sent) == 3
+    for event in sent:
+        assert (IDENTITY_KEY in event) != (AGENT_IDENTITY_KEY in event)
+
+
+def test_the_absent_principal_type_events_are_refused_by_the_real_decoder() -> None:
+    events = principal_type_events(tenant=_TEST_TENANT)
+    assert set(events) == set(_PRINCIPAL_TYPE_CHECKS)
+    for check in (GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK, AGENT_PRINCIPAL_TYPE_ABSENT_CHECK):
+        with pytest.raises(AuthenticationFailed):
+            decode_identity(dict(events[check]))
+    identity = decode_identity(dict(events[AGENT_PRINCIPAL_TYPE_DECLARED_CHECK]))
+    assert identity.principal_type == "user"
+    assert identity.source == "agent"
+    assert identity.tenant == _TEST_TENANT
+
+
+def test_the_absent_principal_type_events_differ_from_a_decodable_one_only_in_that_key() -> None:
+    events = principal_type_events(tenant=_TEST_TENANT)
+    gateway = dict(events[GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK][IDENTITY_KEY])
+    decode_identity({IDENTITY_KEY: {**gateway, "principal_type": "user"}})
+    absent_agent = dict(events[AGENT_PRINCIPAL_TYPE_ABSENT_CHECK][AGENT_IDENTITY_KEY])
+    declared_agent = dict(events[AGENT_PRINCIPAL_TYPE_DECLARED_CHECK][AGENT_IDENTITY_KEY])
+    assert {**absent_agent, "principal_type": "user"} == declared_agent
+
+
+def test_a_decoder_that_defaults_an_absent_principal_type_fails_both_refusal_rows() -> None:
+    rows = _principal_type_rows(_CursorLambda(accept_absent_principal_type=True))
+    assert rows[GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK].status == "fail"
+    assert rows[AGENT_PRINCIPAL_TYPE_ABSENT_CHECK].status == "fail"
+    assert rows[AGENT_PRINCIPAL_TYPE_DECLARED_CHECK].status == "pass"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _scope_denied_body(),
+        _validation_failed_body(),
+        _internal_error_body(),
+        {
+            "statusCode": 401,
+            "error": {"code": "authentication_failed", "message": "x", "detail": "leaked"},
+        },
+    ],
+    ids=["scope_denied", "validation_failed", "internal_error", "leaky_auth_failed"],
+)
+def test_a_refusal_other_than_a_clean_authentication_failed_fails_the_rows(
+    body: dict[str, Any],
+) -> None:
+    rows = _principal_type_rows(_CursorLambda(absent_principal_type_body=body))
+    assert rows[GATEWAY_PRINCIPAL_TYPE_ABSENT_CHECK].status == "fail"
+    assert rows[AGENT_PRINCIPAL_TYPE_ABSENT_CHECK].status == "fail"
+
+
+def test_a_refused_declared_agent_identity_fails_the_control_row() -> None:
+    rows = _principal_type_rows(_CursorLambda(refuse_agent_channel=True))
+    assert rows[AGENT_PRINCIPAL_TYPE_DECLARED_CHECK].status == "fail"
+    assert rows[AGENT_PRINCIPAL_TYPE_ABSENT_CHECK].status == "pass"

@@ -101,7 +101,7 @@ def _payload(**extra: Any) -> dict[str, Any]:
         "prompt": "what changed on this one?",
         "session_id": f"session-context-{uuid.uuid4()}",
         **extra,
-        "_agent_identity": {"claims": _claims()},
+        "_agent_identity": {"claims": _claims(), "principal_type": "user"},
     }
 
 

@@ -24,6 +24,9 @@ export interface EvalTaskScore {
 export interface EvalModelMetrics {
   readonly model_id: string;
   readonly included_invocation_count: number;
+  /** Invocations priced at the model's long-context rates; absent on a matrix written before the
+   * count existed. */
+  readonly long_context_invocation_count?: number;
   readonly input_tokens?: number;
   readonly output_tokens?: number;
   /** Tokens written to a new prompt-cache checkpoint; published even while cost is withheld. */
@@ -121,6 +124,9 @@ export interface EvalTierRoleModelMetric {
   readonly role: string;
   readonly model_id: string;
   readonly included_invocation_count: number;
+  /** Invocations priced at the model's long-context rates; absent on a matrix written before the
+   * count existed. */
+  readonly long_context_invocation_count?: number;
   readonly input_tokens: number;
   readonly output_tokens: number;
   readonly cache_read_tokens: number;
@@ -185,6 +191,9 @@ export interface EvalTierSummaryEntry {
   readonly latency_p50_ms: number | null;
   readonly latency_p95_ms: number | null;
   readonly success: EvalTierSuccess;
+  /** Invocations priced at the model's long-context rates; absent on a matrix written before the
+   * count existed. */
+  readonly long_context_invocation_count?: number;
 }
 
 /** `eval.metrics.TierSummary.to_report_fields()`, keyed by tier. The writer emits every tier; a tier
@@ -207,6 +216,11 @@ export interface EvalArm {
   readonly task_spread?: readonly EvalTaskSpread[];
   /** The per-tier summary; absent on a matrix written before it existed. */
   readonly tier_summary?: EvalTierSummary;
+  /** The arm's cost over every tier's calls (`model_metrics` covers the supervisor tier only);
+   * absent on a matrix written before it existed, `null` when not priced. */
+  readonly arm_cost_total?: number | null;
+  /** The arm's long-context invocations over every tier; absent on an older matrix. */
+  readonly arm_long_context_invocation_count?: number;
   /**
    * `eval.matrix.USAGE_LOWER_BOUND_TASK_IDS_KEY`: the task runs, in run order, in which a model call
    * ended before reporting token usage. Absent when every run reported its usage, and on a matrix

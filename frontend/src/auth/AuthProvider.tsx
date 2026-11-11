@@ -3,12 +3,13 @@
  * React auth context. Every page and hook that needs the current identity or an access token
  * consumes this via {@link useAuth} — never `CognitoAuthSession` directly.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { JSX, ReactNode } from "react";
 
 import { resetUserSettingsState } from "../components/tuning/sessionTuning";
-import { loadRuntimeConfig } from "../config/runtimeConfig";
+import { loadRuntimeConfig, type RuntimeConfig } from "../config/runtimeConfig";
 import { CognitoAuthSession, type AuthSession } from "./CognitoAuthSession";
+import { endHostedUiSession } from "./hostedUi";
 import type { Identity } from "./identity";
 
 export type AuthStatus = "loading" | "signed-out" | "signed-in";
@@ -18,6 +19,11 @@ export interface AuthContextValue {
   /** Present only when `status === "signed-in"`. */
   readonly identity: Identity | undefined;
   signIn(username: string, password: string): Promise<void>;
+  /**
+   * Revokes and clears the session and resets saved settings, then, when Hosted UI is configured,
+   * navigates to its `/logout` so the Cognito domain session ends too. Repeat calls while one is in
+   * flight are ignored.
+   */
   signOut(): void;
   /** Resolves a fresh, non-expired access token. Throws if not signed in. */
   getAccessToken(): Promise<string>;
@@ -57,12 +63,34 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     setStatus("signed-in");
   }, []);
 
+  const signingOut = useRef(false);
   const signOut = useCallback(() => {
-    session?.signOut();
-    resetUserSettingsState();
-    setSession(undefined);
-    setIdentity(undefined);
-    setStatus("signed-out");
+    if (signingOut.current) return;
+    signingOut.current = true;
+    void (async () => {
+      try {
+        await session?.signOut();
+      } catch (err) {
+        console.warn("Sign-out did not finish cleanly", err instanceof Error ? err.name : String(err));
+      }
+      resetUserSettingsState();
+      setSession(undefined);
+      setIdentity(undefined);
+      setStatus("signed-out");
+      signingOut.current = false;
+
+      let config: RuntimeConfig;
+      try {
+        config = await loadRuntimeConfig();
+      } catch (err) {
+        console.warn(
+          "Signed out locally; could not load the runtime config to end the Hosted UI session",
+          err instanceof Error ? err.message : String(err),
+        );
+        return;
+      }
+      endHostedUiSession(config);
+    })();
   }, [session]);
 
   const getAccessToken = useCallback(async () => {

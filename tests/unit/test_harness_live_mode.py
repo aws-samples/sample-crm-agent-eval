@@ -547,6 +547,7 @@ _RETRYABLE_PREFIXES = {
     "ServiceQuotaExceededException": ExclusionCategory.THROTTLE,
     "ModelTimeoutException": ExclusionCategory.THROTTLE,
     "ModelNotReadyException": ExclusionCategory.THROTTLE,
+    "service_unavailable": ExclusionCategory.THROTTLE,
     "InternalServerException": ExclusionCategory.RETRY,
     "ModelErrorException": ExclusionCategory.RETRY,
     "ModelStreamErrorException": ExclusionCategory.RETRY,
@@ -574,6 +575,39 @@ def test_every_retryable_prefix_is_tallied_in_its_category(prefix: str) -> None:
     _drain(provider, _invocation())
 
     assert [e.category for e in provider.drain_exclusions()] == [_RETRYABLE_PREFIXES[prefix]]
+
+
+_OPENAI_SERVICE_UNAVAILABLE = [
+    ProviderEvent(
+        type="error",
+        error_message=(
+            "service_unavailable: The server had an error while processing your request."
+        ),
+    )
+]
+
+
+def test_an_openai_service_unavailable_is_retried_and_tallied_as_a_throttle() -> None:
+    """The in-band Responses ``service_unavailable`` is retried, then succeeds, as one throttle."""
+    wrapped = _ScriptedProvider([_OPENAI_SERVICE_UNAVAILABLE, _SUCCESS_TURN])
+    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+
+    events = _drain(provider, _invocation())
+
+    assert [event.type for event in events] == ["text_delta", "usage", "completed"]
+    assert wrapped.attempts == 2
+    assert [e.category for e in provider.drain_exclusions()] == [ExclusionCategory.THROTTLE]
+
+
+def test_an_openai_service_unavailable_on_every_attempt_still_stops_the_sweep() -> None:
+    wrapped = _ScriptedProvider([_OPENAI_SERVICE_UNAVAILABLE])
+    provider = ThrottleRetryingProvider(wrapped, max_attempts=3, sleep=lambda _s: None)
+
+    with pytest.raises(LiveInvocationError, match="failed on attempt 3 of 3"):
+        _drain(provider, _invocation())
+
+    assert wrapped.attempts == 3
+    assert [e.category for e in provider.drain_exclusions()] == [ExclusionCategory.THROTTLE] * 2
 
 
 def test_a_non_retryable_code_mentioning_internal_server_in_its_text_is_not_retried() -> None:

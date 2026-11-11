@@ -20,6 +20,7 @@ from typing import Final
 from agents.tier_attribution import InvocationAttribution, OutcomeKind, ToolCallAttribution
 from crm.metering import Tier, TokenUsage, UsageRecord, cost_for_usage
 from eval.pricing import cache_min_checkpoint_tokens as _cache_min_checkpoint_tokens
+from eval.pricing import inference_profile_for
 from eval.scoring import SCORED_TIERS, TierScores
 
 #: The four delegation outcome kinds, in report order. Mirrors
@@ -335,6 +336,8 @@ class ModelMetrics:
         exclusions: Categorised tally of invocations excluded from ``usage`` and ``cost``.
         latency: Per-arm task and per-tier call latency, or an explicit "not measured" result
             for a stub arm.
+        long_context_invocation_count: How many included invocations were priced at the
+            model's long-context rates.
     """
 
     model_id: str
@@ -344,6 +347,7 @@ class ModelMetrics:
     cache_min_checkpoint_tokens: int | None
     exclusions: ExclusionTally
     latency: LatencyMetrics = field(default_factory=not_measured_latency_metrics)
+    long_context_invocation_count: int = 0
 
     def to_report_fields(self) -> dict[str, object]:
         """Render this model's metrics as a flat, JSON-safe mapping for a result artifact.
@@ -354,6 +358,7 @@ class ModelMetrics:
         fields: dict[str, object] = {
             "model_id": self.model_id,
             "included_invocation_count": self.included_invocation_count,
+            "long_context_invocation_count": self.long_context_invocation_count,
             "input_tokens": self.usage.input_tokens,
             "output_tokens": self.usage.output_tokens,
             "cache_write_tokens": self.usage.cache_write_tokens,
@@ -459,6 +464,9 @@ def aggregate_model_metrics(
         cache_min_checkpoint_tokens=threshold,
         exclusions=tally_exclusions(exclusions),
         latency=latency if latency is not None else not_measured_latency_metrics(),
+        long_context_invocation_count=sum(
+            1 for record in included if record.cost.pricing_tier == "long_context"
+        ),
     )
 
 
@@ -541,6 +549,8 @@ class TierRoleModelMetrics:
         call_latency_measured: Whether any call in this group recorded a latency (live), vs a stub.
         call_latency_ms_p50: Nearest-rank P50 call latency in ms, or ``None`` when not measured.
         call_latency_ms_p95: Nearest-rank P95 call latency in ms, or ``None`` when not measured.
+        long_context_invocation_count: How many of the group's calls were priced at the model's
+            long-context rates.
     """
 
     tier: Tier
@@ -552,6 +562,7 @@ class TierRoleModelMetrics:
     call_latency_measured: bool
     call_latency_ms_p50: float | None
     call_latency_ms_p95: float | None
+    long_context_invocation_count: int = 0
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping; cost keys appear only when cost is not withheld."""
@@ -560,6 +571,7 @@ class TierRoleModelMetrics:
             "role": self.role,
             "model_id": self.model_id,
             "included_invocation_count": self.included_invocation_count,
+            "long_context_invocation_count": self.long_context_invocation_count,
             "input_tokens": self.usage.input_tokens,
             "output_tokens": self.usage.output_tokens,
             "cache_read_tokens": self.usage.cache_read_tokens,
@@ -591,11 +603,13 @@ def aggregate_tier_role_model(
     *,
     withhold_cost: bool,
     pricing_path: Path | None = None,
+    inference_profiles: Mapping[str, str] | None = None,
 ) -> tuple[TierRoleModelMetrics, ...]:
     """Aggregate invocation attributions into one row per ``(tier, role, model_id)`` group.
 
     Tokens are summed per group; cost is the sum of each attribution's own priced cost, or
-    ``None`` when ``withhold_cost`` is set. Call latency is the nearest-rank P50/P95 over the
+    ``None`` when ``withhold_cost`` is set. Each call is priced under its model's configured
+    inference profile, and the calls priced at long-context rates are counted either way. Call latency is the nearest-rank P50/P95 over the
     group's recorded latencies. Groups are returned in ``(tier, role, model_id)`` sorted order.
 
     Args:
@@ -604,9 +618,14 @@ def aggregate_tier_role_model(
             :func:`eval.pricing.is_cost_provisional`.
         pricing_path: Optional override of the price table path (for tests); defaults to the
             shipped table via :func:`crm.metering.cost_for_usage`.
+        inference_profiles: Profile to price each model's calls under, by model id, or ``None``
+            to use each model's configured profile (:func:`eval.pricing.inference_profile_for`).
 
     Returns:
         One :class:`TierRoleModelMetrics` per group, in deterministic key order.
+
+    Raises:
+        KeyError: ``inference_profiles`` is given and names no profile for a priced model.
     """
     grouped: dict[tuple[Tier, str, str], list[InvocationAttribution]] = {}
     for attribution in attributions:
@@ -621,7 +640,13 @@ def aggregate_tier_role_model(
             cache_write_tokens=sum(a.cache.write_tokens for a in group),
             cache_read_tokens=sum(a.cache.read_tokens for a in group),
         )
-        cost = _price_group(group, model_id, withhold_cost=withhold_cost, pricing_path=pricing_path)
+        cost, long_context_count = _price_group(
+            group,
+            model_id,
+            withhold_cost=withhold_cost,
+            pricing_path=pricing_path,
+            inference_profiles=inference_profiles,
+        )
         measured, p50, p95 = _latency_percentiles([a.latency_ms for a in group])
         results.append(
             TierRoleModelMetrics(
@@ -634,6 +659,7 @@ def aggregate_tier_role_model(
                 call_latency_measured=measured,
                 call_latency_ms_p50=p50,
                 call_latency_ms_p95=p95,
+                long_context_invocation_count=long_context_count,
             )
         )
     return tuple(results)
@@ -645,16 +671,24 @@ def _price_group(
     *,
     withhold_cost: bool,
     pricing_path: Path | None,
-) -> CostTotals | None:
-    """Sum each attribution's own priced cost for one group, or ``None`` when withheld.
+    inference_profiles: Mapping[str, str] | None = None,
+) -> tuple[CostTotals | None, int]:
+    """Price each token-bearing call of one group; return its summed cost and long-context count.
 
-    A group with no token-bearing attribution, or a blank ``model_id``, prices to ``None``.
+    The cost is ``None`` when withheld, and a group with no token-bearing attribution or a blank
+    ``model_id`` prices to ``(None, 0)``.
     """
-    if withhold_cost or not model_id.strip():
-        return None
+    if not model_id.strip():
+        return None, 0
     priced = [a for a in group if a.bears_tokens]
     if not priced:
-        return None
+        return None, 0
+    inference_profile = (
+        inference_profile_for(model_id)
+        if inference_profiles is None
+        else inference_profiles[model_id]
+    )
+    long_context_count = 0
     input_cost = output_cost = cache_write_cost = cache_read_cost = 0.0
     versions: set[str] = set()
     for attribution in priced:
@@ -665,21 +699,30 @@ def _price_group(
             cache_read_tokens=attribution.cache.read_tokens,
         )
         cost = (
-            cost_for_usage(usage, model_id)
+            cost_for_usage(usage, model_id, inference_profile=inference_profile)
             if pricing_path is None
-            else cost_for_usage(usage, model_id, pricing_path=pricing_path)
+            else cost_for_usage(
+                usage, model_id, inference_profile=inference_profile, pricing_path=pricing_path
+            )
         )
+        if cost.pricing_tier == "long_context":
+            long_context_count += 1
         input_cost += cost.input
         output_cost += cost.output
         cache_write_cost += cost.cache_write
         cache_read_cost += cost.cache_read
         versions.add(cost.price_table_version)
-    return CostTotals(
-        input=input_cost,
-        output=output_cost,
-        cache_write=cache_write_cost,
-        cache_read=cache_read_cost,
-        price_table_version=versions.pop(),
+    if withhold_cost:
+        return None, long_context_count
+    return (
+        CostTotals(
+            input=input_cost,
+            output=output_cost,
+            cache_write=cache_write_cost,
+            cache_read=cache_read_cost,
+            price_table_version=versions.pop(),
+        ),
+        long_context_count,
     )
 
 
@@ -952,6 +995,8 @@ class TierSummaryEntry:
         latency_p95_ms: The tier's nearest-rank P95 call latency, or ``None`` when unmeasured.
         success: The tier's success count over its applicable turns.
         completion_over_repeats: The tier's task completion over repeats.
+        long_context_invocation_count: How many of this tier's calls were priced at long-context
+            rates.
     """
 
     tier: Tier
@@ -962,6 +1007,7 @@ class TierSummaryEntry:
     latency_p95_ms: float | None
     success: TierSuccess
     completion_over_repeats: RepeatCompletion
+    long_context_invocation_count: int = 0
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping in a fixed key order."""
@@ -969,6 +1015,7 @@ class TierSummaryEntry:
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cost_total": self.cost_total,
+            "long_context_invocation_count": self.long_context_invocation_count,
             "latency_p50_ms": self.latency_p50_ms,
             "latency_p95_ms": self.latency_p95_ms,
             "success": {
@@ -1038,6 +1085,9 @@ def aggregate_tier_summary(
                     applicable=len(applicable),
                 ),
                 completion_over_repeats=completion_over_repeats(tier_scores, tier),
+                long_context_invocation_count=sum(
+                    row.long_context_invocation_count for row in rows
+                ),
             )
         )
     return TierSummary(entries=tuple(entries))

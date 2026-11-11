@@ -7,11 +7,14 @@ resolves to and which tuning values that model accepts. Every per-model fact com
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal, get_args
 
 import yaml
+
+from crm.inference_route import UnknownInferenceRoute, route_for_profile
 
 Family = Literal["anthropic", "openai"]
 Tier = Literal["supervisor", "subagent", "tool"]
@@ -59,6 +62,7 @@ class ModelCapability:
         effort: Effort-axis capability, the only tuning axis.
         assignable_tiers: The tiers ``config/models.yaml`` may assign this model to as a default;
             always contains ``tier``. Defaults to ``(tier,)`` when the YAML entry omits the key.
+        context_window_tokens: The model's context window in tokens. The loader always sets it.
     """
 
     model_id: str
@@ -67,6 +71,7 @@ class ModelCapability:
     tier: Tier
     effort: EffortCapability
     assignable_tiers: tuple[Tier, ...]
+    context_window_tokens: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,16 +95,23 @@ class CapabilityMatrix:
         default_family: The provider family a tier uses when its request names none.
         models: Every model's capability entry, keyed by model id.
         tiers: Per-family, per-tier model assignment and default tuning.
+        request_prompt_limits: The largest estimated prompt, in tokens, one request may carry at
+            each tier; exactly one entry per tier.
     """
 
     default_family: Family
     models: dict[str, ModelCapability]
     tiers: dict[Family, dict[Tier, TierAssignment]]
+    request_prompt_limits: Mapping[Tier, int]
 
     def model_for(self, family: Family, tier: Tier) -> ModelCapability:
         """Return the capability entry for the model assigned to ``family``'s ``tier``."""
         model_id = self.tiers[family][tier].model_id
         return self.models[model_id]
+
+    def request_prompt_limit(self, tier: Tier) -> int:
+        """Return the per-request estimated prompt-token limit for ``tier``."""
+        return self.request_prompt_limits[tier]
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -152,6 +164,64 @@ def _parse_assignable_tiers(model_id: str, entry: dict[str, Any]) -> tuple[Tier,
     return tuple(raw)
 
 
+def _parse_inference_profile(model_id: str, entry: dict[str, Any]) -> str:
+    """Return one model's ``inference_profile``, raising unless it routes to that model."""
+    profile = entry.get("inference_profile")
+    if not isinstance(profile, str):
+        raise ValueError(f"{model_id}: inference_profile {profile!r} is not a string")
+    try:
+        route_for_profile(profile, model_id=model_id)
+    except UnknownInferenceRoute as exc:
+        raise ValueError(f"{model_id}: {exc}") from exc
+    return profile
+
+
+def _parse_context_window(model_id: str, entry: dict[str, Any]) -> int:
+    """Return one model's ``context_window_tokens``, raising unless it is a positive int."""
+    window = entry.get("context_window_tokens")
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError(f"{model_id}: context_window_tokens {window!r} is not a positive integer")
+    return window
+
+
+def _parse_request_prompt_limits(raw: object) -> dict[Tier, int]:
+    """Return ``models.yaml``'s ``request_prompt_limits``: exactly one positive int per tier."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"request_prompt_limits must be a mapping of tier to tokens, got {raw!r}")
+    missing = [tier for tier in _TIER_NAMES if tier not in raw]
+    extra = sorted(str(key) for key in raw if key not in _TIER_NAMES)
+    if missing or extra:
+        raise ValueError(
+            f"request_prompt_limits must name exactly {list(_TIER_NAMES)}; "
+            f"missing {missing!r}, unknown {extra!r}"
+        )
+    limits: dict[Tier, int] = {}
+    for tier in get_args(Tier):
+        value = raw[tier]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"request_prompt_limits.{tier} {value!r} is not a positive integer")
+        limits[tier] = value
+    return limits
+
+
+def _check_limits_fit_windows(
+    limits: Mapping[Tier, int], models: dict[str, ModelCapability]
+) -> None:
+    """Raise ``ValueError`` when a tier's limit exceeds the window of a model it can run.
+
+    A turn's tuning may select any model of the tier's family, and either family may run any tier,
+    so every model in the matrix is checked against every tier's limit.
+    """
+    for tier, limit in limits.items():
+        for model in models.values():
+            window = model.context_window_tokens
+            if window is not None and limit > window:
+                raise ValueError(
+                    f"request_prompt_limits.{tier} {limit} exceeds the {window}-token context "
+                    f"window of {model.model_id!r}, which the {tier} tier can run"
+                )
+
+
 def _reject_temperature(owner: str, block: dict[str, Any]) -> None:
     """Raise ``ValueError`` when a configuration block carries a ``temperature`` key."""
     if "temperature" in block:
@@ -194,7 +264,10 @@ def load_capability_matrix(
         ValueError: When a model entry's ``api_path`` is absent or not in :data:`API_PATHS`, or a
             model entry or a tier's ``tuning`` carries a ``temperature`` key, or a model's
             ``assignable_tiers`` is malformed, or a tier's model is absent from the matrix, of
-            another family, or not assignable to that tier.
+            another family, or not assignable to that tier; or a model's ``inference_profile``
+            has no known route or names another model, or its ``context_window_tokens`` is not a
+            positive integer; or ``request_prompt_limits`` does not name exactly the three tiers
+            with positive integers, or a tier's limit exceeds any model's context window.
     """
     models_config = _load_yaml(models_path)
     capabilities_config = _load_yaml(capabilities_path)
@@ -206,11 +279,12 @@ def load_capability_matrix(
         _reject_temperature(model_id, entry)
         models[model_id] = ModelCapability(
             model_id=model_id,
-            inference_profile=entry["inference_profile"],
+            inference_profile=_parse_inference_profile(model_id, entry),
             family=entry["family"],
             tier=entry["tier"],
             effort=_parse_effort(entry),
             assignable_tiers=_parse_assignable_tiers(model_id, entry),
+            context_window_tokens=_parse_context_window(model_id, entry),
         )
 
     tiers: dict[Family, dict[Tier, TierAssignment]] = {}
@@ -226,8 +300,12 @@ def load_capability_matrix(
             )
         tiers[family_name] = family_tiers
 
+    request_prompt_limits = _parse_request_prompt_limits(models_config.get("request_prompt_limits"))
+    _check_limits_fit_windows(request_prompt_limits, models)
+
     return CapabilityMatrix(
         default_family=models_config["default_family"],
         models=models,
         tiers=tiers,
+        request_prompt_limits=request_prompt_limits,
     )

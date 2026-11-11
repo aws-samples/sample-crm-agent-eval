@@ -149,3 +149,39 @@ def test_an_identity_block_the_runtime_cannot_decode_is_refused_control() -> Non
             {"prompt": _MESSAGE, "_agent_identity": {"claims": {}, "principal_type": "robot"}},
             _MATRIX,
         )
+
+
+@pytest.mark.parametrize("principal_type", ["user", "service"])
+def test_the_chat_target_forwards_the_principal_type_the_runtime_requires(
+    store: Store, principal_type: str
+) -> None:
+    """The sent block declares the caller's type; dropping it makes the Runtime refuse."""
+    rep_id = "svc-1" if principal_type == "service" else "rep-a"
+    _, sent = _call(store, principal_type, rep_id)
+    assert sent["_agent_identity"]["principal_type"] == principal_type
+
+    del sent["_agent_identity"]["principal_type"]
+    with pytest.raises(AuthenticationFailed):
+        decode_invocation(_authenticated_payload(sent), _MATRIX)
+
+
+@pytest.mark.parametrize("declared", ["absent", None, ""])
+def test_a_gateway_identity_without_a_principal_type_reaches_no_runtime(
+    store: Store, declared: object
+) -> None:
+    """The chat target refuses an `_identity` that declares no type; nothing is sent."""
+    identity = _gateway_identity("user", "rep-a")
+    if declared == "absent":
+        del identity["principal_type"]
+    else:
+        identity["principal_type"] = declared
+    runtime = _RecordingRuntime()
+    result = handle(
+        {"message": _MESSAGE, IDENTITY_KEY: identity},
+        store=store,
+        runtime=runtime,
+        config=_CONFIG,
+        matrix=_MATRIX,
+    )
+    assert result.get("isError") is True, result
+    assert runtime.calls == []

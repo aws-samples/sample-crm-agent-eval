@@ -50,7 +50,7 @@ def _valid_claims(**overrides: Any) -> dict[str, Any]:
         "sub": "cognito-sub-1",
         "iss": _ISSUER,
         "client_id": _ALLOWED_CLIENT_ID,
-        "token_use": "access",
+        "token_use": "access",  # nosec B105  # a token_use claim value, not a credential
         "scope": _ALLOWED_SCOPE,
         "iat": now,
         "exp": now + 3600,
@@ -269,6 +269,7 @@ def test_caller_supplied_agent_identity_key_is_discarded() -> None:
                 "custom:rep_id": "attacker",
                 "custom:full_visibility": "true",
             },
+            "principal_type": "user",
             "session_id": "forged-session",
         },
     }
@@ -327,7 +328,8 @@ def test_caller_supplying_all_three_identity_channels_at_once_is_discarded() -> 
             "source": "gateway",
         },
         "_agent_identity": {
-            "claims": {"custom:rep_id": "attacker2", "custom:full_visibility": "true"}
+            "claims": {"custom:rep_id": "attacker2", "custom:full_visibility": "true"},
+            "principal_type": "user",
         },
         "requestContext": {
             "authorizer": {
@@ -803,7 +805,7 @@ def _machine_claims(**overrides: Any) -> dict[str, Any]:
         "sub": "machine-sub-1",
         "iss": _ISSUER,
         "client_id": _ALLOWED_CLIENT_ID,
-        "token_use": "access",
+        "token_use": "access",  # nosec B105  # a token_use claim value, not a credential
         "scope": _ALLOWED_SCOPE,
         "iat": now,
         "exp": now + 3600,
@@ -1101,3 +1103,151 @@ def test_the_tools_instance_still_admits_its_machine_token(
     )
 
     assert not _denied(result)
+
+
+# --------------------------------------------------------------------------------------
+# Log levels: every denial or refusal decision is a WARNING; a success stays INFO.
+# --------------------------------------------------------------------------------------
+
+_LOGGER_NAME = "gateway.identity_interceptor"
+
+
+def _records_for(caplog: pytest.LogCaptureFixture, event: str) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.name == _LOGGER_NAME and json.loads(record.getMessage()).get("event") == event
+    ]
+
+
+def _exploding_lookup(_rep_id: str) -> dict[str, Any] | None:
+    raise RuntimeError("dynamodb unavailable")
+
+
+@pytest.mark.parametrize(
+    ("lookup", "event"),
+    [
+        (_exploding_lookup, "gateway_service_identity_lookup_failed"),
+        (lambda _rep_id: None, "gateway_service_identity_absent"),
+        (lambda _rep_id: _rep_row(book=None), "gateway_service_identity_book_not_explicit"),
+        (lambda _rep_id: _rep_row(tenant=""), "gateway_service_identity_tenant_absent"),
+        (
+            lambda _rep_id: _rep_row(full_visibility=True),
+            "gateway_service_identity_full_visibility_refused",
+        ),
+    ],
+    ids=["lookup_failed", "absent", "book_not_explicit", "tenant_absent", "full_visibility"],
+)
+def test_each_service_identity_refusal_logs_at_warning(
+    caplog: pytest.LogCaptureFixture, lookup: Any, event: str
+) -> None:
+    """A refused service principal is a denial decision, so it is logged at WARNING."""
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        identity = _build(_machine_claims(), _service_config(), lookup)
+
+    assert identity["rep_id"] == ""
+    records = _records_for(caplog, event)
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+
+
+def _expired_token() -> str:
+    return _sign(_valid_claims(iat=int(time.time()) - 7200, exp=int(time.time()) - 3600))
+
+
+@pytest.mark.parametrize(
+    ("make_event", "reason"),
+    [
+        (
+            lambda: _event_with_body(["tools/call"], token=_sign(_valid_claims())),
+            "body_not_an_object",
+        ),
+        (
+            lambda: _event_with_body(
+                {"jsonrpc": "2.0", "id": "p", "method": "tools/call", "params": "x"},
+                token=_sign(_valid_claims()),
+            ),
+            "params_not_an_object",
+        ),
+        (lambda: _gateway_request(token=None, arguments={}), "no_bearer_token"),
+        (lambda: _gateway_request(token=_expired_token(), arguments={}), "ExpiredSignatureError"),
+        (lambda: _gateway_request(token="not-a-jwt", arguments={}), "DecodeError"),  # nosec B106  # malformed-token fixture
+    ],
+    ids=["body_not_an_object", "params_not_an_object", "no_bearer", "expired", "malformed"],
+)
+def test_each_handler_denial_logs_at_warning(
+    caplog: pytest.LogCaptureFixture, make_event: Any, reason: str
+) -> None:
+    """Every `gateway_auth_denied` decision inside the handler is logged at WARNING."""
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        _assert_denied(_invoke(make_event(), _config()))
+
+    records = _records_for(caplog, "gateway_auth_denied")
+    assert [json.loads(record.getMessage())["reason"] for record in records] == [reason]
+    assert records[0].levelno == logging.WARNING
+
+
+@pytest.mark.parametrize(
+    ("patch_target", "error", "reason"),
+    [
+        (
+            "gateway.identity_interceptor._build_verified_identity",
+            RuntimeError("boom"),
+            "unexpected_error:RuntimeError",
+        ),
+        (
+            "gateway.identity_interceptor._load_config",
+            InterceptorConfigError("discovery_url must be non-empty"),
+            "config_error:discovery_url must be non-empty",
+        ),
+    ],
+    ids=["unexpected_error", "config_error"],
+)
+def test_a_handler_failure_denial_logs_at_warning(
+    caplog: pytest.LogCaptureFixture, patch_target: str, error: Exception, reason: str
+) -> None:
+    """The fail-closed wrapper's denial is logged at WARNING."""
+    event = _gateway_request(token=_sign(_valid_claims()), arguments={})
+    with (
+        caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME),
+        patch.object(
+            GatewayInterceptorConfig, "signing_key_for", return_value=_private_key.public_key()
+        ),
+        patch("gateway.identity_interceptor._load_config", return_value=_config()),
+        patch(patch_target, side_effect=error),
+    ):
+        _assert_denied(lambda_handler(event, object()))
+
+    records = _records_for(caplog, "gateway_auth_denied")
+    assert [json.loads(record.getMessage())["reason"] for record in records] == [reason]
+    assert records[0].levelno == logging.WARNING
+
+
+def test_a_verified_request_logs_at_info_and_emits_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A success is not a denial: it stays at INFO and produces no WARNING record."""
+    event = _gateway_request(token=_sign(_valid_claims()), arguments={"opportunity_id": "opp-1"})
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        result = _invoke(event, _config())
+
+    assert "transformedGatewayRequest" in result["mcp"]
+    verified = _records_for(caplog, "gateway_auth_verified")
+    assert len(verified) == 1
+    assert verified[0].levelno == logging.INFO
+    assert not [
+        r for r in caplog.records if r.name == _LOGGER_NAME and r.levelno >= logging.WARNING
+    ]
+
+
+def test_a_successful_service_identity_lookup_logs_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A service principal that is accepted produces no refusal record."""
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        identity = _build(_machine_claims(), _service_config(), lambda _rep_id: _rep_row())
+
+    assert identity["rep_id"] == _SERVICE_REP_ID
+    assert not [
+        r for r in caplog.records if r.name == _LOGGER_NAME and r.levelno >= logging.WARNING
+    ]

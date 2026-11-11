@@ -68,14 +68,14 @@ CLAIM_FULL_VISIBILITY: Final[str] = "custom:full_visibility"
 CLAIM_TENANT: Final[str] = "custom:tenant"
 CLAIM_GROUPS: Final[str] = "cognito:groups"
 
-#: Optional top-level key of the agent identity block naming the forwarded principal type.
+#: Required top-level key of the agent identity block naming the forwarded principal type.
 AGENT_PRINCIPAL_TYPE_KEY: Final[str] = "principal_type"
 
-#: Environment variable naming the SSM String parameter that lists, comma-separated, the app
+#: Environment variable naming the SSM SecureString parameter that lists, comma-separated, the app
 #: client ids admitted on the ``apigw`` channel.
 API_ALLOWED_CLIENT_IDS_PARAMETER_ENV: Final[str] = "CRM_API_ALLOWED_CLIENT_IDS_PARAMETER"
 
-#: Reads one SSM String parameter's value by name; raises the SDK's exception on failure.
+#: Reads one SSM SecureString parameter's decrypted value by name; raises on failure.
 ParameterReader = Callable[[str], str]
 
 _SSM_OPERATION: Final[str] = "ssm:GetParameter(api_allowed_client_ids)"
@@ -213,7 +213,13 @@ def identity_from_claims(
 
 
 def _ssm_parameter_reader(name: str) -> str:
-    """Return the value of the SSM String parameter `name`, read with a short-timeout client."""
+    """Return the decrypted value of the SSM SecureString parameter `name`.
+
+    Read with a short-timeout client and ``WithDecryption=True``.
+
+    Raises:
+        ValueError: The parameter's type is not ``SecureString``.
+    """
     import boto3
     from botocore.config import Config
 
@@ -225,7 +231,11 @@ def _ssm_parameter_reader(name: str) -> str:
             retries={"mode": "standard", "total_max_attempts": 3},
         ),
     )
-    return str(client.get_parameter(Name=name)["Parameter"]["Value"])
+    parameter = client.get_parameter(Name=name, WithDecryption=True)["Parameter"]
+    parameter_type = parameter.get("Type")
+    if parameter_type != "SecureString":
+        raise ValueError(f"parameter {name} has type {parameter_type!r}, expected 'SecureString'")
+    return str(parameter["Value"])
 
 
 _parameter_reader: ParameterReader = _ssm_parameter_reader
@@ -328,7 +338,8 @@ def _from_api_gateway(event: dict[str, Any]) -> Identity:
 def _from_gateway_identity(payload: object) -> Identity:
     """Decode the ``_identity`` structure injected by the Gateway REQUEST interceptor.
 
-    A malformed structure raises :class:`~crm.errors.AuthenticationFailed`.
+    A malformed structure, including an absent, empty or unrecognised ``principal_type``, raises
+    :class:`~crm.errors.AuthenticationFailed`.
     """
     if not isinstance(payload, dict):
         raise AuthenticationFailed(
@@ -349,13 +360,9 @@ def _from_gateway_identity(payload: object) -> Identity:
             detail=f"{IDENTITY_KEY}.source is {declared_source!r}, expected 'gateway'",
         )
 
-    principal_raw = str(payload.get("principal_type") or "user")
-    if principal_raw not in {"user", "service"}:
-        raise AuthenticationFailed(
-            "Authentication is required.",
-            detail=f"{IDENTITY_KEY}.principal_type is {principal_raw!r}",
-        )
-    principal_type: PrincipalType = "service" if principal_raw == "service" else "user"
+    principal_type = _declared_principal_type(
+        payload, key="principal_type", channel=f"{IDENTITY_KEY}.principal_type"
+    )
 
     try:
         return Identity(
@@ -373,11 +380,30 @@ def _from_gateway_identity(payload: object) -> Identity:
         ) from exc
 
 
-def _from_agent_context(payload: object) -> Identity:
-    """Decode the claims an agent forwards, with an optional ``principal_type``.
+def _declared_principal_type(
+    payload: Mapping[str, object], *, key: str, channel: str
+) -> PrincipalType:
+    """Return ``payload[key]`` when it is ``user`` or ``service``.
 
-    ``principal_type`` defaults to ``user`` when absent; any value other than ``user`` or
-    ``service`` raises :class:`~crm.errors.AuthenticationFailed`. Groups are never decoded here.
+    Raises:
+        AuthenticationFailed: The key is absent, or its value is anything else (``None`` and the
+            empty string included).
+    """
+    if key not in payload:
+        raise AuthenticationFailed("Authentication is required.", detail=f"{channel} is absent")
+    declared = payload[key]
+    if declared == "user":
+        return "user"
+    if declared == "service":
+        return "service"
+    raise AuthenticationFailed("Authentication is required.", detail=f"{channel} is {declared!r}")
+
+
+def _from_agent_context(payload: object) -> Identity:
+    """Decode the claims an agent forwards, with its required ``principal_type``.
+
+    An absent ``principal_type``, or any value other than ``user`` or ``service``, raises
+    :class:`~crm.errors.AuthenticationFailed`. Groups are never decoded here.
     """
     if not isinstance(payload, dict):
         raise AuthenticationFailed(
@@ -389,13 +415,9 @@ def _from_agent_context(payload: object) -> Identity:
         raise AuthenticationFailed(
             "Authentication is required.", detail="agent identity block carries no claims"
         )
-    principal_raw = payload.get(AGENT_PRINCIPAL_TYPE_KEY, "user")
-    if principal_raw not in ("user", "service"):
-        raise AuthenticationFailed(
-            "Authentication is required.",
-            detail=f"agent identity {AGENT_PRINCIPAL_TYPE_KEY} is {principal_raw!r}",
-        )
-    principal_type: PrincipalType = "service" if principal_raw == "service" else "user"
+    principal_type = _declared_principal_type(
+        payload, key=AGENT_PRINCIPAL_TYPE_KEY, channel=f"agent identity {AGENT_PRINCIPAL_TYPE_KEY}"
+    )
     return identity_from_claims(
         claims,
         source="agent",

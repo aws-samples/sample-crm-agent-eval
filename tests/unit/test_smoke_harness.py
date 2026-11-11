@@ -2174,3 +2174,25 @@ def test_is_timeout_follows_the_cause_chain_of_a_re_raised_transport_error() -> 
         _raise()
     assert harness.is_timeout(raised.value) is True
     assert harness.is_timeout(StoreBusyError("busy")) is False
+
+
+def test_is_timeout_does_not_follow_a_context_only_chain() -> None:
+    """A transport error that is only the implicit ``__context__`` is not a cause of the failure."""
+
+    class EndpointConnectionError(Exception):
+        """Named to match botocore's type, which is how `is_timeout` recognises it."""
+
+    class StoreBusyError(Exception):
+        """Stands in for an unrelated failure raised while handling the transport error."""
+
+    def _raise() -> None:
+        try:
+            raise EndpointConnectionError("unreachable")
+        except EndpointConnectionError:
+            raise StoreBusyError("busy")  # noqa: B904
+
+    with pytest.raises(StoreBusyError) as raised:
+        _raise()
+    assert raised.value.__cause__ is None
+    assert isinstance(raised.value.__context__, EndpointConnectionError)
+    assert harness.is_timeout(raised.value) is False

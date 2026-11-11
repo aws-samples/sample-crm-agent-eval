@@ -22,14 +22,13 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from agents.turn_driver import TurnRecords
+from agents.turn_driver import TurnRecords, supervisor_system_message
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval.harness import (
     ArmSpec,
     _run_arm,
     _run_provider_turn,
-    _StreamCallCounter,
 )
 from eval.scoring import ObservedProposal, ToolCall, TurnOutcome, score_task
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation, Tuning, validate_tuning
@@ -38,6 +37,31 @@ from providers.capabilities import load_capability_matrix
 _TENANT = "eval-test-tenant"
 _REP = "rep-ashford"
 _NOW = "2026-01-01T00:00:00Z"
+
+
+class _SupervisorRoundCounter(ModelProvider):
+    """Wraps a provider and counts the ``stream`` calls that open with the supervisor prompt.
+
+    Only supervisor-tier requests start with :func:`agents.turn_driver.supervisor_system_message`,
+    so this counts supervisor rounds at the provider seam, independently of attribution.
+    """
+
+    def __init__(self, wrapped: ModelProvider) -> None:
+        self._wrapped = wrapped
+        self._supervisor_message = supervisor_system_message()
+        self.supervisor_rounds = 0
+        self.call_count = 0
+
+    def stream(
+        self,
+        invocation: ResolvedInvocation,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ProviderEvent]:
+        self.call_count += 1
+        if messages and messages[0] == self._supervisor_message:
+            self.supervisor_rounds += 1
+        return self._wrapped.stream(invocation, messages, tools)
 
 
 @pytest.fixture
@@ -835,11 +859,12 @@ def test_run_provider_turn_invokes_the_provider_exactly_once(store: Store) -> No
 
 
 def test_run_arm_invokes_provider_stream_exactly_once_per_task(store: Store) -> None:
-    """`_run_arm` reports `included_invocation_count == len(tasks)`, with `provider.stream` called
-    once per provider round.
+    """`_run_arm` reports one included invocation per supervisor round, and every task runs one.
 
-    A tool-branch task drives two rounds, so the stream call count is `len(tasks)` plus one per
-    tool-branch task.
+    The arm's metrics count the supervisor tier's calls, one usage record per call. The stub
+    reports usage on every round, so the count equals the supervisor-tier `stream` calls observed
+    at the provider seam; a tool-branch task drives a second supervisor round. The total stream
+    count also covers subagent and tool-tier calls.
     """
     from eval.harness import _DEFAULT_GOLDEN_TASKS_PATH, _load_golden_tasks
     from providers.capabilities import load_capability_matrix
@@ -847,7 +872,7 @@ def test_run_arm_invokes_provider_stream_exactly_once_per_task(store: Store) -> 
 
     tasks = _load_golden_tasks(_DEFAULT_GOLDEN_TASKS_PATH)
     matrix = load_capability_matrix()
-    counting_provider = _StreamCallCounter(StubProvider())
+    counting_provider = _SupervisorRoundCounter(StubProvider())
 
     arm_run = _run_arm(
         provider=counting_provider,
@@ -863,8 +888,9 @@ def test_run_arm_invokes_provider_stream_exactly_once_per_task(store: Store) -> 
         price_table_version="0.1.0-provisional",
         cost_withheld=True,
     )
-    assert arm_run.model_metrics.included_invocation_count == len(tasks)
-    assert len(tasks) <= counting_provider.call_count <= 2 * len(tasks)
+    assert len(tasks) <= counting_provider.supervisor_rounds <= 2 * len(tasks)
+    assert arm_run.model_metrics.included_invocation_count == counting_provider.supervisor_rounds
+    assert counting_provider.supervisor_rounds <= counting_provider.call_count
 
 
 def test_run_arm_raises_end_to_end_if_the_turn_loop_ever_double_invokes_the_provider(

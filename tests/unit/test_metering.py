@@ -46,11 +46,12 @@ def _write_pricing(
 ) -> Path:
     """Write a temp price table with explicit rates and ``provisional`` flag; return its path."""
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "price_table_version": "test-metering-1",
         "provisional": provisional,
         "currency": "USD",
         "unit": "per_1m_tokens",
+        "routes": {"global": {"multiplier": 1.0}, "geo": {"multiplier": 1.10}},
         "models": {model_id: dict(rates)},
     }
     path = tmp_path / "pricing.yaml"
@@ -71,28 +72,33 @@ def test_shipped_pricing_table_is_final_with_real_published_rates() -> None:
 def test_shipped_pricing_table_prices_exactly_the_capability_matrix_models() -> None:
     """Every model the matrix serves is priced, and no retired model keeps a rate."""
     pricing = _shipped_pricing()
-    assert pricing["price_table_version"] == "1.2.0"
+    assert pricing["price_table_version"] == "1.3.0"
     assert set(pricing["models"]) == set(_capability_models())
 
 
 @pytest.mark.parametrize("model_id", sorted(_capability_models()))
 def test_shipped_rates_are_what_cost_for_usage_charges(model_id: str) -> None:
-    """Each category's cost is its token count times the YAML rate for that model."""
+    """Each category's cost is its token count times the model's standard global YAML rate."""
     rates = _shipped_pricing()["models"][model_id]
-    usage = TokenUsage(input_tokens=2_000_000, output_tokens=3_000_000)
-    cost = cost_for_usage(usage, model_id, pricing_path=PRICING_PATH)
-    assert cost.input == pytest.approx(2 * rates["input"])
-    assert cost.output == pytest.approx(3 * rates["output"])
+    profile = _capability_models()[model_id]["inference_profile"]
+    usage = TokenUsage(input_tokens=20_000, output_tokens=30_000)
+    cost = cost_for_usage(usage, model_id, inference_profile=profile, pricing_path=PRICING_PATH)
+    assert cost.input == pytest.approx(0.02 * rates["input"])
+    assert cost.output == pytest.approx(0.03 * rates["output"])
+    assert (cost.pricing_tier, cost.route) == ("standard", "global")
     cached = TokenUsage(
-        input_tokens=4_000_000,
+        input_tokens=40_000,
         output_tokens=0,
-        cache_write_tokens=1_000_000,
-        cache_read_tokens=4_000_000,
+        cache_write_tokens=10_000,
+        cache_read_tokens=40_000,
     )
-    cached_cost = cost_for_usage(cached, model_id, pricing_path=PRICING_PATH)
-    assert cached_cost.cache_write == pytest.approx(rates["cache_write"])
-    assert cached_cost.cache_read == pytest.approx(4 * rates["cache_read"])
-    assert cached_cost.price_table_version == "1.2.0"
+    cached_cost = cost_for_usage(
+        cached, model_id, inference_profile=profile, pricing_path=PRICING_PATH
+    )
+    assert cached_cost.cache_write == pytest.approx(0.01 * rates["cache_write"])
+    assert cached_cost.cache_read == pytest.approx(0.04 * rates["cache_read"])
+    assert cached_cost.price_table_version == "1.3.0"
+    assert cached_cost.pricing_tier == "standard"
 
 
 def test_token_usage_rejects_negative_counts() -> None:
@@ -115,7 +121,9 @@ def test_cost_categories_stay_separable_not_blended(tmp_path: Path) -> None:
     usage = TokenUsage(
         input_tokens=1000, output_tokens=500, cache_write_tokens=2000, cache_read_tokens=3000
     )
-    cost = cost_for_usage(usage, ANTHROPIC_MODEL, pricing_path=path)
+    cost = cost_for_usage(
+        usage, ANTHROPIC_MODEL, inference_profile=f"global.{ANTHROPIC_MODEL}", pricing_path=path
+    )
     assert isinstance(cost, Cost)
     assert cost.input == pytest.approx(1000 / 1_000_000 * 3.0)
     assert cost.output == pytest.approx(500 / 1_000_000 * 15.0)
@@ -133,7 +141,12 @@ def test_cost_for_usage_unknown_model_raises() -> None:
     """A model absent from the price table must fail loudly, never default to a silent zero."""
     usage = TokenUsage(input_tokens=1, output_tokens=1)
     with pytest.raises(KeyError):
-        cost_for_usage(usage, "not-a-real-model", pricing_path=PRICING_PATH)
+        cost_for_usage(
+            usage,
+            "not-a-real-model",
+            inference_profile="global.not-a-real-model",
+            pricing_path=PRICING_PATH,
+        )
 
 
 @pytest.mark.parametrize(
@@ -157,9 +170,11 @@ def test_build_usage_record_attributes_model_and_tier(
         family=family,  # type: ignore[arg-type]
         tier=tier,  # type: ignore[arg-type]
         usage=usage,
+        inference_profile=f"global.{model_id}",
         pricing_path=PRICING_PATH,
     )
     assert record.model_id == model_id
+    assert record.cost.route == "global"
     assert record.family == family
     assert record.tier == tier
     assert record.usage is usage
@@ -175,6 +190,8 @@ def test_usage_record_requires_non_empty_identifiers() -> None:
         cache_read=0.0,
         price_table_version="v",
         cache_read_accounting="unconfirmed",
+        pricing_tier="standard",
+        route="global",
     )
     with pytest.raises(ValueError, match="rep_id"):
         UsageRecord(
@@ -215,6 +232,7 @@ def test_cache_thresholds_differ_per_model_and_are_carried_on_the_record() -> No
         family=first_family,
         tier="supervisor",
         usage=usage,
+        inference_profile=f"global.{first_id}",
         cache_min_checkpoint_tokens=first_threshold,
         pricing_path=PRICING_PATH,
     )
@@ -227,6 +245,7 @@ def test_cache_thresholds_differ_per_model_and_are_carried_on_the_record() -> No
         family=second_family,
         tier="tool",
         usage=usage,
+        inference_profile=f"global.{second_id}",
         cache_min_checkpoint_tokens=second_threshold,
         pricing_path=PRICING_PATH,
     )

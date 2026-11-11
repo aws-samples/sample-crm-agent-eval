@@ -1562,7 +1562,7 @@ class _FakeSsm:
         self,
         *,
         value: str = test_key.CLIENT_ID,
-        parameter_type: str = "String",
+        parameter_type: str = "SecureString",
         tags: list[dict[str, str]] | None = None,
     ) -> None:
         self._value = value
@@ -1571,9 +1571,9 @@ class _FakeSsm:
 
     def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
         assert kwargs["Name"] == ALLOWLIST_PARAMETER, kwargs
-        return {
-            "Parameter": {"Name": ALLOWLIST_PARAMETER, "Value": self._value, "Type": self._type}
-        }
+        encrypted = self._type == "SecureString" and not kwargs.get("WithDecryption")
+        value = "AQICAHciphertextblob==" if encrypted else self._value
+        return {"Parameter": {"Name": ALLOWLIST_PARAMETER, "Value": value, "Type": self._type}}
 
     def list_tags_for_resource(self, **kwargs: Any) -> dict[str, Any]:
         assert kwargs == {"ResourceType": "Parameter", "ResourceId": ALLOWLIST_PARAMETER}, kwargs
@@ -1696,7 +1696,7 @@ class TestAllowlistChecks:
             "legacy_allowlist_env_absent",
             "allowlist_parameter_env_consistent",
             "allowlist_parameter_value_is_spa_client",
-            "allowlist_parameter_type_string",
+            "allowlist_parameter_type_securestring",
             "allowlist_parameter_tagged",
             "ssm_get_parameter_allowed",
             "ssm_read_grant_is_exact_parameter",
@@ -1754,10 +1754,34 @@ class TestAllowlistChecks:
             (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_value_is_spa_client")
         }
 
-    def test_a_string_list_parameter_fails_its_row_only(self) -> None:
-        ctx = _identity_ctx(ssm=_FakeSsm(parameter_type="StringList"))
+    @pytest.mark.parametrize("parameter_type", ["String", "StringList"])
+    def test_a_parameter_that_is_not_a_securestring_fails_its_row_only(
+        self, parameter_type: str
+    ) -> None:
+        ctx = _identity_ctx(ssm=_FakeSsm(parameter_type=parameter_type))
         assert _failing(_allowlist_rows(ctx)) == {
-            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_type_string")
+            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_type_securestring")
+        }
+
+    def test_the_parameter_is_read_with_decryption(self) -> None:
+        class _Recording(_FakeSsm):
+            calls: list[dict[str, Any]] = []
+
+            def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
+                self.calls.append(kwargs)
+                return super().get_parameter(**kwargs)
+
+        ssm = _Recording()
+        _allowlist_rows(_identity_ctx(ssm=ssm))
+        assert ssm.calls == [{"Name": ALLOWLIST_PARAMETER, "WithDecryption": True}]
+
+    def test_a_read_without_decryption_would_fail_the_value_row(self) -> None:
+        class _NoDecrypt(_FakeSsm):
+            def get_parameter(self, **kwargs: Any) -> dict[str, Any]:
+                return super().get_parameter(**{**kwargs, "WithDecryption": False})
+
+        assert _failing(_allowlist_rows(_identity_ctx(ssm=_NoDecrypt()))) == {
+            (f"parameter:{ALLOWLIST_PARAMETER}", "allowlist_parameter_value_is_spa_client")
         }
 
     def test_an_untagged_parameter_fails_its_row_only(self) -> None:

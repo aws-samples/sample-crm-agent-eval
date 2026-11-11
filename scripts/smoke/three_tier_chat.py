@@ -14,7 +14,8 @@ suffixed :data:`ATTRIBUTION_ROW_SUFFIX`, for its mapping's models and tier effor
 
 **Check 2 — relay turn cost.** The turn that seeds check 4's session is a
 delegation-forcing turn under a mixed-family wire tuning; its `completed` frame must carry non-empty
-`cost_lines`, a positive `cost_usd` with `cost_withheld` not set, `resolved_tiers` naming each
+`cost_lines`, each carrying a non-negative integer `long_context_calls`, a positive `cost_usd` with
+`cost_withheld` not set, `resolved_tiers` naming each
 tier's requested family at its `config/models.yaml` model and tier effort, and a priced cost
 line for each tier's `config/models.yaml` model.
 
@@ -677,9 +678,14 @@ def evaluate_turn_cost(
     `turn_label` names the turn in the no-frame detail.
     """
     frame = result.completed
-    lines_check, cost_check, tiers_check = (
+    lines_check, long_context_check, cost_check, tiers_check = (
         f"{name}{row_suffix}"
-        for name in ("cost_lines_present", "cost_usd_positive", "resolved_tiers_match_tuning")
+        for name in (
+            "cost_lines_present",
+            "cost_lines_carry_long_context_calls",
+            "cost_usd_positive",
+            "resolved_tiers_match_tuning",
+        )
     )
     model_checks = [
         f"{tier}_cost_line_names_{model}{row_suffix}" for tier, model in expected_models.items()
@@ -689,7 +695,14 @@ def evaluate_turn_cost(
         for tier, effort in expected_efforts.items()
     ]
     if frame is None:
-        for check in (lines_check, cost_check, tiers_check, *model_checks, *effort_checks):
+        for check in (
+            lines_check,
+            long_context_check,
+            cost_check,
+            tiers_check,
+            *model_checks,
+            *effort_checks,
+        ):
             yield CheckResult(
                 resource=RESOURCE_CLASS,
                 check=check,
@@ -706,6 +719,20 @@ def evaluate_turn_cost(
         status="pass" if lines_ok else "fail",
         detail=f"completed.cost_lines={lines!r}"
         + ("" if lines_ok else ", expected a non-empty list of priced (tier, role, model) groups"),
+    )
+    counts = [
+        line.get("long_context_calls") if isinstance(line, Mapping) else None
+        for line in (lines if isinstance(lines, list) else [])
+    ]
+    counts_ok = bool(counts) and all(
+        isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in counts
+    )
+    yield CheckResult(
+        resource=RESOURCE_CLASS,
+        check=long_context_check,
+        status="pass" if counts_ok else "fail",
+        detail=f"cost_lines long_context_calls={counts!r}"
+        + ("" if counts_ok else ", expected a non-negative integer on every cost line"),
     )
     cost = frame.get("cost_usd")
     withheld = frame.get("cost_withheld")

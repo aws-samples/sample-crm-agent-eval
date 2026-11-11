@@ -41,6 +41,7 @@ from eval.runs import (
     MAX_SWEEP_REPEATS,
     acquire_lock,
     create_run,
+    job_row_id,
     read_lock,
     release_lock,
     require_run,
@@ -150,9 +151,9 @@ def test_every_result_selector_reads_only_what_its_handler_returns() -> None:
 
 
 def test_every_owned_step_names_the_execution() -> None:
-    """Start, Teardown and Finalize carry `$$.Execution.Id`."""
+    """Start, Seed, Aggregate, Teardown and Finalize carry `$$.Execution.Id`."""
     tasks = _lambda_tasks()
-    for name in ("Start", "Teardown", "Finalize"):
+    for name in ("Start", "Seed", "Aggregate", "Teardown", "Finalize"):
         assert tasks[name][1]["execution_arn.$"] == "$$.Execution.Id", name
 
 
@@ -504,10 +505,13 @@ class Deployment:
     fail_in: frozenset[str] = frozenset()
     invocations: list[tuple[str, str]] = field(default_factory=list)
     before_item: Callable[[int], None] | None = None
+    before_step: Callable[[str], None] | None = None
 
     def invoke(self, function: str, payload: dict[str, Any]) -> dict[str, Any]:
         step = payload.get("step", "item")
         self.invocations.append((function, step))
+        if self.before_step is not None:
+            self.before_step(step)
         if step == "item" and self.before_item is not None:
             self.before_item(sum(1 for _f, s in self.invocations if s == "item") - 1)
         if step in self.fail_in:
@@ -610,6 +614,24 @@ def test_the_template_completes_a_stub_sweep(deployment: Deployment) -> None:
     assert read_lock(deployment.store) is None
     assert _tenant_rows(deployment.store, record.tenant) == 0
     assert f"p/{deployment.run_id}/matrix.json" in deployment.s3.objects
+
+
+def test_every_turn_the_template_sends_declares_its_actors_principal_type(
+    deployment: Deployment,
+) -> None:
+    """Through the template, each Runtime request carries the type its golden actor declares."""
+    from eval.actor import actor_principal_type
+    from eval.harness import _DEFAULT_GOLDEN_TASKS_PATH, _load_golden_tasks
+
+    declared = {
+        str(task["id"]): actor_principal_type(task["actor"])  # type: ignore[arg-type]
+        for task in _load_golden_tasks(_DEFAULT_GOLDEN_TASKS_PATH)
+    }
+    deployment.execute()
+    requests = deployment.runtime.requests
+    assert requests
+    for request in requests:
+        assert request["_agent_identity"]["principal_type"] == declared[request["task_id"]]
 
 
 @pytest.mark.parametrize(
@@ -765,6 +787,66 @@ def test_a_second_execution_for_a_live_run_is_refused_and_changes_nothing(
     record = require_run(deployment.store, deployment.run_id)
     assert record.status == "completed" and record.tasks_done == 4
     assert read_lock(deployment.store) is None
+
+
+def _hand_run_to_another_execution_before(deployment: Deployment, target: str) -> None:
+    """Before `target` is invoked, record another execution as the run's owner on the job row."""
+
+    def _reassign(step: str) -> None:
+        if step == target:
+            deployment.store.update_item(
+                "eval_runs",
+                {"run_id": job_row_id(deployment.run_id)},
+                set_values={"execution_arn": "arn:aws:states:us-east-1:123456789012:execution:x:b"},
+                condition=None,
+            )
+
+    deployment.before_step = _reassign
+
+
+def _steps(deployment: Deployment) -> list[str]:
+    return [step for _f, step in deployment.invocations]
+
+
+def test_a_seed_by_an_execution_that_no_longer_owns_the_run_seeds_nothing(
+    deployment: Deployment,
+) -> None:
+    """Seed refuses without retry, Teardown and Finalize refuse, and the execution ends at the
+    refusal state with no catalog row, no unit tenant row and no turn sent."""
+    _hand_run_to_another_execution_before(deployment, "seed")
+    refused = deployment.execute_refused()
+    assert refused.visited[-6:] == [
+        "IsCancelled",
+        "Seed",
+        "Teardown",
+        "Finalize",
+        "IsFinalized",
+        REFUSAL_STATE,
+    ]
+    assert _steps(deployment) == ["start", "seed", "teardown", "finalize"]
+    assert deployment.store.get_item("eval_runs", {"run_id": deployment.run_id}) is None
+    assert _tenant_rows(deployment.store, tenant_for_run(deployment.run_id)) == 0
+    assert deployment.runtime.requests == []
+
+
+def test_an_aggregate_by_an_execution_that_no_longer_owns_the_run_publishes_nothing(
+    deployment: Deployment,
+) -> None:
+    """Aggregate refuses without retry and ends at the refusal state: no matrix artefact and no
+    `matrix_report` or `artifact_links` on the job row."""
+    _hand_run_to_another_execution_before(deployment, "aggregate")
+    refused = deployment.execute_refused()
+    assert refused.visited[-5:] == [
+        "Aggregate",
+        "Teardown",
+        "Finalize",
+        "IsFinalized",
+        REFUSAL_STATE,
+    ]
+    assert _steps(deployment).count("aggregate") == 1
+    assert not any(key.endswith("/matrix.json") for key in deployment.s3.objects)
+    job = deployment.store.get_item("eval_runs", {"run_id": job_row_id(deployment.run_id)})
+    assert job is not None and "matrix_report" not in job and "artifact_links" not in job
 
 
 def test_an_execution_for_a_terminal_run_reruns_nothing(deployment: Deployment) -> None:

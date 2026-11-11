@@ -2,7 +2,9 @@
 """Turn budgets bounding each agent invocation.
 
 A :class:`TurnBudget` bounds one agent turn on three dimensions: tool calls, tokens, and wall-clock
-time. Two fixed caps exist: :data:`CHAT_BUDGET` (100 tool calls, 600 s) for chat turns and
+time. A fourth, ``request_prompt_limit``, is set when :meth:`TurnBudget.refuse_request` refuses a
+model request whose estimated prompt exceeds its tier's limit; the request is never sent and the
+turn ends as exhausted. Two fixed caps exist: :data:`CHAT_BUDGET` (100 tool calls, 600 s) for chat turns and
 :data:`EVAL_BUDGET` (25 tool calls, 120 s) for eval turns; build a budget from one with
 :meth:`TurnBudget.from_spec`. On exhaustion the caller emits
 :meth:`TurnBudget.exhausted_event`, a terminal ``error`` event with
@@ -52,7 +54,7 @@ EVAL_TURN_HARD_DEADLINE_SECONDS: Final[float] = (
 )
 
 #: Maximum combined input and output tokens permitted in one turn, chat or eval.
-DEFAULT_MAX_TOKENS: Final[int] = 200_000
+DEFAULT_MAX_TOKENS: Final[int] = 1_000_000
 
 _logger = logging.getLogger(__name__)
 
@@ -69,6 +71,27 @@ def _require_positive_caps(max_tool_calls: int, max_tokens: int, wall_clock: flo
         or wall_clock <= 0
     ):
         raise ValueError(f"max_wall_clock_seconds must be positive and finite, got {wall_clock!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class RequestRefusal:
+    """One model request refused before it was sent because its prompt was over the limit.
+
+    Attributes:
+        estimated_prompt_tokens: The request's estimated prompt tokens.
+        limit: The calling tier's per-request prompt-token limit.
+        tier: The calling tier (``supervisor``, ``subagent`` or ``tool``).
+        role: The agent role the request ran for.
+    """
+
+    estimated_prompt_tokens: int
+    limit: int
+    tier: str
+    role: str
+
+
+class RequestRefusedError(Exception):
+    """Raised at a model call site after :meth:`TurnBudget.refuse_request` refused its request."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +145,8 @@ class TurnBudget:
             via :meth:`note_call_without_usage`: a wait :func:`within_deadline` abandoned at the
             deadline, or a round the turn stopped mid-stream. The turn's recorded usage and cost
             are a lower bound whenever this is non-zero.
+        refused_request: The request :meth:`refuse_request` refused, or ``None``; once set, the
+            budget is exhausted on the ``request_prompt_limit`` dimension.
         started_at: The ``clock`` reading at construction, against which the deadline is measured.
     """
 
@@ -133,6 +158,7 @@ class TurnBudget:
     tokens_consumed: int = 0
     completed_actions: list[str] = field(default_factory=list)
     calls_without_usage: int = 0
+    refused_request: RequestRefusal | None = None
     started_at: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -202,6 +228,29 @@ class TurnBudget:
             )
         )
 
+    def refuse_request(
+        self, *, estimated_prompt_tokens: int, limit: int, tier: str, role: str
+    ) -> None:
+        """Record one model request refused for an estimated prompt above ``limit``, and log it.
+
+        The budget is exhausted from then on; the first refusal is the one reported.
+        """
+        if self.refused_request is None:
+            self.refused_request = RequestRefusal(
+                estimated_prompt_tokens=estimated_prompt_tokens, limit=limit, tier=tier, role=role
+            )
+        _logger.warning(
+            json.dumps(
+                {
+                    "event": "model_request_refused",
+                    "reason": (
+                        f"tier={tier} role={role} estimated_prompt_tokens="
+                        f"{estimated_prompt_tokens} limit={limit}"
+                    ),
+                }
+            )
+        )
+
     def remaining_seconds(self) -> float:
         """Return wall-clock seconds left before the cap; zero or negative once it has passed."""
         return self.max_wall_clock_seconds - self.elapsed_seconds()
@@ -215,13 +264,14 @@ class TurnBudget:
         return self.elapsed_seconds() >= self.max_wall_clock_seconds
 
     def is_exhausted(self) -> bool:
-        """Return whether any of the three dimensions has reached its ceiling.
+        """Return whether any dimension has reached its ceiling.
 
-        The dimensions are the tool-call count, the token count, and the wall-clock deadline. Any
-        one alone ends the turn.
+        The dimensions are the tool-call count, the token count, the wall-clock deadline, and a
+        refused request (:meth:`refuse_request`). Any one alone ends the turn.
         """
         return (
-            self.tool_calls_made >= self.max_tool_calls
+            self.refused_request is not None
+            or self.tool_calls_made >= self.max_tool_calls
             or self.tokens_consumed >= self.max_tokens
             or self.is_deadline_expired()
         )
@@ -230,8 +280,8 @@ class TurnBudget:
         """Return the names of every dimension currently at or past its ceiling.
 
         Returns:
-            Any of ``"tool_calls"``, ``"tokens"``, ``"wall_clock"``, in that fixed order. Empty
-            when the budget is not exhausted at all.
+            Any of ``"tool_calls"``, ``"tokens"``, ``"wall_clock"``, ``"request_prompt_limit"``,
+            in that fixed order. Empty when the budget is not exhausted at all.
         """
         dimensions: list[str] = []
         if self.tool_calls_made >= self.max_tool_calls:
@@ -240,14 +290,31 @@ class TurnBudget:
             dimensions.append("tokens")
         if self.is_deadline_expired():
             dimensions.append("wall_clock")
+        if self.refused_request is not None:
+            dimensions.append("request_prompt_limit")
         return tuple(dimensions)
+
+    def _dimension_labels(self) -> str:
+        """Render :meth:`exhausted_dimensions`, a refused request with its estimate and limit."""
+        labels: list[str] = []
+        for dimension in self.exhausted_dimensions():
+            refusal = self.refused_request
+            if dimension == "request_prompt_limit" and refusal is not None:
+                labels.append(
+                    f"request_prompt_limit: estimated {refusal.estimated_prompt_tokens} > "
+                    f"{refusal.limit} prompt tokens for one request on the {refusal.tier} tier"
+                )
+            else:
+                labels.append(dimension)
+        return ", ".join(labels)
 
     def exhausted_event(self) -> AgentEvent:
         """Build the terminal event reporting exhaustion and the partial work done so far.
 
         Returns:
             A terminal ``error`` event with ``error_kind="budget_exhausted"`` whose
-            ``error_message`` names which dimension ran out and how many model calls ended
+            ``error_message`` names which dimension ran out (a refused request with its estimate,
+            limit and tier) and how many model calls ended
             before reporting usage, and whose ``partial_work`` names every action
             recorded via :meth:`record_tool_call`, or states that none completed.
 
@@ -263,7 +330,7 @@ class TurnBudget:
         return budget_exhausted_event(
             partial_work=partial_work,
             error_message=(
-                f"Turn budget exhausted ({', '.join(self.exhausted_dimensions())}) after "
+                f"Turn budget exhausted ({self._dimension_labels()}) after "
                 f"{self.tool_calls_made} of {self.max_tool_calls} tool call(s), "
                 f"{self.tokens_consumed} of {self.max_tokens} token(s), and "
                 f"{self.elapsed_seconds():.1f}s of a {self.max_wall_clock_seconds:.0f}s cap."
@@ -377,6 +444,8 @@ __all__ = [
     "EVAL_TURN_HARD_MARGIN_SECONDS",
     "EVAL_WALL_CLOCK_SECONDS",
     "DeadlineReachedError",
+    "RequestRefusal",
+    "RequestRefusedError",
     "TurnBudget",
     "TurnBudgetSpec",
     "until_deadline",

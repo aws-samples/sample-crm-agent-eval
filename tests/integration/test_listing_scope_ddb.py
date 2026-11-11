@@ -110,7 +110,11 @@ def _event(
             "isBase64Encoded": False,
         }
     if channel == "agent":
-        return identity_event(AGENT_IDENTITY_KEY, {"claims": claims, "session_id": "s-1"}, args)
+        return identity_event(
+            AGENT_IDENTITY_KEY,
+            {"claims": claims, "principal_type": "user", "session_id": "s-1"},
+            args,
+        )
     payload = {
         "rep_id": _REP,
         "book": book,

@@ -18,7 +18,10 @@ The :class:`~agents.supervisor.TurnGuard` is consulted only between steps, so a 
 completes; every terminating path calls :meth:`~agents.supervisor.TurnGuard.note_terminal`. The
 turn's wall clock also bounds every model wait (:func:`agents.budget.until_deadline`) and is checked
 between subagent rounds, so a turn that runs out of time ends with the guard's ``budget_exhausted``
-event and the partial work, attribution and usage gathered so far. Tool calls go through the injected,
+event and the partial work, attribution and usage gathered so far. Before each model request, at
+every tier, :func:`agents.prompt_estimate.refuse_if_over_limit` checks its estimated prompt against
+that tier's :meth:`~providers.capabilities.CapabilityMatrix.request_prompt_limit`; a refused request
+is never sent and ends the turn with ``budget_exhausted``. Tool calls go through the injected,
 identity-bound ``dispatch`` callable (:data:`~agents.tool_actor.ToolDispatch`); this module builds
 no identity and makes no authorization decision.
 """
@@ -32,9 +35,10 @@ from typing import Any, Final
 
 from agents.agent_prompts import load_agent_prompts
 from agents.answer_style import answer_style_system_message
-from agents.budget import TurnBudget, TurnBudgetSpec, until_deadline
+from agents.budget import RequestRefusedError, TurnBudget, TurnBudgetSpec, until_deadline
 from agents.cancellation import CancellationStore
 from agents.events import AgentEvent, ResolvedTierInfo, budget_exhausted_event
+from agents.prompt_estimate import refuse_if_over_limit
 from agents.registry import RegisteredTool, tool_registry_for
 from agents.subagent_runner import SubagentRunResult, run_subagent_async
 from agents.subagents import SUBAGENT_SPECS_BY_ROLE
@@ -160,11 +164,14 @@ def _bind_tool_actor(
     resolved: ResolvedInvocation,
     dispatch: ToolDispatch,
     dispatch_clock: Callable[[], float] | None = None,
+    request_prompt_limit: int | None = None,
+    budget: TurnBudget | None = None,
 ) -> Callable[[RegisteredTool, str], Any]:
     """Pre-bind the tool-tier actor for one subagent role.
 
     ``dispatch_clock`` is a monotonic-seconds source used only to time each leaf's Lambda dispatch;
-    ``None`` records no dispatch latency.
+    ``None`` records no dispatch latency. ``request_prompt_limit`` and ``budget`` are passed to
+    :func:`agents.tool_actor.formulate_and_invoke`.
     """
 
     async def actor(tool: RegisteredTool, intent: str) -> ToolActorResult:
@@ -176,6 +183,8 @@ def _bind_tool_actor(
             resolved=resolved,
             dispatch=dispatch,
             clock=dispatch_clock,
+            request_prompt_limit=request_prompt_limit,
+            budget=budget,
         )
 
     return actor
@@ -350,6 +359,20 @@ async def drive_turn(
         completed_this_round = False
         round_usage_seen = False
 
+        try:
+            refuse_if_over_limit(
+                messages,
+                tool_schemas,
+                limit=matrix.request_prompt_limit(SUPERVISOR_TIER),
+                tier=SUPERVISOR_TIER,
+                role=SUPERVISOR_ROLE,
+                budget=turn_budget,
+            )
+        except RequestRefusedError:
+            guard.note_terminal()
+            yield turn_budget.exhausted_event()
+            return
+
         provider_events: AsyncIterator[ProviderEvent] = until_deadline(
             supervisor_provider.stream(resolved_supervisor, messages, tool_schemas),
             turn_budget,
@@ -436,6 +459,7 @@ async def drive_turn(
                         tool_input=tool_input,
                         fallback_intent=prompt,
                         providers=providers,
+                        matrix=matrix,
                         resolved=resolved,
                         dispatch=dispatch,
                         records=records,
@@ -525,6 +549,7 @@ async def _run_delegation(
     tool_input: dict[str, object],
     fallback_intent: str,
     providers: ProviderResolver,
+    matrix: CapabilityMatrix,
     resolved: Mapping[Tier, ResolvedInvocation],
     dispatch: ToolDispatch,
     records: TurnRecords,
@@ -549,6 +574,8 @@ async def _run_delegation(
         resolved=tool,
         dispatch=dispatch,
         dispatch_clock=dispatch_clock,
+        request_prompt_limit=matrix.request_prompt_limit(TOOL_TIER),
+        budget=budget,
     )
     result = await run_subagent_async(
         spec=SUBAGENT_SPECS_BY_ROLE[role],
@@ -557,6 +584,7 @@ async def _run_delegation(
         provider=providers(subagent.model.family),
         tool_actor=actor,
         budget=budget,
+        request_prompt_limit=matrix.request_prompt_limit(SUBAGENT_TIER),
     )
     records.invocations.extend(result.invocations)
     records.tool_calls.extend(result.tool_calls)

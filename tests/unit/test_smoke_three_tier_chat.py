@@ -359,6 +359,7 @@ def _priced_frame(tuning: Mapping[str, Any]) -> dict[str, Any]:
                 "cost_usd": 0.01,
                 "cache_read_tokens": 1024,
                 "cache_write_tokens": 0,
+                "long_context_calls": 0,
             }
             for tier, model in models.items()
         ],
@@ -511,6 +512,7 @@ def test_checks_happy_path_all_pass_and_both_users_cleaned_up() -> None:
     assert by_check["owner_session_reuse_control"] == "pass"
     assert by_check["foreign_session_reuse_refused"] == "pass"
     assert by_check["cost_lines_present"] == "pass"
+    assert by_check["cost_lines_carry_long_context_calls"] == "pass"
     assert by_check["cost_usd_positive"] == "pass"
     assert by_check["resolved_tiers_match_tuning"] == "pass"
     for tier, model in expected_tier_models(MIXED_FAMILIES).items():
@@ -520,7 +522,7 @@ def test_checks_happy_path_all_pass_and_both_users_cleaned_up() -> None:
     attribution_rows = {c: s for c, s in by_check.items() if c.endswith(ATTRIBUTION_ROW_SUFFIX)}
     families = select_attribution_mapping().families
     assert families is not None
-    assert len(attribution_rows) == 3 + 2 * len(families)
+    assert len(attribution_rows) == 4 + 2 * len(families)
     assert set(attribution_rows.values()) == {"pass"}
     assert by_check["stale_temperature_tuning_refused"] == "pass"
     assert by_check["model_backed_turns_within_envelope"] == "pass"
@@ -650,8 +652,14 @@ def test_a_priced_mixed_frame_passes_every_cost_row() -> None:
 @pytest.mark.parametrize(
     ("override", "red"),
     [
-        ({"cost_lines": []}, ["cost_lines_present", *_MODEL_ROWS]),
-        ({"cost_lines": None}, ["cost_lines_present", *_MODEL_ROWS]),
+        (
+            {"cost_lines": []},
+            ["cost_lines_present", "cost_lines_carry_long_context_calls", *_MODEL_ROWS],
+        ),
+        (
+            {"cost_lines": None},
+            ["cost_lines_present", "cost_lines_carry_long_context_calls", *_MODEL_ROWS],
+        ),
         ({"cost_usd": 0}, ["cost_usd_positive"]),
         ({"cost_usd": None, "cost_withheld": True}, ["cost_usd_positive"]),
         ({"cost_withheld": True}, ["cost_usd_positive"]),
@@ -678,6 +686,32 @@ def test_a_tier_priced_on_another_model_reds_only_its_model_row(tier: str) -> No
     model = expected_tier_models(MIXED_FAMILIES)[tier]
     failed = [check for check, status in _cost_rows(frame).items() if status == "fail"]
     assert failed == [f"{tier}_cost_line_names_{model}"]
+
+
+@pytest.mark.parametrize("value", [None, -1, True, "2", 1.0])
+def test_a_line_without_a_valid_long_context_count_reds_only_that_row(value: Any) -> None:
+    frame = _priced_frame(tuning_block(MIXED_FAMILIES))
+    frame["cost_lines"] = [
+        {**line, "long_context_calls": value} if line["tier"] == "tool" else line
+        for line in frame["cost_lines"]
+    ]
+    failed = [check for check, status in _cost_rows(frame).items() if status == "fail"]
+    assert failed == ["cost_lines_carry_long_context_calls"]
+
+
+def test_a_line_missing_the_long_context_key_reds_only_that_row() -> None:
+    frame = _priced_frame(tuning_block(MIXED_FAMILIES))
+    frame["cost_lines"] = [
+        {k: v for k, v in line.items() if k != "long_context_calls"} for line in frame["cost_lines"]
+    ]
+    failed = [check for check, status in _cost_rows(frame).items() if status == "fail"]
+    assert failed == ["cost_lines_carry_long_context_calls"]
+
+
+def test_a_positive_long_context_count_passes() -> None:
+    frame = _priced_frame(tuning_block(MIXED_FAMILIES))
+    frame["cost_lines"] = [{**line, "long_context_calls": 3} for line in frame["cost_lines"]]
+    assert _cost_rows(frame)["cost_lines_carry_long_context_calls"] == "pass"
 
 
 def test_an_unpriced_line_reds_its_model_row() -> None:

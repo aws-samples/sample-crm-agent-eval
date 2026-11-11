@@ -43,7 +43,11 @@ from eval.metrics import (
     require_records_attributed,
     tally_exclusions,
 )
-from eval.pricing import cache_min_checkpoint_tokens, is_cost_provisional
+from eval.pricing import (
+    cache_min_checkpoint_tokens,
+    inference_profile_for,
+    is_cost_provisional,
+)
 from providers.capabilities import load_capability_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +84,7 @@ def _record(model_id: str, invocation_id: str, **usage_kwargs: int) -> UsageReco
         family="anthropic",
         tier="subagent",
         usage=usage,
+        inference_profile=inference_profile_for(model_id),
         cache_min_checkpoint_tokens=cache_min_checkpoint_tokens(model_id),
     )
 
@@ -679,3 +684,93 @@ def test_build_tier_report_fields_emits_empty_lists_when_nothing_aggregated() ->
     assert report[TIER_ROLE_MODEL_REPORT_KEY] == []
     assert report[TOOL_METRICS_REPORT_KEY] == []
     assert report[TASK_SPREAD_REPORT_KEY] == []
+
+
+# --- Per-call pricing and long-context counts ------------------------------------------------
+
+
+def test_inference_profile_for_reads_the_configured_profile() -> None:
+    """Every capability-matrix model resolves to the inference profile its entry declares."""
+    for model_id, model in _MATRIX.models.items():
+        assert inference_profile_for(model_id) == model.inference_profile
+
+
+def test_inference_profile_for_refuses_an_unconfigured_model(tmp_path: Path) -> None:
+    """An absent model or an entry without a profile raises rather than defaulting to global."""
+    with pytest.raises(ValueError, match="no configured inference_profile"):
+        inference_profile_for("anthropic.claude-unknown")
+    path = tmp_path / "model_capabilities.yaml"
+    path.write_text(f"models:\n  {HAIKU}:\n    family: anthropic\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="no configured inference_profile"):
+        inference_profile_for(HAIKU, capabilities_path=path)
+
+
+def test_tier_role_model_prices_each_call_and_counts_long_context_calls() -> None:
+    """Five 30K Haiku calls and one 120K call: one long-context call, priced per call."""
+    attributions = [_attribution("tool", "research", HAIKU, input_tokens=30_000)] * 5 + [
+        _attribution("tool", "research", HAIKU, input_tokens=120_000)
+    ]
+    (row,) = aggregate_tier_role_model(attributions, withhold_cost=False)
+    assert row.long_context_invocation_count == 1
+    assert row.to_report_fields()["long_context_invocation_count"] == 1
+    assert row.cost is not None
+    standard_input = 5 * 30_000 / 1_000_000 * 0.10
+    long_input = 120_000 / 1_000_000 * 0.50
+    assert row.cost.input == pytest.approx(standard_input + long_input)
+    assert row.cost.output == pytest.approx(5 * 50 / 1e6 * 0.50 + 50 / 1e6 * 2.50)
+
+
+def test_tier_role_model_counts_long_context_calls_even_when_cost_is_withheld() -> None:
+    """The long-context count is not a currency figure, so withholding cost keeps it."""
+    (row,) = aggregate_tier_role_model(
+        [_attribution("tool", "research", HAIKU, input_tokens=100_001)], withhold_cost=True
+    )
+    assert row.cost is None
+    assert row.long_context_invocation_count == 1
+
+
+def test_a_call_exactly_at_the_threshold_is_not_counted_long_context() -> None:
+    """A prompt of exactly the threshold is standard and does not move the count."""
+    (row,) = aggregate_tier_role_model(
+        [_attribution("tool", "research", HAIKU, input_tokens=100_000)], withhold_cost=False
+    )
+    assert row.long_context_invocation_count == 0
+
+
+def test_model_metrics_count_included_records_priced_long_context() -> None:
+    """The arm model metrics count included records whose cost tier is long-context."""
+    included = [
+        _record(HAIKU, "inv-1", input_tokens=30_000),
+        _record(HAIKU, "inv-2", input_tokens=120_000),
+        _record(HAIKU, "inv-3", input_tokens=99_000, cache_read_tokens=2_000),
+    ]
+    metrics = aggregate_model_metrics(HAIKU, included, [], withhold_cost=False)
+    assert metrics.long_context_invocation_count == 2
+    assert metrics.to_report_fields()["long_context_invocation_count"] == 2
+
+
+def test_aggregate_tier_role_model_without_profiles_matches_the_configured_profiles() -> None:
+    """Omitting ``inference_profiles`` prices exactly as passing each model's configured one."""
+    attributions = [_attribution("supervisor", "supervisor", "anthropic.claude-sonnet-5-5")]
+    configured = {"anthropic.claude-sonnet-5-5": "global.anthropic.claude-sonnet-5-5"}
+    assert aggregate_tier_role_model(attributions, withhold_cost=False) == (
+        aggregate_tier_role_model(attributions, withhold_cost=False, inference_profiles=configured)
+    )
+
+
+def test_aggregate_tier_role_model_prices_under_an_injected_profiles_route() -> None:
+    """An injected geo profile applies the geo route multiplier instead of the configured one."""
+    model_id = "anthropic.claude-sonnet-5-5"
+    attributions = [_attribution("supervisor", "supervisor", model_id)]
+    (global_row,) = aggregate_tier_role_model(attributions, withhold_cost=False)
+    (geo_row,) = aggregate_tier_role_model(
+        attributions, withhold_cost=False, inference_profiles={model_id: f"us.{model_id}"}
+    )
+    assert global_row.cost is not None and geo_row.cost is not None
+    assert geo_row.cost.total == pytest.approx(global_row.cost.total * 1.10)
+
+
+def test_aggregate_tier_role_model_refuses_a_profile_map_missing_a_priced_model() -> None:
+    attributions = [_attribution("supervisor", "supervisor", "anthropic.claude-sonnet-5-5")]
+    with pytest.raises(KeyError):
+        aggregate_tier_role_model(attributions, withhold_cost=False, inference_profiles={})

@@ -14,6 +14,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from agents.turn_driver import supervisor_system_message
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval.harness import (
@@ -27,6 +28,32 @@ from eval.harness import (
 )
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation, Tuning
 from providers.capabilities import load_capability_matrix
+from providers.stub import StubProvider
+
+
+class _SupervisorRoundCounter(ModelProvider):
+    """Wraps a provider and counts the ``stream`` calls that open with the supervisor prompt.
+
+    Only supervisor-tier requests start with :func:`agents.turn_driver.supervisor_system_message`,
+    so this counts supervisor rounds at the provider seam, independently of attribution.
+    """
+
+    def __init__(self, wrapped: ModelProvider) -> None:
+        self._wrapped = wrapped
+        self._supervisor_message = supervisor_system_message()
+        self.supervisor_rounds = 0
+        self.call_count = 0
+
+    def stream(
+        self,
+        invocation: ResolvedInvocation,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ProviderEvent]:
+        self.call_count += 1
+        if messages and messages[0] == self._supervisor_message:
+            self.supervisor_rounds += 1
+        return self._wrapped.stream(invocation, messages, tools)
 
 
 @pytest.fixture
@@ -56,12 +83,19 @@ def _inject_noop_seeder(monkeypatch: pytest.MonkeyPatch) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_a_stub_sweep_records_a_non_zero_included_invocation_count(store: Store) -> None:
-    """A stub sweep records a non-zero `included_invocation_count`."""
+def test_a_stub_sweep_records_a_non_zero_included_invocation_count(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stub sweep records one included invocation per supervisor round, at least one per task.
+
+    The supervisor rounds are counted at the provider seam, independently of attribution.
+    """
+    counter = _SupervisorRoundCounter(StubProvider())
+    monkeypatch.setattr("eval.harness._build_provider", lambda _mode, **_kwargs: counter)
     result = run_sweep(store=store, arm_specs=(ArmSpec(family="anthropic", effort="low"),))
     (arm_run,) = result.arm_runs
-    assert arm_run.model_metrics.included_invocation_count > 0
-    assert arm_run.model_metrics.included_invocation_count == len(arm_run.task_scores)
+    assert counter.supervisor_rounds >= len(arm_run.task_scores) > 0
+    assert arm_run.model_metrics.included_invocation_count == counter.supervisor_rounds
 
 
 def test_default_sweep_both_arms_record_a_non_zero_included_invocation_count(store: Store) -> None:

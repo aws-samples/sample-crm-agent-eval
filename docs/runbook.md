@@ -576,7 +576,7 @@ make verify-deploy VERIFY_DEPLOY_ARGS="--layer 4 --i-understand-this-is-billable
 | `--i-understand-this-is-billable` | required for a live run; without it (or `--dry-run`) the script exits 2 before any AWS call |
 | `--dry-run` | print each module's exact command line; no AWS call, no tenant |
 | `--layer 4\|5\|6\|inventory` | run one layer only, or consolidate (see below). `--layer 4`, `5` or `6` is **PARTIAL**, exactly as `--only` is, with `"partial_selector": "--layer N"` in the per-run inventory |
-| `--only MOD[,MOD...]` | run only the named modules (short `iam_roles` or full `scripts.smoke.iam_roles`; repeatable), in layer order. An unknown name exits 2 before any AWS call. With `--layer N` every name must be in layer N; not allowed with `--layer inventory`. The run is **PARTIAL**: the summary says so, and `verification-inventory.run.json` becomes `{"partial": true, "partial_selector", "selected_modules", "not_run_modules", "results"}` instead of the full run's array. A partial run is never a full-deployment pass |
+| `--only MOD[,MOD...]` | run only the named modules (short `iam_roles` or full `scripts.smoke.iam_roles`; repeatable), in layer order. An unknown name exits 2 before any AWS call. With `--layer N` every name must be in layer N; not allowed with `--layer inventory`. The run is **PARTIAL**: the summary says so, and its inventory goes to `verification-inventory.partial.run.json` as `{"partial": true, "partial_selector", "selected_modules", "not_run_modules", "results"}`, never to the full run's `verification-inventory.run.json`. A partial run is never a full-deployment pass |
 | `--profile`, `--region` | target; flag, then `AWS_PROFILE`/`AWS_REGION`, then `default`/`us-east-1` |
 | `--outputs PATH` | Terraform outputs document (default `results/tf-outputs.json`) |
 | `--token JWT` | bearer token for authenticated checks (also `CRM_SMOKE_TOKEN`); never passed to the Gateway modules, which mint their own machine token. A token 45 minutes old (`VERIFY_SMOKE_TOKEN_MAX_AGE_SECONDS`, default 2700) is replaced by a freshly minted one before the next token-taking module, and the previous minted user is removed |
@@ -599,7 +599,10 @@ What a live run does:
   that output is empty, so set the variable to the `--secret-out` file before running
   `gateway_tools`, `integration_gateway_scope` or `mcp_chat_gateway`;
 - tears down the tenant and the smoke user on exit, failure or interrupt;
-- writes a per-run rendering to `results/verification-inventory.run.{json,md}`.
+- writes a per-run rendering: a full run to `results/verification-inventory.run.{json,md}`, a PARTIAL
+  run (`--only` or `--layer 4|5|6`) to `results/verification-inventory.partial.run.{json,md}`. A
+  partial run never touches the full-run files, so the last full run's rendering survives targeted
+  smoke.
 
 Exit codes: `0` every check reported `pass`, `skip` or `defer`; `1` a layer or the teardown failed;
 `2` a usage or environment error. A `defer` is a disclosed control that is not verified, carrying a
@@ -813,7 +816,8 @@ bash scripts/verify_deployment.sh --layer inventory --i-understand-this-is-billa
   --profile default --region <region>
 ```
 
-The layer runs write only the per-run `results/verification-inventory.run.*` files. The consolidator
+The layer runs write only the per-run `results/verification-inventory.run.*` (full) or
+`results/verification-inventory.partial.run.*` (PARTIAL) files. The consolidator
 reads only per-class artifacts and has no list of classes it expects, so a class with no file there is
 silently absent. Write each class's `--json` output to `results/verification-inventory/<class>.json`,
 and confirm the file count before publishing:
@@ -1246,7 +1250,7 @@ it later. Exit 0 means every resource is absent or pending deletion. A later dep
 | `cloudfront` reports TLS minimum as `defer` | `minimum_protocol_version` has no effect on the default `cloudfront.net` certificate; TLS 1.2 is not enforced without a custom ACM certificate |
 | `/agent/*` returns 401 | the relay rejected the Cognito token: it expired, or it was issued for a client the relay does not allow |
 | Gateway `tools/call` requests return JSON-RPC error `-32001`, logged as `gateway_auth_denied` with reason `PyJWKClientError`, for up to 30 s after a Cognito signing-key rotation | the Gateway interceptor (`src/gateway/identity_interceptor.py`, PyJWT 2.15 `PyJWKClient`) re-fetches the JWKS on an unknown `kid` at most once per 30 s cooldown, measured from its last fetch. Retry after the cooldown; a miss that persists means the `kid` is not in the pool's JWKS |
-| Gateway requests return JSON-RPC error `-32001`, logged as `gateway_auth_denied` with reason `body_not_an_object`, `params_not_an_object` or `unexpected_error:<ExceptionType>` | the identity interceptor (`src/gateway/identity_interceptor.py`) refuses malformed requests and fails closed. `body_not_an_object`: the JSON-RPC body is not a JSON object (an array or a scalar, for example). `params_not_an_object`: a method other than `tools/list` sent `params` that is not an object. Fix the client to send one JSON-RPC request object with object `params`. `unexpected_error:<ExceptionType>` (logged at warning): the interceptor raised while handling the request, for example on a configuration error. No traceback is logged. Read the exception type, then check the interceptor's environment and its recent deploy. None of these reach a Lambda target |
+| Gateway requests return JSON-RPC error `-32001`, logged as `gateway_auth_denied` with reason `body_not_an_object`, `params_not_an_object` or `unexpected_error:<ExceptionType>` | the identity interceptor (`src/gateway/identity_interceptor.py`) refuses malformed requests and fails closed. `body_not_an_object`: the JSON-RPC body is not a JSON object (an array or a scalar, for example). `params_not_an_object`: a method other than `tools/list` sent `params` that is not an object. Fix the client to send one JSON-RPC request object with object `params`. `unexpected_error:<ExceptionType>`: the interceptor raised while handling the request, for example on a configuration error. No traceback is logged. Read the exception type, then check the interceptor's environment and its recent deploy. None of these reach a Lambda target. Every `gateway_auth_denied` reason, and every `gateway_service_identity_*` refusal, is logged at WARNING; a verified request (`gateway_auth_verified`) is logged at INFO |
 | A direct `InvokeAgentRuntime` call fails with `AccessDeniedException` | the Runtime uses IAM (SigV4) inbound auth. Its resource policies allow only the relay's, `sweep_task`'s and `chat_target`'s execution roles and explicitly deny the data-plane actions to every other principal, including same-account admins; call it through the relay |
 | `pip install -e .` fails with `requires a different Python` | the venv was built with a host `python3` that is not the `.python-version` pin; rebuild it as in "Prerequisites" |
 | `bootstrap_state_backend.sh` refuses `CRM_EXPECTED_ACCOUNT_ID ... is required` or `WRONG ACCOUNT` | set `CRM_EXPECTED_ACCOUNT_ID` (or `--expected-account-id`) to the account the backend belongs in, and pass the profile that resolves to it |
@@ -1592,6 +1596,13 @@ to the whole `module.lambda_action` would make the key depend on the functions i
 `tests/unit/test_infra_root_wiring.py` fails when the list and `local.tools` differ.
 
 ### Changing operators
+
+Changing `crm_operator_principal_arns` is always two steps, because only a principal in the
+**deployed** list can apply the change. The plan-time precondition checks the caller against the list
+in the plan being run, so a new operator who adds only their own ARN passes it. The apply is then
+refused: the deployed state-store and key policies, the API allowlist key's included, deny
+administration to every principal outside the deployed list, and the policy updates fail with an
+explicit deny. A new operator acting alone is therefore refused loudly.
 
 1. Add the new ARN to `crm_operator_principal_arns` and apply as the **old** operator, which is still
    listed.

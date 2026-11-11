@@ -311,14 +311,17 @@ def test_the_managed_security_headers_are_kept(plan: Plan) -> None:
         "referrer_policy": "strict-origin-when-cross-origin",
         "override": True,
     }
-    assert _only(config, "strict_transport_security") == {
-        "access_control_max_age_sec": 31536000,
-        "include_subdomains": False,
-        "preload": False,
-        "override": True,
-    }
     xss = _only(config, "xss_protection")
     assert (xss["protection"], xss["mode_block"], xss["override"]) == (True, True, True)
+
+
+def test_hsts_is_one_year_with_include_subdomains_and_preload(plan: Plan) -> None:
+    assert _only(_headers_config(plan), "strict_transport_security") == {
+        "access_control_max_age_sec": 31536000,
+        "include_subdomains": True,
+        "preload": True,
+        "override": True,
+    }
 
 
 def test_the_policy_adds_no_cors_or_custom_headers(plan: Plan) -> None:

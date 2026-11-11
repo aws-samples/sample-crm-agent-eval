@@ -339,7 +339,7 @@ def is_timeout(exc: BaseException) -> bool:
         if type(current).__name__ in _TIMEOUT_EXCEPTION_NAMES:
             return True
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return False
 
 

@@ -59,7 +59,11 @@ def _agent_event(claims: dict[str, str], **arguments: Any) -> dict[str, Any]:
     """A flat direct-invoke event on the `agent` identity channel, built by
     `crm.envelope.identity_event`.
     """
-    return identity_event(AGENT_IDENTITY_KEY, {"claims": claims, "session_id": "sess-1"}, arguments)
+    return identity_event(
+        AGENT_IDENTITY_KEY,
+        {"claims": claims, "session_id": "sess-1", "principal_type": "user"},
+        arguments,
+    )
 
 
 # -- live mode is unreachable ---------------------------------------------------------------------
@@ -181,6 +185,7 @@ def test_a_caller_supplied_identity_in_the_body_cannot_escalate(store: Store) ->
         "_agent_identity": {
             "claims": {CLAIM_REP_ID: "rep-brixton", CLAIM_TENANT: "demo"},
             "session_id": "s",
+            "principal_type": "user",
         },
         "_identity": {
             CLAIM_REP_ID: "rep-attacker",

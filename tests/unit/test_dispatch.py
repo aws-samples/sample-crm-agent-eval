@@ -262,7 +262,11 @@ def test_a_timed_out_delegated_tool_call_classifies_as_tool_failure(
             "mode": "delegation",
             "tool_name": "get_account",
             "tool_input": {"account_id": "acc-1"},
-            AGENT_IDENTITY_KEY: {"claims": dict(_CLAIMS), "session_id": "sess-timeout"},
+            AGENT_IDENTITY_KEY: {
+                "claims": dict(_CLAIMS),
+                "session_id": "sess-timeout",
+                "principal_type": "user",
+            },
         },
     )
     assert response.status_code == 200
@@ -318,7 +322,11 @@ def test_a_timed_out_tool_call_in_a_chat_turn_is_a_tool_result_error_not_a_model
         json={
             "prompt": "How is Acme?",
             "session_id": "sess-timeout-chat",
-            AGENT_IDENTITY_KEY: {"claims": dict(_CLAIMS), "session_id": "sess-timeout-chat"},
+            AGENT_IDENTITY_KEY: {
+                "claims": dict(_CLAIMS),
+                "session_id": "sess-timeout-chat",
+                "principal_type": "user",
+            },
         },
     ) as response:
         assert response.status_code == 200

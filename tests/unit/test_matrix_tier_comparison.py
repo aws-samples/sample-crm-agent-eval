@@ -58,6 +58,7 @@ _ENTRY_KEYS = [
     "completed_task_latency_ms_p95",
     "latency_sample_count",
     "invocation_count",
+    "long_context_invocation_count",
     "input_tokens",
     "output_tokens",
     "retry_count",
@@ -73,6 +74,7 @@ _ROW_LABELS = [
     "P95 latency per completed task (ms)",
     "P50 latency per completed task (ms)",
     "Model invocations",
+    "Long-context invocations",
     "Input tokens",
     "Output tokens",
     "Cost per task, all tasks",
@@ -583,6 +585,7 @@ def _expected_summary_columns() -> list[str]:
         "completed_task_latency_ms_p95",
         "latency_sample_count",
         "invocation_count",
+        "long_context_invocation_count",
         "input_tokens",
         "output_tokens",
     ]
@@ -772,10 +775,10 @@ def test_a_pre_spec_archive_renders_the_retry_row_as_dashes() -> None:
 #: sha256 of each fixture's ``## Tier comparison summary`` block as rendered before the display
 #: table was extracted; the Markdown must stay byte-identical.
 _SUMMARY_BLOCK_SHA256 = {
-    "three_arm": "5af7d03b8ddbf603dabb48636889a8eea663aabb57820782f4ee4b27ebc0d3b1",
-    "single_anthropic": "bffeca592f98807ecc8fee4d8779b1a6d744d1feb864a8c5c7c9e3665e07b883",
-    "single_openai_stub": "e3e915c624ad656c7981066c5aab02364c828648ed12b8e4b44268f53148b08f",
-    "legacy": "a1c515b7ba2506b83344a363149992b798f9e06da7bd06ee4fe2ad4379398c61",
+    "three_arm": "7b8e1b5660043e6a80f6a2872ab5515d0f97618d4ab48fa0ac04848ea021b243",
+    "single_anthropic": "e2e15c22b74b69b68645197b5b3df48f057f8173dea7b1334775b99d4399fb7c",
+    "single_openai_stub": "49e873b4c6f086c526a30e08cd97c5602deaaf2330d7c3fbde323cd14a726c96",
+    "legacy": "d3b5445014b8fabf050577255414115161ec7532d9d94b79d714a7dc52e23759",
 }
 
 
@@ -922,3 +925,110 @@ def test_a_malformed_summary_is_refused(mutate: Callable[[dict[str, Any]], objec
     mutate(summary)
     with pytest.raises(ValueError, match="tier comparison summary"):
         matrix.tier_comparison_table(summary)
+
+
+# ---------------------------------------------------------------------------------------------
+# Long-context invocation counts
+# ---------------------------------------------------------------------------------------------
+
+
+def _counted_arm(counts: tuple[int, int, int]) -> ArmResult:
+    """The anthropic arm with a long-context count recorded at each tier."""
+    arm = _anthropic_arm()
+    summary: dict[str, object] = {
+        tier: {
+            **cast(dict[str, object], arm.tier_summary_fields[tier]),
+            "long_context_invocation_count": n,
+        }
+        for tier, n in zip(("supervisor", "subagent", "tool"), counts, strict=True)
+    }
+    rows = tuple({**row, "long_context_invocation_count": 0} for row in arm.tier_role_model_fields)
+    return dataclasses.replace(
+        arm,
+        tier_summary_fields=summary,
+        tier_role_model_fields=rows,
+        model_metrics_fields={**arm.model_metrics_fields, "long_context_invocation_count": 0},
+    )
+
+
+def test_the_entry_carries_the_tiers_long_context_count_or_none_when_unrecorded() -> None:
+    summary = tier_comparison(build_matrix_result([_counted_arm((0, 2, 1)), _openai_arm()]))
+    assert [
+        _entry(summary, tier, 0)["long_context_invocation_count"]
+        for tier in ("supervisor", "subagent", "tool")
+    ] == [0, 2, 1]
+    assert _entry(summary, "tool", 1)["long_context_invocation_count"] is None
+
+
+def test_the_long_context_row_renders_counts_and_a_dash_for_an_older_record() -> None:
+    matrix_result = build_matrix_result([_counted_arm((0, 2, 1)), _openai_arm()])
+    table = _table(matrix_result)
+    assert _section_rows(table, "supervisor")["Long-context invocations"] == ["0", "—"]
+    assert _section_rows(table, "subagent")["Long-context invocations"] == ["2", "—"]
+    assert _section_rows(table, "tool")["Long-context invocations"] == ["1", "—"]
+    markdown = render_markdown(matrix_result)
+    assert _md_table_rows(markdown, "Subagent")["Long-context invocations"] == ["2", "—"]
+
+
+def test_a_json_round_tripped_record_without_the_key_renders_a_dash_not_zero() -> None:
+    summary = json.loads(render_json(build_matrix_result([_anthropic_arm()])))["tier_comparison"]
+    for tier in ("supervisor", "subagent", "tool"):
+        del summary["tiers"][tier][0]["long_context_invocation_count"]
+    table = matrix.tier_comparison_table(summary)
+    for tier in ("supervisor", "subagent", "tool"):
+        assert _section_rows(table, tier)["Long-context invocations"] == ["—"]
+
+
+def test_csv_carries_the_long_context_count_per_tier_in_both_column_families() -> None:
+    rows = _csv_rows(build_matrix_result([_counted_arm((0, 2, 1)), _openai_arm()]))
+    first, withheld = rows[0], rows[5]
+    assert [
+        first[f"summary_{t}_long_context_invocation_count"]
+        for t in ("supervisor", "subagent", "tool")
+    ] == ["0", "2", "1"]
+    assert [
+        first[f"tier_{t}_long_context_invocation_count"] for t in ("supervisor", "subagent", "tool")
+    ] == ["0", "2", "1"]
+    assert withheld["summary_tool_long_context_invocation_count"] == ""
+    assert withheld["tier_tool_long_context_invocation_count"] == ""
+
+
+def test_json_and_markdown_carry_the_count_per_row_and_per_arm() -> None:
+    matrix_result = build_matrix_result([_counted_arm((0, 2, 1))])
+    arm = json.loads(render_json(matrix_result))["arms"][0]
+    assert all(row["long_context_invocation_count"] == 0 for row in arm["tier_role_model_metrics"])
+    assert arm["model_metrics"]["long_context_invocation_count"] == 0
+    assert arm["tier_summary"]["subagent"]["long_context_invocation_count"] == 2
+    assert "long_context_invocation_count" in matrix._TIER_ROLE_MODEL_FIELDS
+    assert "long_context_invocation_count" in matrix._MODEL_METRICS_FIELDS
+
+
+def test_the_long_context_boundary_is_published_in_json_and_markdown_alike() -> None:
+    matrix_result = build_matrix_result([_anthropic_arm()])
+    note = matrix.render_figure_semantics(matrix_result)["long_context_invocation_count"]
+    assert isinstance(note, str) and "long-context threshold" in note
+    assert f"- `long_context_invocation_count` — {note}" in render_markdown(matrix_result)
+    definitions = cast(list[str], tier_comparison(matrix_result)["notes"])[0]
+    assert "Long-context invocations counts" in definitions
+
+
+def test_the_run_payload_tier_table_passes_the_count_through_and_dashes_an_older_record() -> None:
+    """The eval-runs payload table shows a recorded count and `—` for a stored row without it."""
+    from eval.runs import _payload_tier_table
+
+    report = json.loads(render_json(build_matrix_result([_counted_arm((0, 2, 1))])))
+    table = _payload_tier_table("run-1", report)
+    assert table is not None
+    assert [
+        _section_rows(table, t)["Long-context invocations"]
+        for t in ("supervisor", "subagent", "tool")
+    ] == [["0"], ["2"], ["1"]]
+
+    for tier in ("supervisor", "subagent", "tool"):
+        del report["tier_comparison"]["tiers"][tier][0]["long_context_invocation_count"]
+    older = _payload_tier_table("run-2", report)
+    assert older is not None
+    assert [
+        _section_rows(older, t)["Long-context invocations"]
+        for t in ("supervisor", "subagent", "tool")
+    ] == [["—"], ["—"], ["—"]]

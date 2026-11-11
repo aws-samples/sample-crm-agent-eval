@@ -583,10 +583,6 @@ export function EvalArmResults({ arm, tasksFailed = 0 }: EvalArmResultsProps): J
             }
           />
         ) : null}
-        <Metric
-          label="Included invocations"
-          value={formatCount(modelMetrics.included_invocation_count)}
-        />
         <Metric label="Mean correctness" value={formatCorrectness(aggregate.mean_correctness)} />
         <Metric
           label="Scored / unscored tasks"
@@ -595,75 +591,132 @@ export function EvalArmResults({ arm, tasksFailed = 0 }: EvalArmResultsProps): J
           )}`}
         />
         <Metric label="Bad-write rate" value={formatRate(aggregate.bad_write_rate)} />
+      </dl>
 
-        {/* Prompt-cache attribution. Checkpoint minimums differ by model, so an identical system
-            prompt can cache on one arm and not another; the threshold and the cache token counts sit
-            beside the two cost fields. */}
-        <Metric
-          label="Prompt-cache checkpoint minimum"
-          value={cacheThreshold.text}
-          measured={cacheThreshold.measured}
-          note={
+      {/* `model_metrics` counts the supervisor tier's calls only; the all-tier arm figures follow
+          this group. */}
+      <section
+        aria-labelledby={`supervisor-heading-${armKey}`}
+        data-testid={`supervisor-metrics-${armKey}`}
+        className="border-t-hairline border-border-subtle"
+      >
+        <h4
+          id={`supervisor-heading-${armKey}`}
+          className="px-6 pt-5 font-sans text-sm font-semibold leading-snug text-text-primary"
+        >
+          Supervisor tier
+        </h4>
+        <p className="max-w-prose px-6 pt-2 font-sans text-2xs leading-normal text-text-secondary">
+          These figures count the supervisor&rsquo;s own model calls. Subagent and tool calls are
+          in the tier comparison, and in the all-tier figures below when the run reports them.
+        </p>
+        <dl className="grid items-start gap-5 p-6 md:grid-cols-2">
+          <Metric
+            label="Included invocations"
+            value={formatCount(modelMetrics.included_invocation_count)}
+          />
+
+          {/* Prompt-cache attribution. Checkpoint minimums differ by model, so an identical system
+              prompt can cache on one arm and not another; the threshold and the cache token counts sit
+              beside the two cost fields. */}
+          <Metric
+            label="Prompt-cache checkpoint minimum"
+            value={cacheThreshold.text}
+            measured={cacheThreshold.measured}
+            note={
+              <>
+                This model&rsquo;s own minimum. An identical prompt can reach a checkpoint on one arm
+                and not on another, so a cost difference can be cache-driven rather than model-driven.
+              </>
+            }
+          />
+          <Metric label="Cache read tokens" value={formatTokens(modelMetrics.cache_read_tokens)} />
+          <Metric label="Cache write tokens" value={formatTokens(modelMetrics.cache_write_tokens)} />
+
+          {/* Cost is rendered in three states, keyed on the backend's `cost_withheld_provisional`
+              flag:
+              - `true`  → withheld disclosure, no figure (price table provisional).
+              - `false` → the two cost fields the backend emits, cache-attributable apart from
+                          excluding-cache, never summed.
+              - absent  → "not displayed": no figure is shown. */}
+          {costWithheld ? (
             <>
-              This model&rsquo;s own minimum. An identical prompt can reach a checkpoint on one arm
-              and not on another, so a cost difference can be cache-driven rather than model-driven.
+              <Metric label="Cost, cache-attributable" value={WITHHELD_PROVISIONAL} measured={false} />
+              <Metric
+                label="Cost, excluding cache"
+                value="withheld too, and reported apart — the two are never summed into one figure here"
+                measured={false}
+              />
             </>
-          }
-        />
-        <Metric label="Cache read tokens" value={formatTokens(modelMetrics.cache_read_tokens)} />
-        <Metric label="Cache write tokens" value={formatTokens(modelMetrics.cache_write_tokens)} />
-
-        {/* Cost is rendered in three states, keyed on the backend's `cost_withheld_provisional`
-            flag:
-            - `true`  → withheld disclosure, no figure (price table provisional).
-            - `false` → the two cost fields the backend emits, cache-attributable apart from
-                        excluding-cache, never summed.
-            - absent  → "not displayed": no figure is shown. */}
-        {costWithheld ? (
-          <>
-            <Metric label="Cost, cache-attributable" value={WITHHELD_PROVISIONAL} measured={false} />
+          ) : costShown ? (
+            <>
+              {(() => {
+                const cache = formatCostField(modelMetrics.cost_cache_total);
+                const excluding = formatCostField(modelMetrics.cost_excluding_cache);
+                return (
+                  <>
+                    <Metric
+                      label="Cost, cache-attributable"
+                      value={cache.text}
+                      measured={cache.measured}
+                      note={
+                        <>
+                          Cache-attributable spend, shown apart from the cost excluding cache beside it.
+                          The two are never summed into one figure — a cost gap that tracks cache
+                          eligibility is not a gap between the models.
+                        </>
+                      }
+                    />
+                    <Metric
+                      label="Cost, excluding cache"
+                      value={excluding.text}
+                      measured={excluding.measured}
+                    />
+                  </>
+                );
+              })()}
+            </>
+          ) : (
             <Metric
-              label="Cost, excluding cache"
-              value="withheld too, and reported apart — the two are never summed into one figure here"
+              label="Cost"
+              value="not displayed — this run record does not mark cost as withheld, and this page shows no figure it cannot confirm is publishable"
               measured={false}
+              span
             />
-          </>
+          )}
+
+        </dl>
+      </section>
+
+      <dl className="grid items-start gap-5 border-t-hairline border-border-subtle p-6 md:grid-cols-2">
+        {/* All-tier arm figures, present only on a run recorded after they were published. */}
+        {arm.arm_cost_total === undefined ? null : costWithheld ? (
+          <Metric label="Arm cost, all tiers" value={WITHHELD_PROVISIONAL} measured={false} />
         ) : costShown ? (
-          <>
-            {(() => {
-              const cache = formatCostField(modelMetrics.cost_cache_total);
-              const excluding = formatCostField(modelMetrics.cost_excluding_cache);
-              return (
-                <>
-                  <Metric
-                    label="Cost, cache-attributable"
-                    value={cache.text}
-                    measured={cache.measured}
-                    note={
-                      <>
-                        Cache-attributable spend, shown apart from the cost excluding cache beside it.
-                        The two are never summed into one figure — a cost gap that tracks cache
-                        eligibility is not a gap between the models.
-                      </>
-                    }
-                  />
-                  <Metric
-                    label="Cost, excluding cache"
-                    value={excluding.text}
-                    measured={excluding.measured}
-                  />
-                </>
-              );
-            })()}
-          </>
+          (() => {
+            const total = formatCostField(arm.arm_cost_total);
+            return (
+              <Metric
+                label="Arm cost, all tiers"
+                value={total.text}
+                measured={total.measured}
+                note={<>Every tier&rsquo;s model calls: supervisor, subagent and tool.</>}
+              />
+            );
+          })()
         ) : (
           <Metric
-            label="Cost"
-            value="not displayed — this run record does not mark cost as withheld, and this page shows no figure it cannot confirm is publishable"
+            label="Arm cost, all tiers"
+            value="not displayed — this run record does not mark cost as withheld"
             measured={false}
-            span
           />
         )}
+        {typeof arm.arm_long_context_invocation_count === "number" ? (
+          <Metric
+            label="Long-context invocations, all tiers"
+            value={formatCount(arm.arm_long_context_invocation_count)}
+          />
+        ) : null}
 
         {/* Cost-completeness disclosures, worded as matrix.md words them. */}
         {lowerBoundNote !== undefined ? (

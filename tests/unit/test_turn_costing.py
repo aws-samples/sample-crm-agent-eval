@@ -3,21 +3,29 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
 
 import pytest
+import yaml
 
 from agents.events import CostLine
 from agents.tier_attribution import CacheCounts, InvocationAttribution, TokenCounts
 from agents.turn_costing import DEFAULT_PRICING_PATH, cost_lines, is_cost_withheld, turn_cost
+from crm.inference_route import UnknownInferenceRoute
 from crm.metering import TokenUsage, cost_for_usage
-from providers.capabilities import load_capability_matrix
+from providers.capabilities import CapabilityMatrix, load_capability_matrix
 
 _MATRIX = load_capability_matrix()
 OPUS = _MATRIX.model_for("anthropic", "supervisor").model_id
 HAIKU = _MATRIX.model_for("anthropic", "tool").model_id
 LUNA = _MATRIX.model_for("openai", "tool").model_id
+
+#: Haiku's long-context threshold in the shipped price table.
+HAIKU_LONG_CONTEXT_ABOVE: int = yaml.safe_load(DEFAULT_PRICING_PATH.read_text(encoding="utf-8"))[
+    "models"
+][HAIKU]["long_context"]["above_prompt_tokens"]
 
 
 def _inv(
@@ -32,11 +40,25 @@ def _inv(
     )
 
 
-def _price(model_id: str, tokens_in: int, tokens_out: int, cache_read: int = 0) -> float:
+def _price(
+    model_id: str,
+    tokens_in: int,
+    tokens_out: int,
+    cache_read: int = 0,
+    *,
+    inference_profile: str | None = None,
+) -> float:
     usage = TokenUsage(
         input_tokens=tokens_in, output_tokens=tokens_out, cache_read_tokens=cache_read
     )
-    return cost_for_usage(usage, model_id).total
+    profile = inference_profile or _MATRIX.models[model_id].inference_profile
+    return cost_for_usage(usage, model_id, inference_profile=profile).total
+
+
+def _with_profile(model_id: str, profile: str) -> CapabilityMatrix:
+    models = dict(_MATRIX.models)
+    models[model_id] = dataclasses.replace(models[model_id], inference_profile=profile)
+    return dataclasses.replace(_MATRIX, models=models)
 
 
 def _table(tmp_path: Path, *, provisional: object) -> Path:
@@ -93,13 +115,106 @@ def test_withheld_pricing_leaves_every_cost_unset() -> None:
     lines = cost_lines([_inv("supervisor", "supervisor", OPUS, 10, 10)], withheld=True)
     assert lines[0]["cost_usd"] is None
     assert lines[0]["input_tokens"] == 10
+    assert lines[0]["long_context_calls"] == 0
     assert turn_cost(lines, withheld=True) is None
 
 
-def test_unpriced_model_raises() -> None:
-    """A model missing from the price table is an error, never a silent zero."""
-    with pytest.raises(KeyError):
+def test_model_absent_from_the_capability_matrix_raises() -> None:
+    """A model with no configured inference profile is an error, never priced at a guessed route."""
+    with pytest.raises(ValueError, match="capability matrix"):
         cost_lines([_inv("tool", "research", "vendor.unknown-model", 1, 1)], withheld=False)
+
+
+def test_unpriced_model_raises(tmp_path: Path) -> None:
+    """A model missing from the price table is an error, never a silent zero."""
+    table = yaml.safe_load(DEFAULT_PRICING_PATH.read_text(encoding="utf-8"))
+    del table["models"][LUNA]
+    path = tmp_path / "pricing.yaml"
+    path.write_text(yaml.safe_dump(table), encoding="utf-8")
+    with pytest.raises(KeyError):
+        cost_lines([_inv("tool", "research", LUNA, 1, 1)], withheld=False, pricing_path=path)
+
+
+def test_each_invocation_is_priced_at_its_configured_profile_route() -> None:
+    """A geo profile in the matrix prices at the geo route, not the global default."""
+    geo = _with_profile(HAIKU, f"us.{HAIKU}")
+    inv = _inv("tool", "research", HAIKU, 1_000, 200)
+
+    geo_cost = cost_lines([inv], withheld=False, matrix=geo)[0]["cost_usd"]
+    global_cost = cost_lines([inv], withheld=False)[0]["cost_usd"]
+
+    assert geo_cost == pytest.approx(_price(HAIKU, 1_000, 200, inference_profile=f"us.{HAIKU}"))
+    assert global_cost == pytest.approx(_price(HAIKU, 1_000, 200))
+    assert geo_cost != pytest.approx(global_cost)
+
+
+def test_the_default_matrix_is_the_shipped_capability_matrix() -> None:
+    """Omitting ``matrix`` prices exactly as passing the loaded ``config/`` matrix."""
+    invocations = [_inv("supervisor", "supervisor", OPUS, 30, 5), _inv("tool", "x", LUNA, 9, 2)]
+    assert cost_lines(invocations, withheld=False) == cost_lines(
+        invocations, withheld=False, matrix=load_capability_matrix()
+    )
+
+
+def test_a_profile_naming_another_model_is_refused() -> None:
+    """The configured profile must route to the invocation's own model."""
+    with pytest.raises(UnknownInferenceRoute):
+        cost_lines(
+            [_inv("tool", "research", HAIKU, 1, 1)],
+            withheld=False,
+            matrix=_with_profile(HAIKU, f"global.{LUNA}"),
+        )
+
+
+def test_long_context_calls_count_members_priced_at_long_context_rates() -> None:
+    """Each member is priced alone: one call over the threshold counts, smaller calls do not."""
+    above = HAIKU_LONG_CONTEXT_ABOVE + 1
+    small = HAIKU_LONG_CONTEXT_ABOVE // 2
+    invocations = [
+        _inv("tool", "research", HAIKU, small, 10),
+        _inv("tool", "research", HAIKU, small, 10),
+        _inv("tool", "research", HAIKU, above, 10),
+    ]
+
+    (line,) = cost_lines(invocations, withheld=False)
+
+    assert line["long_context_calls"] == 1
+    assert line["cost_usd"] == pytest.approx(
+        2 * _price(HAIKU, small, 10) + _price(HAIKU, above, 10)
+    )
+    assert line["cost_usd"] != pytest.approx(_price(HAIKU, 2 * small + above, 30))
+
+
+def test_a_call_at_the_threshold_is_not_long_context() -> None:
+    """The long-context rates apply strictly above ``above_prompt_tokens``."""
+    (line,) = cost_lines(
+        [_inv("tool", "research", HAIKU, HAIKU_LONG_CONTEXT_ABOVE, 1)], withheld=False
+    )
+    assert line["long_context_calls"] == 0
+
+
+def test_cache_tokens_count_toward_the_long_context_prompt() -> None:
+    """Cache reads are part of the prompt the threshold is measured against."""
+    (line,) = cost_lines(
+        [_inv("tool", "research", HAIKU, HAIKU_LONG_CONTEXT_ABOVE, 1, cache_read=1)],
+        withheld=False,
+    )
+    assert line["long_context_calls"] == 1
+
+
+def test_a_model_without_long_context_rates_never_counts() -> None:
+    """Opus has no long-context block, so even a very large prompt counts zero."""
+    (line,) = cost_lines([_inv("supervisor", "supervisor", OPUS, 900_000, 1)], withheld=False)
+    assert line["long_context_calls"] == 0
+
+
+def test_long_context_calls_are_reported_while_withheld() -> None:
+    """Withholding drops the figure, not the count."""
+    (line,) = cost_lines(
+        [_inv("tool", "research", HAIKU, HAIKU_LONG_CONTEXT_ABOVE + 1, 1)], withheld=True
+    )
+    assert line["cost_usd"] is None
+    assert line["long_context_calls"] == 1
 
 
 def test_turn_cost_refuses_an_unpriced_line_when_not_withheld() -> None:

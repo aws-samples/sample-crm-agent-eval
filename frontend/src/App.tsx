@@ -8,6 +8,9 @@
  * `getRuntimeConfig()` is called synchronously: `AuthProvider` only reports `signed-in` after
  * `loadRuntimeConfig()` has resolved, so the cache is warm by the time this tree renders.
  *
+ * `/logout` is the Hosted UI sign-out landing page: signed out it renders the sign-in form like
+ * every other path, and a signed-in user there is sent to the pipeline rather than a 404.
+ *
  * The signed-in layout is `AppShell`, which mounts the assistant panel as a sibling of the
  * `<Outlet />`. The panel is the only assistant surface; there is no `/chat` route.
  */
@@ -71,6 +74,7 @@ export function App(): JSX.Element {
 
   return (
     <Routes>
+      <Route path="logout" element={<Navigate to="/pipeline" replace />} />
       <Route element={<AppShell />}>
         <Route index element={<Navigate to="/pipeline" replace />} />
         <Route path="pipeline" element={<PipelinePage />} />

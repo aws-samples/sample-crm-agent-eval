@@ -57,7 +57,8 @@ TOOL_RESULT_BYTE_CEILING: Final[int] = 32_768
 class CostLine(TypedDict):
     """One priced ``(tier, role, model_id)`` group of a turn's model usage.
 
-    ``cost_usd`` is ``None`` when pricing is withheld.
+    ``cost_usd`` is ``None`` when pricing is withheld. ``long_context_calls`` counts the group's
+    invocations priced at the model's long-context rates, and is reported even when withheld.
     """
 
     tier: Tier
@@ -67,6 +68,7 @@ class CostLine(TypedDict):
     output_tokens: int
     cache_read_tokens: int
     cache_write_tokens: int
+    long_context_calls: int
     cost_usd: float | None
 
 
@@ -235,6 +237,7 @@ _COUNT_KEYS: Final[tuple[str, ...]] = (
     "output_tokens",
     "cache_read_tokens",
     "cache_write_tokens",
+    "long_context_calls",
 )
 
 

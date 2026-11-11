@@ -238,6 +238,27 @@ variable "config_parameter_arns" {
   }
 }
 
+variable "config_parameter_kms_key_arn" {
+  description = <<-EOT
+    ARN of the customer-managed KMS key encrypting the SecureString `config_parameter_arns`. The
+    `<function_name>-config-kms` policy allows `kms:Decrypt` on it through SSM under each parameter's
+    `PARAMETER_ARN` encryption context, and denies `kms:Decrypt` through SSM on every other key.
+    Required when `config_parameter_arns` is non-empty.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.config_parameter_kms_key_arn == null || can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$", var.config_parameter_kms_key_arn))
+    error_message = "config_parameter_kms_key_arn must be null or one fully-qualified KMS key ARN with no wildcard."
+  }
+
+  validation {
+    condition     = length(var.config_parameter_arns) == 0 || var.config_parameter_kms_key_arn != null
+    error_message = "config_parameter_arns is non-empty but config_parameter_kms_key_arn is null: the parameters could not be decrypted."
+  }
+}
+
 variable "cursor_kms_key_arn" {
   description = <<-EOT
     ARN of the customer-managed KMS key that seals pagination cursors. The role's

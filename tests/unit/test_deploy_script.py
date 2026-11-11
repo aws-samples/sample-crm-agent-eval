@@ -364,12 +364,37 @@ G1_PLACEHOLDER_KEYS: Final[tuple[str, ...]] = (
     "vpc_nat_public_subnet_id",
 )
 
-#: The shipped placeholder loop, from its header line to its `die`.
-PLACEHOLDER_LOOP_PATTERN: Final = re.compile(
-    r'^for pair in ((?:"[a-z_]+:\$\{PF_[A-Z_]+\}"\s*(?:\\\s*)?)+); do\n'
-    r'    if \[\[ "\$\{pair#\*:\}" == \*REPLACE_ME\* \]\]; then',
-    re.MULTILINE,
-)
+PLACEHOLDER_LOOP_HEADER: Final = "for pair in "
+PLACEHOLDER_LOOP_TEST: Final = '    if [[ "${pair#*:}" == *REPLACE_ME* ]]; then'
+PLACEHOLDER_PAIR: Final = re.compile(r'"([a-z_]+):\$\{PF_[A-Z_]+\}"')
+
+
+def _placeholder_loop_keys(block: str) -> list[str] | None:
+    """Return the keys of the `for pair in ...; do` loop whose body tests for `REPLACE_ME`.
+
+    The header may span backslash-continued lines and must hold only `"key:${PF_X}"` pairs; returns
+    None when no such loop is present.
+    """
+    lines = block.split("\n")
+    for start, line in enumerate(lines):
+        if not line.startswith(PLACEHOLDER_LOOP_HEADER):
+            continue
+        header = line[len(PLACEHOLDER_LOOP_HEADER) :]
+        end = start
+        while header.endswith("\\") and end + 1 < len(lines):
+            end += 1
+            header = header[:-1] + " " + lines[end]
+        if not header.endswith("; do") or end + 1 >= len(lines):
+            continue
+        if lines[end + 1] != PLACEHOLDER_LOOP_TEST:
+            continue
+        tokens = header[: -len("; do")].split()
+        matches = [PLACEHOLDER_PAIR.fullmatch(token) for token in tokens]
+        if not tokens or any(match is None for match in matches):
+            continue
+        return [match.group(1) for match in matches if match is not None]
+    return None
+
 
 PLACEHOLDER_REFUSAL = "still carries the placeholder ids"
 EMPTY_REFUSAL = "sets no usable"
@@ -473,19 +498,39 @@ class TestAdoptedVpcTfvarsBlockDriven:
         ]
 
     def test_the_placeholder_cells_cover_exactly_the_keys_the_shipped_loop_refuses(self) -> None:
-        match = PLACEHOLDER_LOOP_PATTERN.search(_tfvars_block())
-        assert match is not None, "the placeholder loop is not in the shipped tfvars block"
-        shipped = re.findall(r'"([a-z_]+):', match.group(1))
+        shipped = _placeholder_loop_keys(_tfvars_block())
+        assert shipped is not None, "the placeholder loop is not in the shipped tfvars block"
         assert sorted(shipped) == sorted(G1_PLACEHOLDER_KEYS)
 
-    def test_the_placeholder_loop_pattern_rejects_an_adversarial_near_miss_in_bounded_time(
+    def test_the_placeholder_loop_parser_rejects_an_adversarial_near_miss_in_bounded_time(
         self,
     ) -> None:
-        """A long run of whitespace-padded pairs with no terminator fails fast (no ReDoS)."""
+        """A long run of whitespace-padded pairs with no terminator is rejected, and fast."""
         near_miss = "for pair in " + '"vpc_id:${PF_VPC_ID}"   ' * 40 + "; done\n"
         started = time.monotonic()
-        assert PLACEHOLDER_LOOP_PATTERN.search(near_miss) is None
+        assert _placeholder_loop_keys(near_miss) is None
         assert time.monotonic() - started < 1.0
+
+    @pytest.mark.parametrize(
+        "loop",
+        [
+            'for pair in "vpc_id:${PF_VPC_ID}"; do\n    if [[ -z "${pair#*:}" ]]; then',
+            'for pair in "vpc_id:${PF_VPC_ID}" stray; do\n' + PLACEHOLDER_LOOP_TEST,
+            "for pair in ; do\n" + PLACEHOLDER_LOOP_TEST,
+        ],
+        ids=["other-body", "non-pair-token", "no-pairs"],
+    )
+    def test_the_placeholder_loop_parser_rejects_a_loop_that_is_not_the_refusal(
+        self, loop: str
+    ) -> None:
+        assert _placeholder_loop_keys(loop) is None
+
+    def test_the_placeholder_loop_parser_reads_a_continued_header(self) -> None:
+        loop = (
+            'for pair in "vpc_id:${PF_VPC_ID}" \\\n'
+            '            "vpc_nat_public_subnet_id:${PF_NAT_SUBNET}"; do\n' + PLACEHOLDER_LOOP_TEST
+        )
+        assert _placeholder_loop_keys(loop) == ["vpc_id", "vpc_nat_public_subnet_id"]
 
     @pytest.mark.parametrize("key", G1_PLACEHOLDER_KEYS)
     def test_a_placeholder_in_the_key_refuses_before_the_preflight(

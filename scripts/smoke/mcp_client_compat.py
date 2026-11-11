@@ -269,7 +269,8 @@ def _http_status_of(exc: BaseException) -> int | None:
             return status
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions)
-        pending.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
     return None
 
 

@@ -14,8 +14,8 @@ and execs this module. This module implements three checks:
    detection (:data:`_CURRENCY_SHAPE_PATTERN`, :data:`_CURRENCY_FIELD_NAMES`).
 2. The same, on the rendered eval dashboard source (``--frontend-dir``;
    :func:`find_currency_rendering_in_frontend`).
-3. While every rate in the price table's ``models`` block is zero, no arm in ``matrix.json`` may
-   render with ``cost_withheld_provisional`` set to ``false``.
+3. While every rate in the price table's ``models`` block, flat and ``long_context``, is zero, no
+   arm in ``matrix.json`` may render with ``cost_withheld_provisional`` set to ``false``.
 
 When ``provisional`` is ``false``, every check is skipped and the gate exits 0. When it is ``true``
 and no artifact or consumer was examined, the gate exits 3.
@@ -194,24 +194,59 @@ def is_provisional(price_table: dict[str, Any]) -> bool:
     return bool(price_table.get("provisional", False))
 
 
-def all_rates_are_zero(price_table: dict[str, Any]) -> bool:
-    """Return whether every numeric rate in the price table's ``models`` block is zero."""
+#: Key of a model's optional long-context rate block in the price table.
+_LONG_CONTEXT_BLOCK: Final[str] = "long_context"
+
+#: Non-rate fields of a long-context block: the prompt-token threshold above which it applies.
+_LONG_CONTEXT_NON_RATE_FIELDS: Final[frozenset[str]] = frozenset({"above_prompt_tokens"})
+
+
+def _numeric_rate(model_id: str, field_path: str, value: Any) -> float:
+    """Return ``value`` as a float, or raise naming the offending price-table field."""
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise CostWithholdingGateError(
+            f"price table entry {model_id!r}.{field_path!r} is not numeric: {value!r}"
+        ) from exc
+
+
+def iter_rates(price_table: dict[str, Any]) -> list[tuple[str, str, float]]:
+    """Return ``(model_id, field_path, rate)`` for every rate in the ``models`` block.
+
+    Covers each model's flat rates and the rates of its optional ``long_context`` block, whose
+    ``above_prompt_tokens`` threshold is not a rate. The ``routes`` block holds multipliers, not
+    rates, and is not read. Raises :class:`CostWithholdingGateError` on a non-mapping entry or
+    block, or a non-numeric rate.
+    """
     models = price_table.get("models", {})
     if not isinstance(models, dict):
         raise CostWithholdingGateError("price table 'models' block is not a mapping")
-    for model_id, rates in models.items():
-        if not isinstance(rates, dict):
+    rates: list[tuple[str, str, float]] = []
+    for model_id, entry in models.items():
+        if not isinstance(entry, dict):
             raise CostWithholdingGateError(f"price table entry for {model_id!r} is not a mapping")
-        for field_name, value in rates.items():
-            try:
-                numeric_value = float(value)
-            except (TypeError, ValueError) as exc:
+        for field_name, value in entry.items():
+            if field_name != _LONG_CONTEXT_BLOCK:
+                rates.append((model_id, field_name, _numeric_rate(model_id, field_name, value)))
+                continue
+            if not isinstance(value, dict):
                 raise CostWithholdingGateError(
-                    f"price table entry {model_id!r}.{field_name!r} is not numeric: {value!r}"
-                ) from exc
-            if numeric_value != 0.0:
-                return False
-    return True
+                    f"price table entry {model_id!r}.{field_name!r} is not a mapping"
+                )
+            for tier_field, tier_value in value.items():
+                if tier_field in _LONG_CONTEXT_NON_RATE_FIELDS:
+                    continue
+                field_path = f"{field_name}.{tier_field}"
+                rates.append(
+                    (model_id, field_path, _numeric_rate(model_id, field_path, tier_value))
+                )
+    return rates
+
+
+def all_rates_are_zero(price_table: dict[str, Any]) -> bool:
+    """Return whether every rate :func:`iter_rates` yields, flat and long-context, is zero."""
+    return all(rate == 0.0 for _, _, rate in iter_rates(price_table))
 
 
 #: Characters removed, and whitespace normalised, before a line is matched, so `$<ZWSP>0.47` reads
@@ -384,6 +419,13 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         "narrowed_tasks_scored",
         # Counts and provenance.
         "included_invocation_count",
+        "long_context_invocation_count",
+        "arm_long_context_invocation_count",
+        *(
+            f"{prefix}_{tier}_long_context_invocation_count"
+            for prefix in ("tier", "summary")
+            for tier in ("supervisor", "subagent", "tool")
+        ),
         "scored_task_count",
         "unscored_task_count",
         "total_excluded",

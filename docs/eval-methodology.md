@@ -123,8 +123,14 @@ Billable command (real model inference plus writes to deployed tables under a di
 EVAL_SUBSTRATE=live-aws \
 CRM_TABLE_PREFIX=crm-agent-eval \
 ACTION_LAMBDA_PREFIX=crm-agent-eval \
-  .venv/bin/python3 -m src.eval.harness --live --assert-artifacts
+  .venv/bin/python3 -m src.eval.harness --live --assert-artifacts --max-cost-usd <usd>
 ```
+
+**Cost cap.** `--max-cost-usd` is required with `--live`. Before each (arm, repeat) unit starts, the
+harness compares the priced spend of the completed units plus the most expensive completed unit with
+the cap. When that sum exceeds the cap, no further unit starts, every tenant is torn down, no matrix
+is written, and the exit code is 4. Priced cost is computed from recorded tokens against
+`config/pricing.yaml`, so it estimates the bill; the Bedrock bill is the authority.
 
 **Account precondition.** `--live` needs the account's Bedrock data-retention mode to permit the
 OpenAI models; at `mode: none` every GPT-6 invocation is rejected. Check it read-only with
@@ -133,10 +139,14 @@ account-wide, so changing it is the account owner's decision. See `docs/runbook.
 
 **Transient failures.** `eval.live.ThrottleRetryingProvider` retries a throttled turn with bounded
 exponential backoff. Every retried attempt, whether retried by the vendor SDK or by this wrapper,
-becomes exactly one exclusion, categorised by its cause: `throttle` for a throttle, `retry` otherwise. A
-failure outside the closed exclusion taxonomy (cold start, retry, throttle) raises
-`eval.live.LiveInvocationError` and aborts the sweep, so no artifact is published with an
-uncategorised gap.
+becomes exactly one exclusion, categorised by its cause: `throttle` for a throttle, `retry`
+otherwise. The wrapper retries an in-band error by its leading code: throttle and availability
+codes (Bedrock's `ThrottlingException`, `ServiceUnavailableException` and similar, and the Responses
+surface's `service_unavailable`) count as `throttle`; transient server faults (Bedrock's
+`InternalServerException`, `ModelErrorException`, `ModelStreamErrorException`, and the Responses
+surface's `server_error`) count as `retry`. A failure outside the closed exclusion taxonomy (cold
+start, retry, throttle) raises `eval.live.LiveInvocationError` and aborts the sweep, so no artifact
+is published with an uncategorised gap.
 
 **Runtime coverage.** A CLI `--live` sweep records `runtime_identifier: live-aws-lambda-dispatch`:
 live models, live DynamoDB and real Lambda dispatch are exercised; the deployed AgentCore Runtime's
@@ -148,7 +158,7 @@ own turn loop is not. A deployed sweep (the `eval_sweep` state machine) runs eac
 
 A deployed sweep (the `eval_sweep` state machine, see `docs/runbook.md`) runs each task as one
 `eval_turn` on the AgentCore Runtime, under the caps in `src/agents/budget.py`: at most 25 tool
-calls, 200,000 tokens and a 120-second wall clock. The 120-second cap is soft. When it is reached,
+calls, 1,000,000 tokens and a 120-second wall clock. The 120-second cap is soft. When it is reached,
 every pending model wait ends, the turn stops with `error_kind` `budget_exhausted`, and the partial
 turn is scored against committed state like any other, with `budget_exhausted: true` on its result.
 At 150 seconds (30 seconds past the soft cap) the Runtime cancels the turn at its next await and
@@ -159,6 +169,29 @@ leaves its tokens uncounted, so that turn's usage and cost are a **lower bound**
 its usage arrived is counted as metered, and does not make the usage a lower bound. The observed turn carries
 `usage_lower_bound: true`, and each affected arm lists those task runs in
 `usage_lower_bound_task_ids`, with a note under its figures in `matrix.md`.
+
+### Per-request prompt limits
+
+Every model request, chat or eval, is checked before it is sent against its tier's limit in
+`config/models.yaml` `request_prompt_limits`: 270,000 estimated prompt tokens at the supervisor and
+subagent tiers, and 95,000 at the tool tier. The three are independent settings, and each must fit
+the context window (`context_window_tokens` in `config/model_capabilities.yaml`) of every model that
+can be assigned to its tier; the capability matrix refuses to load otherwise. A request over its
+limit is **refused, never trimmed**: nothing is sent, and the turn ends with its budget exhausted
+on the `request_prompt_limit` dimension, naming the estimate, the limit and the tier.
+Separately, a turn may use at most 1,000,000 input plus output tokens in total.
+
+The estimate is `ceil(utf8_bytes / 3)` over the compact JSON of the messages and tool schemas
+handed to the model call (`src/agents/prompt_estimate.py`). It uses no tokenizer, so it is the same
+for every family, and it omits framing an adapter adds afterwards (its own system blocks or
+tool-choice wrappers). Error bound: English prose and JSON tokenize at about 3.5 to 4.5 bytes per
+token, so for them the estimate runs about 17 to 50 percent high and refuses early: a real prompt
+of roughly 180,000 to 231,400 tokens can be refused at an estimate of 270,000. Dense numerics, ids or
+non-Latin text can tokenize below 3 bytes per token, so the estimate can run low and admit a request
+larger than the limit. Such a request is still priced from the usage the model reports, at
+long-context rates when it crosses the model's threshold. The tool limit sits below Haiku 5.5's
+100,000-token threshold, so a tool call the estimate admits is priced at standard rates unless the
+estimate under-counts.
 
 ## What the models are sent
 
@@ -203,7 +236,8 @@ unchanged. `matrix.json` carries the same figures as its first key, `tier_compar
 `summary_*` columns after every existing column, with each arm's values repeated on each of its task
 rows. `eval.matrix.tier_comparison` builds all three from the arm records. The summary tables
 themselves come from `eval.matrix.tier_comparison_table`, which the CLI's `matrix.md` and the eval
-dashboard both render.
+dashboard both render. The dashboard shows every header, cell and note as verbatim text; the only
+markdown it honours is a note's inline code spans, which it renders as code.
 
 There are three tables, Supervisor, Subagent and ToolCall, each with one column per arm in run order.
 Columns are never re-sorted. A column is headed by the arm's family. When a family has more than one
@@ -223,6 +257,7 @@ Every table has these rows, in this order:
 | P95 latency per completed task (ms) | Per task completed at the tier, the sum of that tier's measured call latencies in the task; nearest-rank P95 over those tasks, shown with n. |
 | P50 latency per completed task (ms) | As above, at P50. |
 | Model invocations | Included invocations at the tier. |
+| Long-context invocations | The tier's included invocations priced at the invoked model's long-context rates (see Usage and cost); `—` for a run recorded before the count existed. |
 | Input tokens | The tier's input tokens, in each family's own accounting. |
 | Output tokens | The tier's output tokens. |
 | Cost per task, all tasks | The tier's total cost divided by the number of tasks the arm ran. |
@@ -314,13 +349,60 @@ Defined in `src/eval/metrics.py` (`ModelMetrics.to_report_fields`). Per arm:
   `cost_excluding_cache`, `cost_cache_total`, `cost_total`, `price_table_version`), derived from
   recorded tokens against `config/pricing.yaml`.
 
-Rates come from `config/pricing.yaml` (`price_table_version` 1.2.0), global-route on-demand
-Standard rates for short context. The Anthropic models and GPT-6 Astra are read from the AWS Price
-List (`aws pricing get-products --service-code AmazonBedrockFoundationModels`, region us-east-1).
+**Per-call pricing.** Every model call is priced on its own. Its prompt size is input plus cache
+read plus cache write tokens. When the invoked model has a `long_context` block in
+`config/pricing.yaml` and the prompt size exceeds its `above_prompt_tokens`, every token class of
+that call, output included, is priced at the long-context rates; a call exactly at the threshold is
+standard. The thresholds are:
+
+| Model | Long-context above (prompt tokens) |
+|---|---|
+| GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna, GPT-6 Astra | 272,000 |
+| Claude Haiku 5.5 | 100,000 |
+| Claude Sonnet 5.5, Claude Opus 5.5 | none (no long-context tier) |
+
+Every rate, standard or long-context, is then multiplied by the route of the call's inference
+profile (`src/crm/inference_route.py`): a `global.` profile is the global route at the base rate
+(`routes.global.multiplier` 1.0), and a geographic prefix (`us.`, `eu.`, `apac.`, `ca.`, `jp.`, `au.`)
+is the geo route at `routes.geo.multiplier` 1.10. A profile with any other prefix, or one naming a
+different model than the call's, is refused rather than priced at a guessed rate: the capability
+matrix refuses to load it, and re-pricing refuses the call.
+
+Each cost block also counts `long_context_invocation_count`, its included invocations priced at
+long-context rates, per arm, per tier and per (tier, role, model) row.
+
+**Arm figures.** An arm's `model_metrics` (its Usage and cost block in `matrix.md`) covers only the
+supervisor-tier calls to the arm's model, and is labelled as such where it is rendered. The arm
+totals, `arm_cost_total` and `arm_long_context_invocation_count`, cover every call the arm made at
+every tier, so `arm_cost_total` equals the sum of the three tiers' costs in the tier comparison.
+`matrix.md` shows them as an "All tiers" table under each arm. `matrix.json` carries them as
+arm-level keys of those names; `matrix.csv` carries them as the `arm_cost` and
+`arm_long_context_invocation_count` columns.
+
+Rates come from `config/pricing.yaml` (`price_table_version` 1.3.0), global-route on-demand
+Standard rates for short context, plus the long-context rates and route multipliers above. The
+Anthropic models and GPT-6 Astra are read from the AWS Price List
+(`aws pricing get-products --service-code AmazonBedrockFoundationModels`, region us-east-1).
 GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna are absent from the us-east-1 Price List, so their rates
-come from the AWS Bedrock model cards (Global CRIS, short context). The file's `sourced_from` and `sourced_on` name the exact query and pages.
-To refresh the table, re-read the same sources, transcribe the rates, bump `price_table_version`,
-and update `sourced_from` and `sourced_on`.
+come from the AWS Bedrock model cards (Global CRIS, short context). The file's `sourced_from` and
+`sourced_on` name the exact query and pages.
+To refresh the table, re-read the same sources, transcribe the standard and long-context rates, the
+long-context thresholds and the route multipliers, bump `price_table_version`, and update
+`sourced_from` and `sourced_on`.
+
+**Re-pricing a stored sweep.** A sweep archived with `--archive-raw` keeps each call's tokens and
+inference profile, so it can be re-priced against the current table without calling a model:
+
+```bash
+.venv/bin/python3 -m src.eval.reprice --raw-dir <sweep>/raw --output-dir <out>
+```
+
+It writes `matrix.{json,md,csv}` and `reprice.json` into `<out>`. A call recorded without an
+inference profile is refused unless `--assume-inference-profile-prefix <prefix>` is given, in which
+case its profile is `<prefix><model_id>`; the assumption is printed to stderr and recorded in
+`reprice.json`. An arm whose per-call records disagree with its archived token totals, per
+(tier, role, model) row and per tier, is refused. Exit code 0 means the files were written, 2 that
+the input was refused.
 
 `config/pricing.yaml` carries `provisional: false`, so absolute cost is published and
 `cost_withheld_provisional` is `false`. If the table is set back to `provisional: true`, cost fields

@@ -4,6 +4,9 @@
  * header shows the conversation total; the "withheld" wording appears only while pricing is
  * provisional, and no figure appears while it is.
  *
+ * Every cost line on the recorded `usage`/`completed` frames carries a non-negative integer
+ * `long_context_calls`, in both branches.
+ *
  * Which branch applies is read from `config/pricing.yaml`'s `provisional:` line, the same file the
  * deployed stack prices from. This assumes the stack was deployed from this checkout's pricing file.
  *
@@ -17,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type { Page } from "@playwright/test";
 
 import { expect, test } from "../../fixtures/auth";
+import { installSseRecorder, sseFrameWithArray, type SseFrame } from "../../fixtures/sseRecorder";
 
 const PRICING_FILE = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../config/pricing.yaml");
 
@@ -40,6 +44,14 @@ async function sendTurn(page: Page, prompt: string): Promise<void> {
   await expect(page.getByTestId("turn-state-pill").last()).toHaveAttribute("data-status", "completed");
 }
 
+/** Every recorded frame that carries a `cost_lines` array. */
+async function framesWithCostLines(page: Page): Promise<SseFrame[]> {
+  return page.evaluate(() =>
+    ((window as unknown as { __crmE2eSseFrames?: Record<string, unknown>[] }).__crmE2eSseFrames ?? [])
+      .filter((frame) => Array.isArray(frame.cost_lines)),
+  );
+}
+
 /** A currency string as a number of dollars. */
 function dollars(text: string): number {
   return Number(text.replace(/[^0-9.]/g, ""));
@@ -49,6 +61,7 @@ test("each reply shows its cost by tier, and the header totals the conversation"
   signedInPage: page,
 }) => {
   const provisional = pricingIsProvisional();
+  await installSseRecorder(page);
   await page.goto("/pipeline");
   const panel = page.getByTestId("assistant-panel");
   if (await panel.isHidden()) await page.getByTestId("panel-toggle").click();
@@ -56,6 +69,22 @@ test("each reply shows its cost by tier, and the header totals the conversation"
 
   await sendTurn(page, "How many open opportunities do I have?");
   await sendTurn(page, "And which one closes soonest?");
+
+  expect(
+    await sseFrameWithArray(page, "cost_lines", 10_000),
+    "the turns' usage/completed frames were recorded",
+  ).toBeDefined();
+  const costFrames = await framesWithCostLines(page);
+  const lines = costFrames.flatMap((frame) => frame.cost_lines as Record<string, unknown>[]);
+  expect(lines.length, "the recorded frames carry at least one cost line").toBeGreaterThan(0);
+  for (const line of lines) {
+    expect(line, "every cost line carries long_context_calls").toHaveProperty("long_context_calls");
+    const count = line.long_context_calls;
+    expect(
+      Number.isInteger(count) && (count as number) >= 0,
+      `long_context_calls is a non-negative integer, got ${JSON.stringify(count)}`,
+    ).toBe(true);
+  }
 
   const meters = panel.getByTestId("usage-meter");
   await expect(meters).toHaveCount(2);
@@ -82,9 +111,9 @@ test("each reply shows its cost by tier, and the header totals the conversation"
 
     const breakdown = meter.getByTestId("usage-cost-breakdown");
     await breakdown.locator("summary").click();
-    const lines = breakdown.getByTestId("usage-cost-line");
-    expect(await lines.count(), "a priced turn shows at least one per-tier cost line").toBeGreaterThan(0);
-    for (const line of await lines.all()) {
+    const rows = breakdown.getByTestId("usage-cost-line");
+    expect(await rows.count(), "a priced turn shows at least one per-tier cost line").toBeGreaterThan(0);
+    for (const line of await rows.all()) {
       await expect(line).toContainText(/Supervisor|Subagent|Tool/);
       await expect(line).toContainText(CURRENCY);
     }

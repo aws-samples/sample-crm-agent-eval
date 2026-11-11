@@ -551,6 +551,7 @@ for sid in sys.argv[1:]:
         "_agent_identity": {
             "claims": {"custom:rep_id": "rep-1", "custom:book": "acc-1",
                        "custom:tenant": "eval-snapshot-unit"},
+            "principal_type": "user",
             "session_id": sid,
         },
     }
@@ -636,6 +637,7 @@ def _turn_body(session_id: str) -> dict[str, Any]:
                 "custom:book": "acc-1",
                 "custom:tenant": "eval-snapshot-unit",
             },
+            "principal_type": "user",
             "session_id": session_id,
         },
     }

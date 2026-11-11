@@ -54,6 +54,7 @@ _COMMON_ROWS = (
     "P95 latency per completed task (ms)",
     "P50 latency per completed task (ms)",
     "Model invocations",
+    "Long-context invocations",
     "Input tokens",
     "Output tokens",
     "Cost per task, all tasks",

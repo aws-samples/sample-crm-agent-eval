@@ -1436,3 +1436,151 @@ class TestTierComparisonSummaryFields:
         violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
         assert len(violations) == 2, violations
         assert all(repr(column) in violation for violation in violations)
+
+
+# ---------------------------------------------------------------------------
+# Long-context invocation counts.
+# ---------------------------------------------------------------------------
+
+_LONG_CONTEXT_COUNT_KEYS: tuple[str, ...] = (
+    "long_context_invocation_count",
+    *(
+        f"{prefix}_{tier}_long_context_invocation_count"
+        for prefix in ("tier", "summary")
+        for tier in _SUMMARY_TIERS
+    ),
+)
+
+
+class TestLongContextInvocationCount:
+    """The long-context call count is a non-currency count wherever a matrix artifact carries it."""
+
+    @staticmethod
+    def _matrix_json() -> str:
+        import json
+
+        return json.dumps(
+            {
+                "arms": [
+                    {
+                        "model_metrics": {"long_context_invocation_count": 1},
+                        "tier_summary": {"tool": {"long_context_invocation_count": 2}},
+                        "tier_role_model": [{"long_context_invocation_count": 3}],
+                    }
+                ]
+            }
+        )
+
+    @staticmethod
+    def _matrix_csv() -> str:
+        columns = [
+            key for key in _LONG_CONTEXT_COUNT_KEYS if key != "long_context_invocation_count"
+        ]
+        return (
+            ",".join(["model_id", *columns])
+            + "\n"
+            + ",".join(["m", *("4" for _ in columns)])
+            + "\n"
+        )
+
+    def test_the_count_passes_in_json_and_csv_while_provisional(self, tmp_path: Path) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"matrix.json": self._matrix_json(), "matrix.csv": self._matrix_csv()},
+        )
+        assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir) == []
+
+    def test_the_json_key_is_load_bearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        key = "long_context_invocation_count"
+        pricing_path, results_dir = _tree(
+            tmp_path, pricing=PROVISIONAL_PRICING, artifacts={"matrix.json": self._matrix_json()}
+        )
+        monkeypatch.setattr(
+            gate, "_NON_CURRENCY_NUMERIC_FIELDS", gate._NON_CURRENCY_NUMERIC_FIELDS - {key}
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert len(violations) == 3, violations
+        assert all(f".{key} (" in violation for violation in violations), violations
+
+    @pytest.mark.parametrize(
+        "column", [k for k in _LONG_CONTEXT_COUNT_KEYS if k != "long_context_invocation_count"]
+    )
+    def test_each_csv_column_is_load_bearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str
+    ) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path, pricing=PROVISIONAL_PRICING, artifacts={"matrix.csv": self._matrix_csv()}
+        )
+        monkeypatch.setattr(
+            gate, "_NON_CURRENCY_NUMERIC_FIELDS", gate._NON_CURRENCY_NUMERIC_FIELDS - {column}
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert len(violations) == 1, violations
+        assert repr(column) in violations[0]
+
+    def test_the_count_under_a_cost_bearing_key_still_fails(self, tmp_path: Path) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"matrix.json": '{"cost_lines": [{"long_context_invocation_count": 2}]}'},
+        )
+        assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+
+
+class TestArmTotals:
+    """The all-tier arm count is a non-currency count; the all-tier arm cost is currency."""
+
+    _KEY = "arm_long_context_invocation_count"
+
+    @staticmethod
+    def _matrix_json(arm_cost_total: float | None) -> str:
+        import json
+
+        return json.dumps(
+            {
+                "arms": [
+                    {
+                        "model_metrics": {"cost_withheld_provisional": True},
+                        "arm_cost_total": arm_cost_total,
+                        "arm_long_context_invocation_count": 2,
+                    }
+                ]
+            }
+        )
+
+    _MATRIX_CSV = "model_id,arm_cost,arm_long_context_invocation_count\nm,,2\n"
+
+    def test_the_arm_count_and_a_null_arm_cost_pass_while_provisional(self, tmp_path: Path) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"matrix.json": self._matrix_json(None), "matrix.csv": self._MATRIX_CSV},
+        )
+        assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir) == []
+
+    def test_the_arm_count_exemption_is_load_bearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"matrix.json": self._matrix_json(None), "matrix.csv": self._MATRIX_CSV},
+        )
+        monkeypatch.setattr(
+            gate, "_NON_CURRENCY_NUMERIC_FIELDS", gate._NON_CURRENCY_NUMERIC_FIELDS - {self._KEY}
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert len(violations) == 2, violations
+        assert all(self._KEY in violation for violation in violations), violations
+
+    def test_a_published_arm_cost_total_is_refused_while_provisional(self, tmp_path: Path) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"matrix.json": self._matrix_json(0.25)},
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert violations and all("arm_cost_total" in v for v in violations), violations

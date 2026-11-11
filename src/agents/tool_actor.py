@@ -6,7 +6,9 @@ to a tool's ``input_schema``, hands the arguments to the injected ``dispatch`` c
 the tool's raw response verbatim. The actor does not validate the arguments; the action Lambda's
 handler does, and its ``validation_failed`` envelope returns verbatim. A model error or a missing
 tool call becomes a ``tool_actor_error`` envelope without dispatching. The tool-tier attribution is
-returned in every case. The actor holds no identity; the injected dispatch carries it.
+returned in every case the model is called. A request whose estimated prompt exceeds the given
+``request_prompt_limit`` is never sent: it raises :class:`agents.budget.RequestRefusedError`. The
+actor holds no identity; the injected dispatch carries it.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from agents.budget import TurnBudget
+from agents.prompt_estimate import refuse_if_over_limit
 from agents.registry import RegisteredTool
 from agents.tier_attribution import CacheCounts, InvocationAttribution, TokenCounts
 from providers.base import ModelProvider, ResolvedInvocation
@@ -72,6 +76,8 @@ async def formulate_and_invoke(
     resolved: ResolvedInvocation,
     dispatch: ToolDispatch,
     clock: Clock | None = None,
+    request_prompt_limit: int | None = None,
+    budget: TurnBudget | None = None,
 ) -> ToolActorResult:
     """Formulate one tool call's arguments on the tool tier and dispatch them verbatim.
 
@@ -86,12 +92,19 @@ async def formulate_and_invoke(
         dispatch: The identity-bound dispatch callable (see :data:`ToolDispatch`).
         clock: A monotonic-seconds clock used only to time the Lambda dispatch; when omitted,
             dispatch latency is left ``None``.
+        request_prompt_limit: The tool tier's per-request estimated prompt-token limit; ``None``
+            checks nothing.
+        budget: The turn's budget, which records a refused request.
 
     Returns:
         A :class:`ToolActorResult`. ``output`` is the tool's verbatim response (including the
         handler's own ``validation_failed`` envelope when the formulation was schema-invalid); when
         the model emitted no tool call or errored, ``output`` is a ``tool_actor_error`` envelope
         and no dispatch occurs. Never raises for a model failure.
+
+    Raises:
+        agents.budget.RequestRefusedError: The request's estimated prompt exceeds
+            ``request_prompt_limit``; the model is not called and nothing is dispatched.
     """
     messages: list[dict[str, object]] = [
         {"role": "user", "content": f"{_ACTOR_DIRECTIVE}\n\n{intent}"}
@@ -99,6 +112,16 @@ async def formulate_and_invoke(
     provider_tools: list[dict[str, object]] = [
         {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
     ]
+
+    if request_prompt_limit is not None:
+        refuse_if_over_limit(
+            messages,
+            provider_tools,
+            limit=request_prompt_limit,
+            tier=TOOL_TIER,
+            role=role,
+            budget=budget,
+        )
 
     tool_input: dict[str, Any] | None = None
     input_tokens = output_tokens = cache_read = cache_write = 0

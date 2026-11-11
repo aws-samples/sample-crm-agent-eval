@@ -263,7 +263,7 @@ def test_a_high_risk_write_surfaces_as_a_structured_proposal_not_a_direct_commit
             "target_id": opportunity["opportunity_id"],
             "operation": "update",
             "reason": "Customer verbally committed on the call today.",
-            "transaction_key": "tx-lt-proposal-1",  # gitleaks:allow
+            "transaction_key": "tx-lt-proposal-1",  # gitleaks:allow  # nosemgrep: generic.secrets.gitleaks.generic-api-key
             "after_payload": {"stage": "Closed Won"},
         },
         store=turn_store,

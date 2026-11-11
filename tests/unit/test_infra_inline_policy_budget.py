@@ -70,6 +70,7 @@ ROOT_SUBSTITUTIONS: Final[dict[str, str]] = {
     "module.eval_artifacts.bucket_arn": f'"arn:aws:s3:::crm-agent-eval-eval-artifacts-{ACCOUNT}"',
     "aws_kms_key.eval_artifacts.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
     "aws_kms_key.cursor.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
+    "aws_kms_key.api_allowlist.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
     '"${path.module}/../frontend/index.html"': f'"{REPO_ROOT / "frontend" / "index.html"}"',
     "aws_iam_role.agentcore_gateway.arn": (
         f'"arn:aws:iam::{ACCOUNT}:role/crm-agent-eval-agentcore-gateway-role"'
@@ -406,8 +407,8 @@ def test_the_harness_measures_every_vpc_lambda_role(
     expected = set(_lambda_action_roles(plan).values()) | {RELAY_ROLE}
     assert len(_lambda_action_roles(plan)) == len(_expected_lambda_action_modules())
     assert set(aggregates) == expected, sorted(set(aggregates) ^ expected)
-    # The module's four, plus the root's `eval_trigger_states` and `eval_trigger_artifacts`.
-    assert aggregates[EVAL_TRIGGER_ROLE][1] == 6
+    # The module's five, plus the root's `eval_trigger_states` and `eval_trigger_artifacts`.
+    assert aggregates[EVAL_TRIGGER_ROLE][1] == 7
 
 
 def test_every_role_stays_under_the_budget_fail_threshold(
@@ -694,5 +695,5 @@ def test_capabilities_inline_aggregate_stays_under_the_fail_threshold(
 ) -> None:
     """(c) The new Deny keeps the capabilities role well inside the inline budget."""
     chars, count = aggregates[CAPABILITIES_ROLE]
-    assert count == 3, "logs, vpc-access and dynamodb"
+    assert count == 4, "logs, vpc-access, dynamodb and config-kms"
     assert chars < FAIL_USAGE_FRACTION * INLINE_POLICY_AGGREGATE_LIMIT_CHARS, chars

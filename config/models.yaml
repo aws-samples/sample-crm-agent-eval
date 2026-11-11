@@ -39,6 +39,14 @@ families:
         model: openai.gpt-6-luna
         tuning: { effort: low }
 
+# Largest estimated prompt, in tokens, a single model request may carry at each tier. Each tier is
+# an independent setting; a request over its tier's limit is refused before it is sent. Every limit
+# must fit the context window of every model in model_capabilities.yaml.
+request_prompt_limits:
+  supervisor: 270000
+  subagent: 270000
+  tool: 95000
+
 # All inference goes through the bedrock-runtime endpoint, which serves the Messages API and the
 # Responses API. bedrock-mantle is not used.
 endpoint: bedrock-runtime

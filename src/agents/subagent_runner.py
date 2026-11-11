@@ -27,7 +27,10 @@ The runner reads no wall clock of its own. Given the turn's :class:`~agents.budg
 checks the budget's wall clock between rounds and bounds every model wait by the time left
 (:func:`agents.budget.until_deadline`, :func:`agents.budget.within_deadline`). When the clock runs
 out, the delegation ends with the outcome, events and attribution gathered so far. A leaf tool
-call already dispatched is always recorded.
+call already dispatched is always recorded. Given a ``request_prompt_limit``, each subagent round's
+request is checked with :func:`agents.prompt_estimate.refuse_if_over_limit` before it is sent; a
+refused round, or a refused tool-tier call (:class:`agents.budget.RequestRefusedError`), ends the
+delegation the same way, with no attribution for the refused request.
 """
 
 from __future__ import annotations
@@ -40,13 +43,20 @@ from dataclasses import dataclass, field
 from typing import Final, Protocol
 
 from agents.agent_prompts import load_agent_prompts
-from agents.budget import DeadlineReachedError, TurnBudget, until_deadline, within_deadline
+from agents.budget import (
+    DeadlineReachedError,
+    RequestRefusedError,
+    TurnBudget,
+    until_deadline,
+    within_deadline,
+)
 from agents.events import (
     TOOL_RESULT_BYTE_CEILING,
     TRUNCATION_MARKER,
     AgentEvent,
     truncate_tool_output,
 )
+from agents.prompt_estimate import refuse_if_over_limit
 from agents.registry import RegisteredTool
 from agents.subagents.base import SUBAGENT_TIER, SubagentSpec
 from agents.supervisor import (
@@ -176,6 +186,7 @@ def run_subagent(
     tool_actor: ToolActor,
     max_rounds: int = DEFAULT_MAX_SUBAGENT_ROUNDS,
     budget: TurnBudget | None = None,
+    request_prompt_limit: int | None = None,
 ) -> SubagentRunResult:
     """Run one subagent delegation and return its outcome, events, and attribution.
 
@@ -191,6 +202,8 @@ def run_subagent(
             :data:`DEFAULT_MAX_SUBAGENT_ROUNDS`).
         budget: The turn's budget, whose wall clock ends the delegation early; ``None`` sets no
             wall-clock bound.
+        request_prompt_limit: The subagent tier's per-request estimated prompt-token limit; a
+            round over it is refused and recorded on ``budget``. ``None`` checks nothing.
 
     Returns:
         A :class:`SubagentRunResult`.
@@ -206,6 +219,7 @@ def run_subagent(
             tool_actor=tool_actor,
             max_rounds=max_rounds,
             budget=budget,
+            request_prompt_limit=request_prompt_limit,
         )
     )
 
@@ -219,6 +233,7 @@ async def run_subagent_async(
     tool_actor: ToolActor,
     max_rounds: int = DEFAULT_MAX_SUBAGENT_ROUNDS,
     budget: TurnBudget | None = None,
+    request_prompt_limit: int | None = None,
 ) -> SubagentRunResult:
     """Await one subagent delegation in the caller's event loop and return its result.
 
@@ -227,9 +242,14 @@ async def run_subagent_async(
     :func:`run_subagent`.
     """
     driver = _SubagentDriver(
-        spec=spec, resolved=resolved, provider=provider, tool_actor=tool_actor, budget=budget
+        spec=spec,
+        resolved=resolved,
+        provider=provider,
+        tool_actor=tool_actor,
+        budget=budget,
+        request_prompt_limit=request_prompt_limit,
     )
-    with contextlib.suppress(DeadlineReachedError):
+    with contextlib.suppress(DeadlineReachedError, RequestRefusedError):
         await driver._consume(intent=intent, max_rounds=max_rounds)
     return driver.result()
 
@@ -243,6 +263,7 @@ class _SubagentDriver:
     provider: ModelProvider
     tool_actor: ToolActor
     budget: TurnBudget | None = None
+    request_prompt_limit: int | None = None
     events: list[AgentEvent] = field(default_factory=list)
     invocations: list[InvocationAttribution] = field(default_factory=list)
     tool_calls: list[ToolCallAttribution] = field(default_factory=list)
@@ -275,6 +296,15 @@ class _SubagentDriver:
             round_calls: list[dict[str, object]] = []
             round_results: list[dict[str, object]] = []
 
+            if self.request_prompt_limit is not None:
+                refuse_if_over_limit(
+                    messages,
+                    tool_schemas,
+                    limit=self.request_prompt_limit,
+                    tier=SUBAGENT_TIER,
+                    role=self.spec.role,
+                    budget=self.budget,
+                )
             stream = self.provider.stream(self.resolved, messages, tool_schemas)
             if self.budget is not None:
                 stream = until_deadline(
@@ -319,7 +349,7 @@ class _SubagentDriver:
                     )
                     round_calls.append({"id": call_id, "name": tool_name, "input": tool_input})
                     round_results.append({"id": call_id, "output": json.dumps(leaf_output)})
-            except DeadlineReachedError:
+            except (DeadlineReachedError, RequestRefusedError) as stopped:
                 self._settle_round(
                     saw_usage=saw_usage,
                     saw_incomplete_usage=saw_incomplete_usage,
@@ -327,7 +357,9 @@ class _SubagentDriver:
                     tokens=TokenCounts(input_tokens=total_input, output_tokens=total_output),
                     cache=CacheCounts(read_tokens=total_cache_read, write_tokens=total_cache_write),
                     latency_ms=round_latency_ms,
-                    unreported_cause="deadline",
+                    unreported_cause=(
+                        "deadline" if isinstance(stopped, DeadlineReachedError) else "turn_stopped"
+                    ),
                 )
                 raise
 

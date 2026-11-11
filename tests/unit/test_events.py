@@ -18,6 +18,7 @@ _COST_LINE: CostLine = {
     "output_tokens": 40,
     "cache_read_tokens": 0,
     "cache_write_tokens": 0,
+    "long_context_calls": 0,
     "cost_usd": 0.00031,
 }
 
@@ -92,7 +93,7 @@ def test_usage_and_completed_carry_cost_lines_and_resolved_tiers(kind: str) -> N
 
 def test_withheld_turn_renders_null_cost_and_true_flag() -> None:
     """A provisional-pricing turn carries ``cost_usd`` null and ``cost_withheld`` true."""
-    withheld_line: CostLine = {**_COST_LINE, "cost_usd": None}
+    withheld_line: CostLine = {**_COST_LINE, "long_context_calls": 2, "cost_usd": None}
     event = AgentEvent(
         kind="completed",
         text="done",
@@ -177,6 +178,10 @@ def test_withheld_turn_carries_no_figure() -> None:
         {**_COST_LINE, "output_tokens": 1.5},
         {**_COST_LINE, "cache_read_tokens": True},
         {**_COST_LINE, "model_id": ""},
+        {k: v for k, v in _COST_LINE.items() if k != "long_context_calls"},
+        {**_COST_LINE, "long_context_calls": -1},
+        {**_COST_LINE, "long_context_calls": True},
+        {**_COST_LINE, "long_context_calls": None},
         "not a mapping",
     ],
     ids=[
@@ -187,6 +192,10 @@ def test_withheld_turn_carries_no_figure() -> None:
         "float-count",
         "bool-count",
         "blank-model",
+        "missing-long-context-calls",
+        "neg-long-context-calls",
+        "bool-long-context-calls",
+        "null-long-context-calls",
         "str",
     ],
 )

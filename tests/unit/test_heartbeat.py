@@ -60,6 +60,7 @@ def _invocation(session_id: str) -> RuntimeInvocation:
         "session_id": session_id,
         AGENT_IDENTITY_KEY: {
             "claims": {CLAIM_REP_ID: "rep-1", "custom:book": "acc-1", CLAIM_TENANT: "demo"},
+            "principal_type": "user",
             "session_id": session_id,
         },
     }

@@ -99,9 +99,9 @@ def _identity_block(channel: str) -> dict[str, Any]:
         CLAIM_TENANT: _ATTACKER_TENANT,
     }
     if channel == AGENT_IDENTITY_KEY:
-        return {"claims": claims}
+        return {"claims": claims, "principal_type": "user"}
     return {
-        "authorizer": {"jwt": {"claims": {**claims, "token_use": "id", "aud": TEST_API_CLIENT_ID}}}
+        "authorizer": {"jwt": {"claims": {**claims, "token_use": "id", "aud": TEST_API_CLIENT_ID}}}  # nosec B105  # a token_use claim value
     }
 
 
@@ -765,7 +765,7 @@ def test_a_legitimate_rename_still_commits_and_keeps_its_index_key(seeded: Store
         seeded,
         IDENTITY_KEY,
         proposal_id,
-        transaction_key="tx-w13-ok-appr",  # gitleaks:allow
+        transaction_key="tx-w13-ok-appr",  # gitleaks:allow  # nosemgrep: generic.secrets.gitleaks.generic-api-key
     )
 
     assert approved["statusCode"] == 200

@@ -22,7 +22,10 @@ baseline](../../../docs/security-baseline.md#h-7). Modules named here: [`api`](.
   `config_parameter_arns` when set (`logs`); manage its own Hyperplane ENIs and write X-Ray segments
   (`vpc_access`, the two action sets that take `Resource = "*"`); DynamoDB grants and denies (when
   any are configured and `dynamodb_policy_managed = false`); DynamoDB KMS grant, plus the
-  context-bound cursor-key grant when `cursor_kms_grant_enabled` (`dynamodb_kms`, when enabled).
+  context-bound cursor-key grant when `cursor_kms_grant_enabled` (`dynamodb_kms`, when enabled);
+  and, when `config_parameter_arns` is set, `kms:Decrypt` on `config_parameter_kms_key_arn` through SSM
+  under each parameter's `PARAMETER_ARN` encryption context, with a Deny on `kms:Decrypt` through SSM
+  under any other key (`config_parameter_kms`).
 - `aws_iam_policy.dynamodb` (keyed `allow`/`deny`, plus `allow-2`, ... when
   `dynamodb_allow_statements_per_policy` splits the Allows) and
   `aws_iam_role_policy_attachment.dynamodb_deny` / `.dynamodb_allow[*]`, when
@@ -63,6 +66,7 @@ baseline](../../../docs/security-baseline.md#h-7). Modules named here: [`api`](.
 | `cursor_kms_key_arn` | no (`null`) | The pagination-cursor CMK (`aws_kms_key.cursor` in `infra/main.tf`). Required when `cursor_kms_grant_enabled` is true (validation). |
 | `cursor_kms_grant_enabled` | no (`false`) | Adds a `SealPaginationCursors` statement to the `<function_name>-dynamodb-kms` policy: `kms:Encrypt` and `kms:Decrypt` on `cursor_kms_key_arn`, only with `kms:EncryptionContext:purpose = crm-cursor`. Requires `dynamodb_kms_grant_enabled` (validation). The root sets it for the tools in `local.cursor_tools`, which also get `CRM_CURSOR_KMS_KEY_ARN`. Their roles are listed in `local.cursor_key_principal_arns`, because the key policy denies key use to every other role. |
 | `config_parameter_arns` | no (`[]`) | SSM parameter ARNs the function reads at runtime. Non-empty adds a `ReadConfigParameters` statement (`ssm:GetParameter` on exactly these ARNs) to the `<function_name>-logs` policy. Wildcards are rejected by validation. The root passes `local.api_allowed_client_ids_parameter_arn` to every API-Gateway-integrated function, beside `CRM_API_ALLOWED_CLIENT_IDS_PARAMETER`. |
+| `config_parameter_kms_key_arn` | when `config_parameter_arns` is set (`null`) | The CMK encrypting the SecureString `config_parameter_arns`. Adds the `<function_name>-config-kms` policy: a `DecryptConfigParameters` Allow (`kms:Decrypt` on this key, `kms:ViaService = ssm.<region>.amazonaws.com`, `kms:EncryptionContext:PARAMETER_ARN` in `config_parameter_arns`) and a `DenyConfigParameterDecryptUnderOtherKeys` Deny (`kms:Decrypt` on every other key through `ssm.*.amazonaws.com`), so a parameter re-encrypted under `aws/ssm` is unreadable. Validation rejects a wildcard ARN and a null key beside non-empty `config_parameter_arns`. The root passes `aws_kms_key.api_allowlist.arn`, and lists the same roles in `local.api_allowlist_key_consumer_arns` for the key policy. |
 | `gateway_target_role_arn` | no (`null`) | The Gateway target execution role admitted to invoke this function. |
 | `attach_gateway_target_grant` | no (`false`) | Drives the Gateway permission's `count`. Must agree with `gateway_target_role_arn` being non-null (enforced by a precondition). A flag rather than a null check on the ARN so an empty-state plan has a known `count`. |
 | `table_action_role_matrix_entries` | no (`[]`) | This instantiation's rows of the isolation matrix (below). Not read at plan time; echoed by `table_action_role_matrix_rows`. |

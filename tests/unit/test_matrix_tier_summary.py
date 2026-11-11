@@ -165,6 +165,7 @@ def test_an_empty_arm_still_reports_every_tier() -> None:
         "input_tokens": 0,
         "output_tokens": 0,
         "cost_total": 0.0,
+        "long_context_invocation_count": 0,
         "latency_p50_ms": None,
         "latency_p95_ms": None,
         "success": {"passed": 0, "applicable": 0, "rate": None},

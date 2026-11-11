@@ -3,7 +3,8 @@
  * Journey 21 — a stub sweep run from the eval dashboard renders the tier comparison summary as three
  * tables (Supervisor, Subagent, ToolCall), each headed `Metric` plus one column per arm, with fixed
  * row labels and the notes beneath; the `matrix.md` download carries the same cells in its
- * `## Tier comparison summary` section. Nothing in the summary names a verdict or a winner.
+ * `## Tier comparison summary` section. Nothing in the summary names a verdict or a winner. A run
+ * recorded by the current stack reports a count in every `Long-context invocations` cell, never `—`.
  *
  * Three sources are compared cell by cell: the rendered tables, the `tier_comparison_table` field of
  * the completed run's `eval_trigger` status response, and the downloaded `matrix.md`. The parsers
@@ -52,11 +53,15 @@ const COMMON_ROW_LABELS: readonly string[] = [
   "P95 latency per completed task (ms)",
   "P50 latency per completed task (ms)",
   "Model invocations",
+  "Long-context invocations",
   "Input tokens",
   "Output tokens",
   "Cost per task, all tasks",
   "Self-corrected retries",
 ];
+
+/** The row counting calls priced at long-context rates. */
+const LONG_CONTEXT_ROW = "Long-context invocations";
 
 /** Row labels that follow the common ones, per tier. */
 const TIER_ROW_LABELS: Readonly<Record<string, readonly string[]>> = {
@@ -364,6 +369,10 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
         { headers: table.headers, rows: table.rows },
         `${heading}'s rendered cells are the backend's cells verbatim`,
       ).toEqual({ headers: wireTable?.headers, rows: wireSections[index]?.rows });
+      const longContext = table.rows.find((row) => row[0] === LONG_CONTEXT_ROW) ?? [];
+      for (const cell of longContext.slice(1)) {
+        expect(cell, `${heading}'s ${LONG_CONTEXT_ROW} is a recorded count, not —`).toMatch(/^\d+$/);
+      }
     }
 
     const summaryText = (await summary.innerText()).replace(/\s+/g, " ");

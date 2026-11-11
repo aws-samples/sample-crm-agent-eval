@@ -1059,7 +1059,7 @@ def test_run_rendering_is_labelled_unguarded_and_tallies_skip_and_defer(
     assert result.returncode == 0, result.stdout + result.stderr
 
     published = tmp_path / "results" / "verification-inventory.md"
-    run_md = tmp_path / "results" / "verification-inventory.run.md"
+    run_md = tmp_path / "results" / "verification-inventory.partial.run.md"
     assert run_md.exists(), result.stdout + result.stderr
     assert not published.exists(), "a --layer 4 run wrote the guarded published document"
 
@@ -1082,7 +1082,14 @@ def test_inventory_artifacts_are_never_written_into_the_real_repo_by_this_suite(
         "would write its inventory into the real repository"
     )
     script_text = script_path.read_text(encoding="utf-8")
-    for variable in ("INVENTORY_JSON", "INVENTORY_MD", "RUN_INVENTORY_JSON", "RUN_INVENTORY_MD"):
+    for variable in (
+        "INVENTORY_JSON",
+        "INVENTORY_MD",
+        "RUN_INVENTORY_JSON",
+        "RUN_INVENTORY_MD",
+        "PARTIAL_RUN_INVENTORY_JSON",
+        "PARTIAL_RUN_INVENTORY_MD",
+    ):
         assert f'{variable}="${{REPO_ROOT}}/results/' in script_text, (
             f"{variable} is no longer derived from REPO_ROOT; the tmp_path isolation this suite "
             "relies on would no longer hold"
@@ -2501,7 +2508,7 @@ def test_script_with_no_parseable_output_appears_in_inventory_as_a_failed_class(
     )
     assert result.returncode != 0
 
-    inventory_json = tmp_path / "results" / "verification-inventory.run.json"
+    inventory_json = tmp_path / "results" / "verification-inventory.partial.run.json"
     assert inventory_json.exists(), result.stdout + result.stderr
     document = json.loads(inventory_json.read_text(encoding="utf-8"))
     assert document["partial"] is True and document["partial_selector"] == "--layer 4"
@@ -2753,14 +2760,18 @@ def test_a_partial_run_is_marked_partial_and_lists_what_did_not_run(
     assert "NOT a full-deployment verification" in result.stderr
 
     document = json.loads(
-        (tmp_path / "results" / "verification-inventory.run.json").read_text(encoding="utf-8")
+        (tmp_path / "results" / "verification-inventory.partial.run.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert isinstance(document, dict) and document["partial"] is True
     assert document["selected_modules"] == ["scripts.smoke.iam_roles"]
     assert set(document["not_run_modules"]) == _all_declared_modules() - {"scripts.smoke.iam_roles"}
     assert [entry["resource_class"] for entry in document["results"]] == ["iam_roles"]
 
-    md_text = (tmp_path / "results" / "verification-inventory.run.md").read_text(encoding="utf-8")
+    md_text = (tmp_path / "results" / "verification-inventory.partial.run.md").read_text(
+        encoding="utf-8"
+    )
     assert "**PARTIAL RUN (--only)**" in md_text and "scripts.smoke.eval_sfn" in md_text
 
 
@@ -2775,6 +2786,43 @@ def test_a_full_run_inventory_stays_an_unmarked_array(
     )
     assert isinstance(document, list)
     assert "PARTIAL" not in result.stdout + result.stderr
+    assert not (tmp_path / "results" / "verification-inventory.partial.run.json").exists()
+    assert not (tmp_path / "results" / "verification-inventory.partial.run.md").exists()
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [("--only", "iam_roles"), ("--layer", "5"), ("--layer", "4", "--only", "iam_roles")],
+    ids=["only", "layer", "layer-and-only"],
+)
+def test_a_partial_run_leaves_the_full_run_inventory_bytes_untouched(
+    stubbed: tuple[Path, dict[str, str]],
+    outputs_file: Path,
+    tmp_path: Path,
+    selector: tuple[str, ...],
+) -> None:
+    """A PARTIAL run writes only the partial-run paths; seeded full-run files keep their bytes."""
+    script_path, env = stubbed
+    results_dir = tmp_path / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    full_json = results_dir / "verification-inventory.run.json"
+    full_md = results_dir / "verification-inventory.run.md"
+    seeded_json = b'[{"resource_class": "seeded-full-run", "checks": []}]\n'
+    seeded_md = b"# seeded full-run rendering\n"
+    full_json.write_bytes(seeded_json)
+    full_md.write_bytes(seeded_md)
+
+    result = _run(script_path, _billable(outputs_file, *selector), env, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert full_json.read_bytes() == seeded_json, "a PARTIAL run overwrote the full-run JSON"
+    assert full_md.read_bytes() == seeded_md, "a PARTIAL run overwrote the full-run rendering"
+    partial_json = results_dir / "verification-inventory.partial.run.json"
+    partial_md = results_dir / "verification-inventory.partial.run.md"
+    document = json.loads(partial_json.read_text(encoding="utf-8"))
+    assert isinstance(document, dict) and document["partial"] is True
+    assert "**PARTIAL RUN (" in partial_md.read_text(encoding="utf-8")
+    assert f"wrote {partial_json} and {partial_md}" in result.stdout
 
 
 def test_a_partial_run_that_stops_at_a_failing_layer_lists_the_unrun_selection(
@@ -2790,7 +2838,9 @@ def test_a_partial_run_that_stops_at_a_failing_layer_lists_the_unrun_selection(
         "scripts.smoke.iam_roles"
     ]
     document = json.loads(
-        (tmp_path / "results" / "verification-inventory.run.json").read_text(encoding="utf-8")
+        (tmp_path / "results" / "verification-inventory.partial.run.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert "scripts.smoke.eval_sfn" in document["not_run_modules"]
     assert "PARTIAL RUN: ONE OR MORE SELECTED MODULES FAILED" in result.stderr
@@ -2813,7 +2863,9 @@ def test_a_layer_run_is_marked_partial_like_only(
     assert "PARTIAL RUN (--layer 5) — NOT a full-deployment verification." in result.stderr
 
     document = json.loads(
-        (tmp_path / "results" / "verification-inventory.run.json").read_text(encoding="utf-8")
+        (tmp_path / "results" / "verification-inventory.partial.run.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert isinstance(document, dict) and document["partial"] is True
     assert document["partial_selector"] == "--layer 5"
@@ -2822,7 +2874,9 @@ def test_a_layer_run_is_marked_partial_like_only(
     }
     assert set(document["selected_modules"]) == layer_5
     assert set(document["not_run_modules"]) == _all_declared_modules() - layer_5
-    md_text = (tmp_path / "results" / "verification-inventory.run.md").read_text(encoding="utf-8")
+    md_text = (tmp_path / "results" / "verification-inventory.partial.run.md").read_text(
+        encoding="utf-8"
+    )
     assert "**PARTIAL RUN (--layer 5)**" in md_text
 
 

@@ -254,7 +254,10 @@ class TestSB3IdentityHandling:
         identity = Identity(rep_id="rep-1", book=frozenset({"acc-1"}), tenant="demo")
         spoofed_args: dict[str, object] = {
             "account_id": "acc-1",
-            AGENT_IDENTITY_KEY: {"claims": {CLAIM_REP_ID: "attacker", CLAIM_TENANT: "other"}},
+            AGENT_IDENTITY_KEY: {
+                "claims": {CLAIM_REP_ID: "attacker", CLAIM_TENANT: "other"},
+                "principal_type": "user",
+            },
         }
 
         event = agent_identity_event(identity, spoofed_args)

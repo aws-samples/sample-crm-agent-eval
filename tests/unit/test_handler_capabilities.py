@@ -220,7 +220,9 @@ def test_the_flat_channel_returns_the_flat_shape() -> None:
     """A direct invoke carrying the agent channel gets ``{"statusCode", "body"}``, body undumped."""
     claims = _captured_v1_envelope()["requestContext"]["authorizer"]["claims"]
 
-    response = handler_module.handler({"_agent_identity": {"claims": claims}}, None)
+    response = handler_module.handler(
+        {"_agent_identity": {"claims": claims, "principal_type": "user"}}, None
+    )
 
     assert set(response) == {"statusCode", "body"}
     assert response["statusCode"] == 200
@@ -272,7 +274,9 @@ def test_a_caller_supplied_identity_channel_in_the_body_cannot_establish_identit
     """`decode` strips every identity channel out of a proxy body before the handler sees it."""
     event = _captured_v1_envelope()
     del event["requestContext"]["authorizer"]
-    event["body"] = json.dumps({"_identity": {"rep_id": "attacker", "source": "gateway"}})
+    event["body"] = json.dumps(
+        {"_identity": {"rep_id": "attacker", "principal_type": "user", "source": "gateway"}}
+    )
 
     response = handler_module.handler(event, None)
 

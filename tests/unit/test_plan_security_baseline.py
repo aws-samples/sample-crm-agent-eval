@@ -7717,11 +7717,11 @@ class TestBootstrapParity:
 
 
 class TestStoreKeyPolicyCount:
-    """`aws_kms_key_policy` expects 4, and the committed fixture plans 4."""
+    """`aws_kms_key_policy` expects 5, and the committed fixture plans 5."""
 
-    def test_the_expected_and_declared_counts_are_four(self) -> None:
-        assert gate.EXPECTED_RESOURCE_COUNTS["aws_kms_key_policy"].fixed == 4
-        assert gate.DECLARED_INFRA_BLOCK_COUNTS['resource "aws_kms_key_policy"'][0] == 4
+    def test_the_expected_and_declared_counts_are_five(self) -> None:
+        assert gate.EXPECTED_RESOURCE_COUNTS["aws_kms_key_policy"].fixed == 5
+        assert gate.DECLARED_INFRA_BLOCK_COUNTS['resource "aws_kms_key_policy"'][0] == 5
         rows = {
             f.resource: f.status
             for f in gate.check_declared_infra_block_counts(gate.Plan(resource_changes=[]))
@@ -7736,13 +7736,13 @@ class TestStoreKeyPolicyCount:
         ]
         return row
 
-    def test_the_fixture_plans_four_and_the_count_passes(self) -> None:
+    def test_the_fixture_plans_five_and_the_count_passes(self) -> None:
         planned = sum(
             1
             for r in load_plan("compliant").resource_changes
             if r.get("type") == "aws_kms_key_policy"
         )
-        assert planned == 4
+        assert planned == 5
         assert "aws_kms_key_policy" not in gate.FIXTURE_LAGGING_COUNTS
         assert self._count_row(load_plan("compliant")).status == "pass"
 
@@ -7754,7 +7754,7 @@ class TestStoreKeyPolicyCount:
         ]
         return _plan_of(document | {"resource_changes": [*document["resource_changes"], *extra]})
 
-    def test_a_plan_with_four_passes_and_three_or_five_fails(self) -> None:
+    def test_a_plan_with_five_passes_and_four_or_six_fails(self) -> None:
         document = plan_fixtures.build("compliant")
         policy = next(r for r in document["resource_changes"] if r["type"] == "aws_kms_key_policy")
         fewer = [r for r in document["resource_changes"] if r is not policy]
@@ -7771,7 +7771,7 @@ class TestStoreKeyPolicyCount:
             document
             | {"resource_changes": [r for r in document["resource_changes"] if r is not policy]}
         )
-        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (3, "lagging")})
+        monkeypatch.setattr(gate, "FIXTURE_LAGGING_COUNTS", {"aws_kms_key_policy": (4, "lagging")})
         assert self._count_row(fewer).status == "deferred"
         assert self._count_row(load_plan("compliant")).status == "pass"
         assert self._count_row(self._with_extra(document, 1)).status == "fail"

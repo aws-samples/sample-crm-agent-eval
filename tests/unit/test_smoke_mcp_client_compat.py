@@ -837,3 +837,47 @@ def test_the_cli_fails_loudly_on_missing_outputs(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["resource_class"] == module.RESOURCE_CLASS
     assert [c["status"] for c in payload["checks"]] == ["fail"]
+
+
+class HTTPStatusError(Exception):
+    """Named to match the HTTP client's status error, which is how the walk recognises it."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status {status_code}")
+        self.response = type("_Response", (), {"status_code": status_code})()
+
+
+def _raised_from(outer: Exception, inner: BaseException, *, explicit: bool) -> Exception:
+    try:
+        try:
+            raise inner
+        except BaseException as exc:
+            if explicit:
+                raise outer from exc
+            raise outer  # noqa: B904
+    except Exception as raised:
+        return raised
+
+
+def test_http_status_of_follows_an_explicit_cause() -> None:
+    assert (
+        module._http_status_of(_raised_from(RuntimeError("x"), HTTPStatusError(403), explicit=True))
+        == 403
+    )
+
+
+def test_http_status_of_traverses_exception_group_members_and_their_causes() -> None:
+    member = _raised_from(RuntimeError("member"), HTTPStatusError(401), explicit=True)
+    group = ExceptionGroup("task group", [ValueError("other"), member])
+    assert module._http_status_of(group) == 401
+    assert module._http_status_of(ExceptionGroup("g", [HTTPStatusError(429)])) == 429
+
+
+def test_http_status_of_does_not_follow_a_context_only_chain() -> None:
+    """A status error that is only the implicit ``__context__`` is not the failure's cause."""
+    raised = _raised_from(RuntimeError("x"), HTTPStatusError(403), explicit=False)
+    assert raised.__cause__ is None
+    assert isinstance(raised.__context__, HTTPStatusError)
+    assert module._http_status_of(raised) is None
+    group = ExceptionGroup("task group", [raised])
+    assert module._http_status_of(group) is None

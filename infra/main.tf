@@ -657,7 +657,8 @@ module "lambda_action" {
   )
   environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
 
-  config_parameter_arns = contains(local.routed_tool_names, each.key) ? [local.api_allowed_client_ids_parameter_arn] : []
+  config_parameter_arns        = contains(local.routed_tool_names, each.key) ? [local.api_allowed_client_ids_parameter_arn] : []
+  config_parameter_kms_key_arn = contains(local.routed_tool_names, each.key) ? aws_kms_key.api_allowlist.arn : null
 
   cursor_kms_key_arn       = contains(local.cursor_tools, each.key) ? aws_kms_key.cursor.arn : null
   cursor_kms_grant_enabled = contains(local.cursor_tools, each.key)
@@ -886,8 +887,9 @@ module "lambda_action_eval_trigger" {
     EVAL_ARTIFACTS_BUCKET = module.eval_artifacts.bucket_name
     EVAL_ARTIFACTS_PREFIX = module.eval_artifacts.artifact_prefix
   }
-  environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
-  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
+  environment_kms_key_arn      = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns        = [local.api_allowed_client_ids_parameter_arn]
+  config_parameter_kms_key_arn = aws_kms_key.api_allowlist.arn
 
   reserved_concurrent_executions = local.reserved_concurrency["eval_trigger"]
 
@@ -941,8 +943,9 @@ module "lambda_action_capabilities" {
     # Required for this zip's layout: the first-party packages live under `src/`.
     PYTHONPATH = "/var/task/src"
   }
-  environment_kms_key_arn = module.observability.cloudwatch_logs_kms_key_arn
-  config_parameter_arns   = [local.api_allowed_client_ids_parameter_arn]
+  environment_kms_key_arn      = module.observability.cloudwatch_logs_kms_key_arn
+  config_parameter_arns        = [local.api_allowed_client_ids_parameter_arn]
+  config_parameter_kms_key_arn = aws_kms_key.api_allowlist.arn
 
   reserved_concurrent_executions = local.reserved_concurrency["capabilities"]
 
@@ -1585,14 +1588,162 @@ locals {
 }
 
 resource "aws_ssm_parameter" "api_allowed_client_ids" {
-  # checkov:skip=CKV2_AWS_34: holds the SPA client id, a public value, not a secret
-  name  = local.api_allowed_client_ids_parameter_name
-  type  = "String"
-  value = module.cognito.spa_client_id
+  name   = local.api_allowed_client_ids_parameter_name
+  type   = "SecureString"
+  tier   = "Standard"
+  key_id = aws_kms_key.api_allowlist.arn
+  value  = module.cognito.spa_client_id
 
   tags = {
     "data-classification" = "internal"
   }
+
+  depends_on = [aws_kms_key_policy.api_allowlist]
+}
+
+# ---------------------------------------------------------------------------
+# api_allowlist — the CMK encrypting the allowlist SecureString. Operators write and read it through
+# SSM; the consumer roles may only decrypt it through SSM under the parameter's encryption context.
+# ---------------------------------------------------------------------------
+
+locals {
+  api_allowlist_ssm_service = "ssm.${var.aws_region}.amazonaws.com"
+
+  # Every role passed the allowlist parameter in `config_parameter_arns`.
+  api_allowlist_key_consumer_arns = concat(
+    [for name in local.routed_tool_names : module.lambda_action[name].role_arn],
+    [
+      module.lambda_action_eval_trigger.role_arn,
+      module.lambda_action_capabilities.role_arn,
+      module.lambda_action_user_settings.role_arn,
+    ],
+  )
+}
+
+resource "aws_kms_key" "api_allowlist" {
+  # checkov:skip=CKV2_AWS_64: policy managed by aws_kms_key_policy.api_allowlist
+  description             = "${local.name_prefix} API client allowlist parameter"
+  enable_key_rotation     = true
+  deletion_window_in_days = 7
+
+  tags = {
+    "data-classification" = "internal"
+  }
+}
+
+resource "aws_kms_alias" "api_allowlist" {
+  name          = "alias/${local.name_prefix}-api-allowlist"
+  target_key_id = aws_kms_key.api_allowlist.key_id
+}
+
+# Keeps the account-root statement, admits the operators to write and read the parameter and the
+# consumers to read it, both only through SSM, and denies writes, key use and key administration
+# outside those lists.
+resource "aws_kms_key_policy" "api_allowlist" {
+  key_id                             = aws_kms_key.api_allowlist.id
+  bypass_policy_lockout_safety_check = false
+
+  lifecycle {
+    precondition {
+      condition     = contains(concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]), data.aws_iam_session_context.current.issuer_arn) && data.aws_iam_session_context.current.issuer_arn != "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+      error_message = "The caller running this plan is not an operator. Add its role or user ARN to crm_operator_principal_arns in terraform.tfvars, or run as a listed operator; nothing was applied."
+    }
+  }
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableIAMUserPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowOperatorsUseThroughSsm"
+        Effect    = "Allow"
+        Principal = { AWS = var.crm_operator_principal_arns }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:DescribeKey",
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = { "kms:ViaService" = local.api_allowlist_ssm_service }
+        }
+      },
+      {
+        Sid       = "AllowConsumersDecryptTheParameter"
+        Effect    = "Allow"
+        Principal = { AWS = local.api_allowlist_key_consumer_arns }
+        Action    = "kms:Decrypt"
+        Resource  = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService"                      = local.api_allowlist_ssm_service
+            "kms:EncryptionContext:PARAMETER_ARN" = local.api_allowed_client_ids_parameter_arn
+          }
+        }
+      },
+      {
+        Sid       = "DenyKeyWriteToNonOperators"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:Encrypt",
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+          "kms:CreateGrant",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnNotEquals = { "aws:PrincipalArn" = var.crm_operator_principal_arns }
+          Bool         = { "aws:PrincipalIsAWSService" = "false" }
+        }
+      },
+      {
+        Sid       = "DenyKeyUseToNonProjectPrincipals"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:Decrypt",
+          "kms:Encrypt",
+          "kms:GenerateDataKey*",
+          "kms:ReEncrypt*",
+          "kms:CreateGrant",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnNotEquals = { "aws:PrincipalArn" = concat(local.api_allowlist_key_consumer_arns, var.crm_operator_principal_arns) }
+          Bool         = { "aws:PrincipalIsAWSService" = "false" }
+        }
+      },
+      {
+        Sid       = "DenyKeyAdministrationToNonOperators"
+        Effect    = "Deny"
+        Principal = "*"
+        Action = [
+          "kms:PutKeyPolicy",
+          "kms:ScheduleKeyDeletion",
+          "kms:DisableKey",
+          "kms:RevokeGrant",
+          "kms:DisableKeyRotation",
+          "kms:CreateAlias",
+          "kms:UpdateAlias",
+          "kms:DeleteAlias",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:UpdateKeyDescription",
+        ]
+        Resource = "*"
+        Condition = {
+          ArnNotEquals = { "aws:PrincipalArn" = concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]) }
+        }
+      },
+    ]
+  })
 }
 
 resource "aws_ssm_parameter" "relay_cognito_audience" {

@@ -14,10 +14,11 @@ assertions about what must be absent from the deployed distribution: the retired
 data-plane origin, a viewer-request function association, and response compression.
 
 Asserts one custom response-headers policy on every behaviour, carrying an enforced
-`Content-Security-Policy` (`Override` on) and `X-Frame-Options: DENY`, and that the served header on
-`/`, an unauthenticated `/api/*` response and an unauthenticated `/agent/*` response is that policy:
-the designed directive set, Cognito in `connect-src`, and a `sha256-` source for every inline script
-the served document carries.
+`Content-Security-Policy` (`Override` on) and `X-Frame-Options: DENY`; that each probed behaviour
+serves `Strict-Transport-Security` with max-age=31536000, includeSubDomains and preload; and that the
+served CSP on `/`, an unauthenticated `/api/*` response and an unauthenticated `/agent/*` response is
+that policy: the designed directive set, Cognito in `connect-src`, and a `sha256-` source for every
+inline script the served document carries.
 
 Then drives the distribution over the network: a client-side deep link must return the built SPA
 document (and a missing asset path must not), while an unauthenticated `/api/*` request must still
@@ -797,8 +798,10 @@ _CSP_DIRECTIVES: frozenset[str] = frozenset({*_CSP_FIXED_DIRECTIVES, "script-src
 #: A `script-src` hash source.
 _SCRIPT_HASH_SOURCE = re.compile(r"^'sha256-[A-Za-z0-9+/]{43}='$")
 
-#: An inline `<script>` with no attributes: the only kind the CSP allows by hash.
-_INLINE_SCRIPT = re.compile(r"<script>(.*?)</script>", re.DOTALL)
+#: An inline `<script>` element of any case and attributes, excluding one with a `src` attribute.
+_INLINE_SCRIPT = re.compile(
+    r"<script\b(?![^>]*\ssrc\s*=)[^>]*>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE
+)
 
 #: An unauthenticated `/agent/*` probe. The relay refuses it before routing, so any path works.
 _UNAUTHENTICATED_AGENT_PATH = "/agent/csp-probe"
@@ -812,6 +815,8 @@ _CSP_PROBES: tuple[tuple[str, str, str, bool], ...] = (
 
 _CSP_HEADER = "content-security-policy"
 _CSP_REPORT_ONLY_HEADER = "content-security-policy-report-only"
+_HSTS_HEADER = "strict-transport-security"
+_HSTS_MAX_AGE_SEC = 31536000
 
 
 def _parse_csp(policy: str) -> tuple[dict[str, list[str]], list[str]]:
@@ -867,6 +872,37 @@ def _csp_design_problems(policy: str) -> list[str]:
         if "'unsafe-inline'" in sources and name != "style-src":
             problems.append(f"{name} allows 'unsafe-inline'")
     return problems
+
+
+def _hsts_problems(value: str | None) -> list[str]:
+    """Return why a served `Strict-Transport-Security` value is not the designed one."""
+    if not value:
+        return ["no Strict-Transport-Security header"]
+    directives = {}
+    for part in value.split(";"):
+        name, _, argument = part.strip().partition("=")
+        if name:
+            directives[name.strip().lower()] = argument.strip().strip('"')
+    problems = []
+    if directives.get("max-age") != str(_HSTS_MAX_AGE_SEC):
+        problems.append(f"max-age is {directives.get('max-age')!r}, not {_HSTS_MAX_AGE_SEC}")
+    for name in ("includesubdomains", "preload"):
+        if name not in directives:
+            problems.append(f"{name} is absent")
+    return problems
+
+
+def _check_served_hsts(resource: str, path: str, method: str, value: str | None) -> CheckResult:
+    """One `hsts_header_served` row for the response a served-header probe received."""
+    problems = _hsts_problems(value)
+    return CheckResult(
+        resource=resource,
+        check="hsts_header_served",
+        status="fail" if problems else "pass",
+        detail=f"{method} {path}: " + "; ".join(problems)
+        if problems
+        else f"{method} {path} serves Strict-Transport-Security: {value}",
+    )
 
 
 def _check_response_headers_policy(
@@ -963,7 +999,8 @@ def _check_served_csp(
 ) -> Iterable[CheckResult]:
     """Assert the served CSP on `/`, an unauthenticated `/api/*` and an unauthenticated `/agent/*`.
 
-    One `csp_header_enforced` row per behaviour, then rows over the `/` response's header: equal on
+    One `csp_header_enforced` and one `hsts_header_served` row per behaviour (the latter requiring
+    max-age=31536000, includeSubDomains and preload), then rows over the `/` response's header: equal on
     every behaviour and to the policy, the designed directive set, Cognito in `connect-src`, and a
     hash source for every inline script in the served document.
     """
@@ -974,8 +1011,12 @@ def _check_served_csp(
         result = header_caller(f"https://{domain_name}{path}", method)
         if isinstance(result, str):
             yield CheckResult(resource=resource, check=check, status="fail", detail=result)
+            yield CheckResult(
+                resource=resource, check="hsts_header_served", status="fail", detail=result
+            )
             continue
         status_code, headers, body = result
+        yield _check_served_hsts(resource, path, method, headers.get(_HSTS_HEADER))
         policy = headers.get(_CSP_HEADER)
         if unauthenticated and status_code < 400:
             yield CheckResult(

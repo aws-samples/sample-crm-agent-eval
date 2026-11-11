@@ -321,6 +321,23 @@ def test_a_healthy_report_passes(tmp_path: Path) -> None:
     assert "3 executed, 3 declared skip(s)" in result.stdout
 
 
+_HOSTED_UI_SKIPS = (
+    ("01-signin.spec.ts", "after sign-out, a Hosted UI sign-in asks for credentials again"),
+    ("01-signin.spec.ts", "a Hosted UI logout with no session still lands on the signed-out page"),
+)
+
+
+def test_only_journey_01s_two_hosted_ui_skips_are_declared(tmp_path: Path) -> None:
+    """Both Hosted UI skips pass together; any other journey 01 skip beside them still fails."""
+    declared = _check_report(tmp_path, _report(executed=2, skipped=list(_HOSTED_UI_SKIPS)))
+    assert declared.returncode == 0, declared.stderr
+    third = ("01-signin.spec.ts", "the /logout route serves the signed-out sign-in page")
+    result = _check_report(tmp_path, _report(executed=2, skipped=[*_HOSTED_UI_SKIPS, third]))
+    assert result.returncode == 1
+    assert result.stderr.count("undeclared skip:") == 1
+    assert f"undeclared skip: {third[0]} › {third[1]}" in result.stderr
+
+
 def test_an_undeclared_skip_fails_even_when_others_executed(tmp_path: Path) -> None:
     undeclared = ("01-signin.spec.ts", "a protected route renders no CRM data before sign-in")
     result = _check_report(tmp_path, _report(executed=5, skipped=[undeclared]))
@@ -366,7 +383,7 @@ def test_every_allowed_skip_names_a_skip_guard_in_its_journey() -> None:
     and each opt-in names the variable that spec reads."""
     source = CHECKER.read_text(encoding="utf-8")
     entries = re.findall(r'file: "([^"]+)",\s*title: "([^"]+)",(?:\s*optIn: "([^"]+)",)?', source)
-    assert len(entries) == 4, entries
+    assert len(entries) == 6, entries
     for file, title, opt_in in entries:
         spec = (BROWSER_DIR / "journeys" / file).read_text(encoding="utf-8")
         start = spec.find(f'test("{title}"')

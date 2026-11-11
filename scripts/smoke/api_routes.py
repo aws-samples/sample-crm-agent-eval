@@ -1312,7 +1312,7 @@ def allowlist_checks(
     (name,) = values
     spa_client_id = ctx.outputs.require_str("cognito_spa_client_id")
     ssm = ctx.client("ssm")
-    parameter = ssm.get_parameter(Name=name)["Parameter"]
+    parameter = ssm.get_parameter(Name=name, WithDecryption=True)["Parameter"]
     raw_value = str(parameter.get("Value", ""))
     listed = [part.strip() for part in raw_value.split(",") if part.strip()]
     yield CheckResult(
@@ -1325,8 +1325,8 @@ def allowlist_checks(
     parameter_type = str(parameter.get("Type", ""))
     yield CheckResult(
         resource=f"parameter:{name}",
-        check="allowlist_parameter_type_string",
-        status="pass" if parameter_type == "String" else "fail",
+        check="allowlist_parameter_type_securestring",
+        status="pass" if parameter_type == "SecureString" else "fail",
         detail=f"Type={parameter_type!r}",
     )
     tags = ssm.list_tags_for_resource(ResourceType="Parameter", ResourceId=name).get("TagList", [])

@@ -94,6 +94,7 @@ const PRICED_LINES = [
     output_tokens: 200,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
+    long_context_calls: 0,
     cost_usd: 0.0123,
   },
   {
@@ -104,6 +105,7 @@ const PRICED_LINES = [
     output_tokens: 90,
     cache_read_tokens: 0,
     cache_write_tokens: 0,
+    long_context_calls: 0,
     cost_usd: 0.0007,
   },
 ] as const;
@@ -184,6 +186,78 @@ describe("per-reply cost and its per-tier lines", () => {
 
     expect(screen.getByTestId("usage-cost")).toHaveTextContent("$0.50");
     expect(screen.queryByTestId("usage-input")).not.toBeInTheDocument();
+  });
+});
+
+describe("calls priced at long-context rates", () => {
+  const withLongContext = [
+    { ...PRICED_LINES[0], long_context_calls: 2 },
+    { ...PRICED_LINES[1], long_context_calls: 1 },
+  ];
+
+  it("shows the turn's long-context call count, and which line it came from, when above zero", () => {
+    const events = eventsFrom({
+      kind: "completed",
+      cost_withheld: false,
+      cost_usd: 0.013,
+      cost_lines: withLongContext,
+    });
+
+    render(<UsageMeter events={events} />);
+
+    expect(screen.getByTestId("usage-long-context-calls")).toHaveTextContent("3");
+    const notes = screen.getAllByTestId("usage-cost-line-long-context");
+    expect(notes.map((note) => note.textContent)).toEqual([
+      "2 calls at long-context rates",
+      "1 call at long-context rates",
+    ]);
+    const rows = screen.getAllByTestId("usage-cost-line");
+    expect(rows[0]).toContainElement(notes[0] ?? null);
+  });
+
+  it("shows nothing about long context when no call used it", () => {
+    const events = eventsFrom({
+      kind: "completed",
+      cost_withheld: false,
+      cost_usd: 0.013,
+      cost_lines: [...PRICED_LINES],
+    });
+
+    render(<UsageMeter events={events} />);
+
+    expect(screen.queryByTestId("usage-long-context-calls")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("usage-cost-line-long-context")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("usage-cost-line")).toHaveLength(2);
+  });
+
+  it("still shows the count while the cost is withheld", () => {
+    const events = eventsFrom({
+      kind: "completed",
+      cost_withheld: true,
+      cost_usd: null,
+      cost_lines: withLongContext.map((line) => ({ ...line, cost_usd: null })),
+    });
+
+    render(<UsageMeter events={events} />);
+
+    expect(screen.getByTestId("usage-cost-withheld")).toBeInTheDocument();
+    expect(screen.getByTestId("usage-long-context-calls")).toHaveTextContent("3");
+  });
+
+  it("ignores a line from a frame that predates the field", () => {
+    const legacy: Record<string, unknown> = { ...PRICED_LINES[0] };
+    delete legacy.long_context_calls;
+    const events = eventsFrom({
+      kind: "completed",
+      cost_withheld: false,
+      cost_usd: 0.013,
+      cost_lines: [legacy, withLongContext[1]] as unknown as typeof withLongContext,
+    });
+
+    render(<UsageMeter events={events} />);
+
+    expect(screen.getByTestId("usage-long-context-calls")).toHaveTextContent("1");
+    expect(screen.getAllByTestId("usage-cost-line-long-context")).toHaveLength(1);
   });
 });
 

@@ -1225,7 +1225,13 @@ def _baseline_efforts(matrix_report: Mapping[str, Any]) -> list[str]:
 
 
 def _price(model_id: str, usage: Mapping[str, float]) -> float:
+    """Price one model's per-task mean usage under its configured inference profile.
+
+    An approximation: it prices a mean, not individual calls, so the long-context tier of any
+    one call is not modelled.
+    """
     from crm.metering import TokenUsage, cost_for_usage
+    from eval.pricing import inference_profile_for
 
     return cost_for_usage(
         TokenUsage(
@@ -1235,6 +1241,7 @@ def _price(model_id: str, usage: Mapping[str, float]) -> float:
             cache_read_tokens=round(usage.get("cache_read_tokens", 0.0)),
         ),
         model_id,
+        inference_profile=inference_profile_for(model_id),
     ).total
 
 

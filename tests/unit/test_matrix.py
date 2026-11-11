@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import csv
+import dataclasses
 import io
 import json
 import re
@@ -17,10 +18,13 @@ from scripts import proc_run
 from crm.metering import TOKEN_ACCOUNTING, Family
 from eval import matrix
 from eval.matrix import (
+    ARM_COST_TOTAL_KEY,
+    ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
     ArmResult,
     MatrixResult,
     RunProvenance,
     archive_raw_run,
+    arm_from_report_fields,
     bad_write_rate_basis,
     build_matrix_result,
     correctness_composition,
@@ -1064,6 +1068,8 @@ def test_rendered_json_carries_the_figure_semantics_block_additively() -> None:
         "retrieval_narrowing_magnitude",
         "effort",
         "token_accounting",
+        "long_context_invocation_count",
+        "arm_totals",
         "per_arm_bad_write_rate_basis",
         "per_arm_correctness_composition",
         "per_arm_retrieval_conservatism",
@@ -2086,3 +2092,94 @@ def test_the_artifact_verdict_scan_finds_nothing_in_the_errored_items_note() -> 
     assert "Cost excludes 1 item(s)" in rendered
     assert _rendered_verdict_words(rendered) == []
     assert _find_verdict_vocabulary(rendered) == []
+
+
+# ---------------------------------------------------------------------------------------------
+# All-tier arm totals
+# ---------------------------------------------------------------------------------------------
+
+
+def _arm_with_totals(*, withheld: bool, cost: float | None = 0.25, count: int = 3) -> ArmResult:
+    return dataclasses.replace(
+        _sample_arm(withheld=withheld),
+        arm_totals_fields={
+            ARM_COST_TOTAL_KEY: None if withheld else cost,
+            ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY: count,
+        },
+    )
+
+
+def test_the_arm_totals_follow_model_metrics_in_the_json() -> None:
+    (arm,) = json.loads(render_json(build_matrix_result([_arm_with_totals(withheld=False)])))[
+        "arms"
+    ]
+    keys = list(arm)
+    assert keys[keys.index("model_metrics") + 1 : keys.index("model_metrics") + 3] == [
+        ARM_COST_TOTAL_KEY,
+        ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
+    ]
+    assert arm[ARM_COST_TOTAL_KEY] == 0.25
+    assert arm[ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY] == 3
+
+
+def test_a_withheld_arm_cost_total_is_null_in_json_and_absent_from_markdown_and_csv() -> None:
+    matrix_result = build_matrix_result([_arm_with_totals(withheld=True)])
+    (arm,) = json.loads(render_json(matrix_result))["arms"]
+    assert arm[ARM_COST_TOTAL_KEY] is None
+    markdown = render_markdown(matrix_result)
+    assert "| arm_long_context_invocation_count | 3 |" in markdown
+    assert "cost_total" not in markdown
+    rows = list(csv.DictReader(io.StringIO(render_csv(matrix_result))))
+    assert rows[0]["arm_cost"] == ""
+    assert rows[0]["arm_long_context_invocation_count"] == "3"
+
+
+def test_markdown_labels_model_metrics_supervisor_only_and_renders_the_arm_totals() -> None:
+    markdown = render_markdown(build_matrix_result([_arm_with_totals(withheld=False)]))
+    usage = markdown[markdown.index("### Usage and Cost") :]
+    assert usage.splitlines()[2].startswith("Supervisor tier only:")
+    assert "All tiers (every call the arm made):" in usage
+    assert "| arm_cost_total | 0.250000 |" in usage
+    assert "| arm_long_context_invocation_count | 3 |" in usage
+
+
+def test_csv_carries_the_arm_totals_on_every_task_row() -> None:
+    rows = list(
+        csv.DictReader(
+            io.StringIO(render_csv(build_matrix_result([_arm_with_totals(withheld=False)])))
+        )
+    )
+    assert rows and all(row["arm_cost"] == "0.250000" for row in rows)
+    assert all(row["arm_long_context_invocation_count"] == "3" for row in rows)
+
+
+def test_an_older_record_without_arm_totals_emits_no_keys_and_renders_dashes() -> None:
+    matrix_result = build_matrix_result([_sample_arm(withheld=False)])
+    (arm,) = json.loads(render_json(matrix_result))["arms"]
+    assert ARM_COST_TOTAL_KEY not in arm and ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY not in arm
+    assert "All tiers (every call the arm made):" not in render_markdown(matrix_result)
+    rows = list(csv.DictReader(io.StringIO(render_csv(matrix_result))))
+    assert rows[0]["arm_cost"] == "" and rows[0]["arm_long_context_invocation_count"] == ""
+
+
+def test_the_arm_totals_round_trip_through_a_raw_archive() -> None:
+    arm = _arm_with_totals(withheld=False)
+    rebuilt = arm_from_report_fields(json.loads(json.dumps(arm.to_report_fields())))
+    assert rebuilt.arm_totals_fields == arm.arm_totals_fields
+    legacy = arm_from_report_fields(json.loads(json.dumps(_sample_arm().to_report_fields())))
+    assert legacy.arm_totals_fields == {}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY, "3"),
+        (ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY, True),
+        (ARM_COST_TOTAL_KEY, "0.25"),
+    ],
+)
+def test_a_malformed_archived_arm_total_is_refused(key: str, value: object) -> None:
+    fields = _arm_with_totals(withheld=False).to_report_fields()
+    fields[key] = value
+    with pytest.raises(ValueError, match=key):
+        arm_from_report_fields(fields)

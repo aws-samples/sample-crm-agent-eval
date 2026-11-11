@@ -3,7 +3,7 @@
 """Gate: the streaming relay stays thin.
 
 The relay validates a Cognito JWT, calls `InvokeAgentRuntime` with SigV4, and re-emits frames. It
-holds no business logic, no tool dispatch, and constructs no `Identity`. Three checks:
+holds no business logic, no tool dispatch, and constructs no `Identity`. Four checks:
 
 1. **No domain import.** Nothing under `src/relay/` may import from `src/crm/`, `src/agents/`,
    `src/gateway/`, or `src/eval/`, or reach outside its own package by relative path.
@@ -11,6 +11,9 @@ holds no business logic, no tool dispatch, and constructs no `Identity`. Three c
    `identity_from_claims`, and no assembly of an identity-shaped object literal.
 3. **A size ceiling on production source** under `src/`. Test files and generated files are exempt
    from the ceiling; generated files are still subject to checks 1 and 2.
+4. **No identity attribute of its own.** Production source under `src/` sets no `principal_type`,
+   `rep_id` or `full_visibility` key, with exactly one admitted exception: `src/runtime.ts` sets
+   `principal_type: RELAY_PRINCIPAL_TYPE` once and declares `RELAY_PRINCIPAL_TYPE = "user"` once.
 
 Reading `frontend/package.json` as data is not an import and is not flagged.
 
@@ -69,6 +72,17 @@ _IDENTITY_SHAPED_LITERAL = re.compile(
     r"|\{[^{}]*\b(?:scopes?|subject|user_id)\s*:[^{}]*\btenant\s*:[^{}]*\}",
     re.DOTALL,
 )
+
+#: An object key naming an identity attribute, quoted or bare, with the expression it is set to.
+_IDENTITY_ATTRIBUTE_KEY = re.compile(
+    r"""(?<![\w$])['"]?(?P<key>principal_type|rep_id|full_visibility)['"]?\s*:\s*(?P<value>[^,}\n]*)"""
+)
+
+#: The single identity attribute the relay may set: its channel's declared principal type.
+ADMITTED_ATTRIBUTE_FILE = Path("src") / "runtime.ts"
+ADMITTED_ATTRIBUTE = ("principal_type", "RELAY_PRINCIPAL_TYPE")
+_ADMITTED_CONSTANT = re.compile(r"""\bconst\s+RELAY_PRINCIPAL_TYPE\s*=\s*(?P<value>[^;\n]*)""")
+ADMITTED_CONSTANT_VALUE = '"user"'
 
 _LINE_COMMENT = re.compile(r"//[^\n]*")
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -175,6 +189,57 @@ def find_identity_construction(path: Path, code: str) -> list[Violation]:
     return violations
 
 
+def find_identity_attributes(path: Path, code: str, relay_dir: Path) -> list[Violation]:
+    """Report identity attribute keys in production source beyond the one admitted declaration.
+
+    Only files under `src/` are scanned. In :data:`ADMITTED_ATTRIBUTE_FILE`, exactly one
+    `principal_type: RELAY_PRINCIPAL_TYPE` and exactly one `RELAY_PRINCIPAL_TYPE = "user"` are
+    required; anything else, there or elsewhere, is a violation.
+    """
+    relative = path.relative_to(relay_dir)
+    if relative.parts[0] != "src":
+        return []
+    admitted_here = relative == ADMITTED_ATTRIBUTE_FILE
+    violations: list[Violation] = []
+    admitted_count = 0
+    for match in _IDENTITY_ATTRIBUTE_KEY.finditer(code):
+        key, value = match.group("key"), match.group("value").strip()
+        if admitted_here and (key, value) == ADMITTED_ATTRIBUTE:
+            admitted_count += 1
+            continue
+        violations.append(
+            Violation(
+                path,
+                "identity-attribute",
+                f"sets the identity attribute `{key}: {value}`. The relay forwards verified "
+                "claims verbatim; the only attribute it declares is "
+                f"`{ADMITTED_ATTRIBUTE[0]}: {ADMITTED_ATTRIBUTE[1]}` in {ADMITTED_ATTRIBUTE_FILE}.",
+            )
+        )
+    if not admitted_here:
+        return violations
+    if admitted_count != 1:
+        violations.append(
+            Violation(
+                path,
+                "identity-attribute",
+                f"sets `{ADMITTED_ATTRIBUTE[0]}: {ADMITTED_ATTRIBUTE[1]}` {admitted_count} times; "
+                "the Runtime payload must declare it exactly once.",
+            )
+        )
+    constants = [m.group("value").strip() for m in _ADMITTED_CONSTANT.finditer(code)]
+    if constants != [ADMITTED_CONSTANT_VALUE]:
+        violations.append(
+            Violation(
+                path,
+                "identity-attribute",
+                f"declares RELAY_PRINCIPAL_TYPE as {constants!r}; it must be declared exactly once "
+                f"as {ADMITTED_CONSTANT_VALUE}, the only principal the relay serves.",
+            )
+        )
+    return violations
+
+
 def find_oversize(path: Path, text: str, relay_dir: Path, max_lines: int) -> list[Violation]:
     """Report a hand-written production relay file past the line ceiling.
 
@@ -198,13 +263,14 @@ def find_oversize(path: Path, text: str, relay_dir: Path, max_lines: int) -> lis
 
 
 def scan_relay(relay_dir: Path, max_lines: int) -> list[Violation]:
-    """Run all three checks over every relay source file."""
+    """Run all four checks over every relay source file."""
     violations: list[Violation] = []
     for path in collect_relay_sources(relay_dir):
         text = path.read_text(encoding="utf-8", errors="replace")
         code = strip_comments(text)
         violations += find_domain_imports(path, code, relay_dir)
         violations += find_identity_construction(path, code)
+        violations += find_identity_attributes(path, code, relay_dir)
         violations += find_oversize(path, text, relay_dir, max_lines)
     return violations
 
@@ -255,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     longest = max((len(p.read_text(errors="replace").splitlines()) for p in production), default=0)
     print(
         f"check_relay_thinness: OK — {len(sources)} relay source file(s) scanned for domain imports "
-        f"and `Identity` construction; {len(production)} hand-written production file(s), longest "
+        f"and `Identity` construction or attributes; {len(production)} hand-written production file(s), longest "
         f"{longest} lines (ceiling {args.max_lines}, {args.max_lines - longest} to spare)."
     )
     return 0

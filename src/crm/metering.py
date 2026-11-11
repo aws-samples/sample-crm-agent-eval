@@ -2,7 +2,9 @@
 """Per-invocation usage metering and redacted structured logging.
 
 Builds a :class:`UsageRecord` per model invocation, carrying correlation identifiers and a
-:class:`Cost` priced from ``config/pricing.yaml`` with cache reads and writes kept separate.
+:class:`Cost` priced from ``config/pricing.yaml`` with cache reads and writes kept separate. Each
+invocation is priced at its model's standard or long-context rates (by :func:`prompt_tokens`) and
+the route multiplier of the inference profile it addressed.
 :data:`TOKEN_ACCOUNTING` declares per family whether ``input_tokens`` includes cache tokens.
 :func:`redact` removes secrets, tokens, and record payloads from a log value.
 """
@@ -16,12 +18,17 @@ from typing import Any, Final, Literal
 
 import yaml
 
+from crm.inference_route import Route, route_for_profile
+
 Family = Literal["anthropic", "openai"]
 Tier = Literal["supervisor", "subagent", "tool"]
 
 #: How a family's reported ``input_tokens`` relates to its cache tokens: ``inclusive`` (cache
 #: counts are a subset of it), ``exclusive`` (disjoint), or ``unconfirmed`` (not established).
 CacheReadAccounting = Literal["inclusive", "exclusive", "unconfirmed"]
+
+#: Which rate card priced an invocation: the model's standard rates or its long-context rates.
+PricingTier = Literal["standard", "long_context"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +226,8 @@ class Cost:
         price_table_version: The ``price_table_version`` the rates were read from.
         cache_read_accounting: The :class:`TokenAccounting` reading :attr:`input` was computed
             under.
+        pricing_tier: Whether the standard or the long-context rates applied.
+        route: The pricing route of the inference profile the invocation addressed.
     """
 
     input: float
@@ -227,6 +236,8 @@ class Cost:
     cache_read: float
     price_table_version: str
     cache_read_accounting: CacheReadAccounting
+    pricing_tier: PricingTier
+    route: Route
 
     @property
     def total(self) -> float:
@@ -291,41 +302,69 @@ def billable_input_tokens(usage: TokenUsage, family: Family) -> int:
     return usage.input_tokens
 
 
+def prompt_tokens(usage: TokenUsage, family: Family) -> int:
+    """Return the prompt size of one request: billable input plus cache-read and cache-write tokens.
+
+    This is ``input + cache_read + cache_write`` for an exclusive family and the reported
+    ``input_tokens`` for an inclusive one (unless the cache counts exceed it).
+    """
+    return billable_input_tokens(usage, family) + usage.cache_read_tokens + usage.cache_write_tokens
+
+
+def _route_multiplier(pricing: dict[str, Any], route: Route, pricing_path: Path) -> float:
+    """Return the ``routes.<route>.multiplier`` declared in the price table, raising if absent."""
+    routes = pricing.get("routes")
+    entry = routes.get(route) if isinstance(routes, dict) else None
+    if not isinstance(entry, dict) or "multiplier" not in entry:
+        raise KeyError(f"route {route!r} has no multiplier in {pricing_path}")
+    return float(entry["multiplier"])
+
+
 def cost_for_usage(
     usage: TokenUsage,
     model_id: str,
     *,
+    inference_profile: str,
     family: Family | None = None,
     pricing_path: Path = _DEFAULT_PRICING_PATH,
 ) -> Cost:
     """Compute per-category cost for ``usage`` against the versioned price table.
 
     Rates are per token category, per 1M tokens. The input count is
-    :func:`billable_input_tokens` under the family's :class:`TokenAccounting`.
+    :func:`billable_input_tokens` under the family's :class:`TokenAccounting`. When the model
+    has a ``long_context`` block and :func:`prompt_tokens` exceeds its ``above_prompt_tokens``,
+    every category is priced at the long-context rates. Every rate is multiplied by the route
+    multiplier of ``inference_profile``.
 
     Args:
         usage: Token counts to price, cache reads and writes kept separate.
         model_id: The Bedrock model identifier to price against.
+        inference_profile: The inference profile id the invocation addressed; its prefix selects
+            the route.
         family: The provider family whose accounting applies. Derived from ``model_id`` by
             :func:`family_for_model_id` when omitted.
         pricing_path: Path to ``config/pricing.yaml``. Overridable for tests.
 
     Returns:
-        A :class:`Cost` with the four categories broken out.
+        A :class:`Cost` with the four categories broken out, its pricing tier and its route.
 
     Raises:
-        KeyError: When ``model_id`` has no entry in the price table.
+        KeyError: When ``model_id`` has no entry in the price table, or the route has no
+            multiplier.
         ValueError: When ``model_id`` names no recognised provider family and ``family`` was not
             supplied.
+        UnknownInferenceRoute: When ``inference_profile`` has no recognised route prefix or does
+            not name ``model_id``.
         UnconfirmedTokenAccountingError: When the price table is not provisional and the family's
             accounting is unconfirmed.
     """
+    route = route_for_profile(inference_profile, model_id=model_id)
     pricing = _load_pricing(pricing_path)
     models = pricing["models"]
     if model_id not in models:
         raise KeyError(f"{model_id} has no entry in {pricing_path}")
     rates = models[model_id]
-    unit_tokens = 1_000_000.0  # gitleaks:allow
+    per_million = 1_000_000.0
 
     resolved_family = family if family is not None else family_for_model_id(model_id)
     accounting = token_accounting_for(resolved_family)
@@ -340,13 +379,27 @@ def cost_for_usage(
             f"published from it."
         )
 
+    pricing_tier: PricingTier = "standard"
+    long_context = rates.get("long_context")
+    if long_context is not None and prompt_tokens(usage, resolved_family) > int(
+        long_context["above_prompt_tokens"]
+    ):
+        rates = long_context
+        pricing_tier = "long_context"
+    multiplier = _route_multiplier(pricing, route, pricing_path)
+
+    def priced(tokens: int, category: str) -> float:
+        return (tokens / per_million) * float(rates[category]) * multiplier
+
     return Cost(
-        input=(billable_input_tokens(usage, resolved_family) / unit_tokens) * float(rates["input"]),
-        output=(usage.output_tokens / unit_tokens) * float(rates["output"]),
-        cache_write=(usage.cache_write_tokens / unit_tokens) * float(rates["cache_write"]),
-        cache_read=(usage.cache_read_tokens / unit_tokens) * float(rates["cache_read"]),
+        input=priced(billable_input_tokens(usage, resolved_family), "input"),
+        output=priced(usage.output_tokens, "output"),
+        cache_write=priced(usage.cache_write_tokens, "cache_write"),
+        cache_read=priced(usage.cache_read_tokens, "cache_read"),
         price_table_version=str(pricing["price_table_version"]),
         cache_read_accounting=accounting.cache_read_accounting,
+        pricing_tier=pricing_tier,
+        route=route,
     )
 
 
@@ -360,6 +413,7 @@ def build_usage_record(
     family: Family,
     tier: Tier,
     usage: TokenUsage,
+    inference_profile: str,
     cache_min_checkpoint_tokens: int | None = None,
     pricing_path: Path = _DEFAULT_PRICING_PATH,
 ) -> UsageRecord:
@@ -374,13 +428,20 @@ def build_usage_record(
         family: Provider family the model belongs to.
         tier: The tier slot the model was invoked for.
         usage: Raw token counts, cache reads and writes kept separate.
+        inference_profile: The inference profile id the invocation addressed.
         cache_min_checkpoint_tokens: The model's prompt-cache minimum checkpoint size.
         pricing_path: Path to ``config/pricing.yaml``. Overridable for tests.
 
     Returns:
         A fully priced :class:`UsageRecord`.
     """
-    cost = cost_for_usage(usage, model_id, family=family, pricing_path=pricing_path)
+    cost = cost_for_usage(
+        usage,
+        model_id,
+        inference_profile=inference_profile,
+        family=family,
+        pricing_path=pricing_path,
+    )
     return UsageRecord(
         correlation_id=correlation_id,
         turn_id=turn_id,

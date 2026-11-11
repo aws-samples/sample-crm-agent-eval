@@ -113,12 +113,12 @@ _CONNECTION_CAUSES: Final[tuple[type[Exception], ...]] = (
 
 def _raised_from_connection_failure(exc: BaseException) -> bool:
     seen: set[int] = set()
-    current: BaseException | None = exc.__cause__ or exc.__context__
+    current: BaseException | None = exc.__cause__
     while current is not None and id(current) not in seen:
         if isinstance(current, _CONNECTION_CAUSES):
             return True
         seen.add(id(current))
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return False
 
 

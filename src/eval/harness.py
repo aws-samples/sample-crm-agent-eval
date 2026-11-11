@@ -22,6 +22,7 @@ import contextlib
 import csv as csv_module
 import importlib
 import json
+import math
 import os
 import re
 import sys
@@ -41,6 +42,7 @@ from crm.config import resolve_aws_config
 from crm.dispatch import invoke_action
 from crm.envelope import (
     AGENT_IDENTITY_KEY,
+    AGENT_PRINCIPAL_TYPE_KEY,
     CLAIM_BOOK,
     CLAIM_FULL_VISIBILITY,
     CLAIM_REP_ID,
@@ -52,6 +54,7 @@ from crm.envelope import (
 )
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
+from eval.actor import actor_principal_type
 from eval.matrix import (
     REPEAT_COMPLETION_KEY,
     MatrixResult,
@@ -61,6 +64,7 @@ from eval.matrix import (
     write_matrix_artifacts,
 )
 from eval.pricing import is_cost_provisional, load_price_table_status
+from eval.reprice import with_archived_pricing
 from eval.scoring import (
     TurnOutcome,
 )
@@ -70,6 +74,7 @@ from eval.sweep_units import (
     ArmSpec,
     EvalMode,
     RawRecordsWriter,
+    TaskUnitResult,
     arm_tuning,
     assemble_arm,
     run_task_unit,
@@ -235,7 +240,13 @@ def _git_revision() -> str:
 def _load_golden_tasks(path: Path) -> list[dict[str, object]]:
     """Load and parse ``golden_tasks.yaml`` into a list of plain task mappings.
 
-    Validates only that a top-level ``tasks`` list is present.
+    Validates that a top-level ``tasks`` list is present and that every task's ``actor`` declares
+    a principal type :func:`eval.actor.actor_principal_type` accepts, so a bad actor is refused
+    before anything is seeded.
+
+    Raises:
+        ValueError: The file has no ``tasks`` list, a task is not a mapping, or a task's actor is
+            absent or declares no usable principal type.
     """
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or "tasks" not in data:
@@ -243,6 +254,13 @@ def _load_golden_tasks(path: Path) -> list[dict[str, object]]:
     tasks = data["tasks"]
     if not isinstance(tasks, list):
         raise ValueError(f"{path}'s 'tasks' key must be a list")
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            raise ValueError(f"{path}: task {index} is not a mapping")
+        try:
+            actor_principal_type(task_actor(task))
+        except ValueError as exc:
+            raise ValueError(f"{path}: task {task.get('id')!r}: {exc}") from exc
     return tasks
 
 
@@ -278,7 +296,11 @@ def _resolve_handler(tool: RegisteredTool) -> Any:
 def _identity_payload_for_actor(actor: dict[str, object], *, tenant: str) -> dict[str, object]:
     """Build the gateway ``_identity`` block for a golden task's trusted ``actor`` fixture.
 
-    ``actor`` carries ``rep_id``, ``book`` and ``full_visibility``.
+    ``actor`` carries ``rep_id``, ``book``, ``full_visibility`` and ``principal_type``.
+
+    Raises:
+        ValueError: ``actor.book`` is not a list, or :func:`eval.actor.actor_principal_type`
+            refuses the actor's declared principal type.
     """
     book_raw = actor.get("book") or []
     if not isinstance(book_raw, list):
@@ -287,7 +309,7 @@ def _identity_payload_for_actor(actor: dict[str, object], *, tenant: str) -> dic
         "rep_id": str(actor["rep_id"]),
         "book": [str(account_id) for account_id in book_raw],
         "full_visibility": bool(actor.get("full_visibility", False)),
-        "principal_type": "user",
+        "principal_type": actor_principal_type(actor),
         "session_id": "",
         "source": "gateway",
         "tenant": tenant,
@@ -301,11 +323,16 @@ def _agent_identity_for_actor(actor: dict[str, object], *, tenant: str) -> Ident
     :func:`crm.envelope.decode_identity`, so claims a real token could not carry are refused.
 
     Args:
-        actor: The task's ``actor`` block (``rep_id``, ``book``, ``full_visibility``).
+        actor: The task's ``actor`` block (``rep_id``, ``book``, ``full_visibility``,
+            ``principal_type``).
         tenant: The eval tenant the turn executes within.
 
     Returns:
         The identity the ``live-aws`` substrate's dispatch presents to the deployed action Lambda.
+
+    Raises:
+        ValueError: ``actor.book`` is not a list, or :func:`eval.actor.actor_principal_type`
+            refuses the actor's declared principal type.
     """
     book_raw = actor.get("book") or []
     if not isinstance(book_raw, list):
@@ -319,6 +346,7 @@ def _agent_identity_for_actor(actor: dict[str, object], *, tenant: str) -> Ident
                 CLAIM_FULL_VISIBILITY: bool(actor.get("full_visibility", False)),
                 CLAIM_TENANT: tenant,
             },
+            AGENT_PRINCIPAL_TYPE_KEY: actor_principal_type(actor),
             "session_id": "",
         },
         {},
@@ -531,15 +559,99 @@ def _raw_records_writer(raw_records_dir: Path) -> RawRecordsWriter:
     """Return a :data:`RawRecordsWriter` that writes into ``raw_records_dir``.
 
     Each call writes ``pre-aggregation-arm-<index>-<model id>.json``, with ``/`` and ``:`` in the
-    model id replaced by ``_``.
+    model id replaced by ``_``. Every ``invocation_attributions`` entry gains its per-call
+    pricing keys via :func:`eval.reprice.with_archived_pricing`.
     """
 
     def _write_raw_records(arm_index: int, model_id: str, payload: dict[str, object]) -> None:
+        attributions = payload.get("invocation_attributions")
+        if attributions is not None:
+            if not isinstance(attributions, list):
+                raise ValueError("pre-aggregation 'invocation_attributions' is not a list")
+            payload = {
+                **payload,
+                "invocation_attributions": [with_archived_pricing(e) for e in attributions],
+            }
         safe_model_id = model_id.replace("/", "_").replace(":", "_")
         path = raw_records_dir / f"pre-aggregation-arm-{arm_index}-{safe_model_id}.json"
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return _write_raw_records
+
+
+class SweepCostCapExceeded(RuntimeError):  # noqa: N818
+    """Raised before an (arm, repeat) unit when the sweep's projected spend would exceed its cap.
+
+    Attributes:
+        spent_usd: Priced cost of the units completed so far.
+        largest_unit_usd: Priced cost of the most expensive completed unit.
+        max_cost_usd: The cap.
+        completed_units: How many (arm, repeat) units completed.
+    """
+
+    def __init__(
+        self,
+        *,
+        spent_usd: float,
+        largest_unit_usd: float,
+        max_cost_usd: float,
+        completed_units: int,
+    ) -> None:
+        self.spent_usd = spent_usd
+        self.largest_unit_usd = largest_unit_usd
+        self.max_cost_usd = max_cost_usd
+        self.completed_units = completed_units
+        super().__init__(
+            f"sweep stopped before unit {completed_units + 1}: spent ${spent_usd:.4f} over "
+            f"{completed_units} completed unit(s); spent plus the largest unit "
+            f"(${largest_unit_usd:.4f}) would exceed --max-cost-usd ${max_cost_usd:.4f}"
+        )
+
+
+def _unit_priced_cost(task_units: Sequence[TaskUnitResult]) -> float:
+    """Sum the priced cost of every usage record across ``task_units``, every tier included."""
+    return sum(
+        record.cost.input + record.cost.output + record.cost.cache_write + record.cost.cache_read
+        for unit in task_units
+        for record in unit.usage_records
+    )
+
+
+@dataclass
+class SweepCostGuard:
+    """Tracks a sweep's priced spend per (arm, repeat) unit against ``max_cost_usd``.
+
+    Call :meth:`before_unit` before each unit starts and :meth:`record_unit` after it completes.
+    Priced cost is per-call pricing of reported usage, an estimate of the bill.
+    """
+
+    max_cost_usd: float
+    spent_usd: float = 0.0
+    largest_unit_usd: float = 0.0
+    completed_units: int = 0
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.max_cost_usd) or self.max_cost_usd <= 0:
+            raise ValueError(
+                f"max_cost_usd must be a positive finite number, got {self.max_cost_usd}"
+            )
+
+    def before_unit(self) -> None:
+        """Raise :class:`SweepCostCapExceeded` when spent plus the largest unit exceeds the cap."""
+        if self.spent_usd + self.largest_unit_usd > self.max_cost_usd:
+            raise SweepCostCapExceeded(
+                spent_usd=self.spent_usd,
+                largest_unit_usd=self.largest_unit_usd,
+                max_cost_usd=self.max_cost_usd,
+                completed_units=self.completed_units,
+            )
+
+    def record_unit(self, task_units: Sequence[TaskUnitResult]) -> None:
+        """Add one completed unit's priced cost."""
+        cost = _unit_priced_cost(task_units)
+        self.spent_usd += cost
+        self.largest_unit_usd = max(self.largest_unit_usd, cost)
+        self.completed_units += 1
 
 
 def _run_arm(
@@ -561,6 +673,7 @@ def _run_arm(
     raw_records_writer: RawRecordsWriter | None = None,
     tenant: str | None = None,
     unit_tenants: Sequence[str] | None = None,
+    cost_guard: SweepCostGuard | None = None,
 ) -> ArmRunResult:
     """Run every golden task once per repeat for one arm and assemble its scored, metered result.
 
@@ -570,7 +683,11 @@ def _run_arm(
     task is one :func:`eval.sweep_units.run_task_unit` over an in-process
     :func:`_observe_provider_turn`; :func:`eval.sweep_units.assemble_arm` folds them.
 
-    Raises ``ValueError`` when neither ``tenant`` nor ``unit_tenants`` is given.
+    With ``cost_guard``, :meth:`SweepCostGuard.before_unit` runs before each repeat's tasks and
+    :meth:`SweepCostGuard.record_unit` after them.
+
+    Raises ``ValueError`` when neither ``tenant`` nor ``unit_tenants`` is given, and
+    :class:`SweepCostCapExceeded` from ``cost_guard``.
 
     Raises ``AssertionError`` when the arm's ``stream`` call count differs from the calls its turn
     drivers made, or is below ``included_invocation_count``.
@@ -603,17 +720,23 @@ def _run_arm(
         unit_tasks = [(tenant, tasks) for _rep_index in range(repeats)]
     else:
         raise ValueError("_run_arm needs a tenant or unit_tenants")
-    units = [
-        run_task_unit(
-            store=store,
-            task=task,
-            tenant=unit_tenant,
-            family=arm_spec.family,
-            turn_runner=_turn_runner,
-        )
-        for unit_tenant, localized in unit_tasks
-        for task in localized
-    ]
+    units: list[TaskUnitResult] = []
+    for unit_tenant, localized in unit_tasks:
+        if cost_guard is not None:
+            cost_guard.before_unit()
+        repeat_units = [
+            run_task_unit(
+                store=store,
+                task=task,
+                tenant=unit_tenant,
+                family=arm_spec.family,
+                turn_runner=_turn_runner,
+            )
+            for task in localized
+        ]
+        units.extend(repeat_units)
+        if cost_guard is not None:
+            cost_guard.record_unit(repeat_units)
     return assemble_arm(
         units,
         matrix=matrix,
@@ -806,6 +929,7 @@ def run_sweep(
     run_id: str | None = None,
     dispatch_factory: DispatchFactory = in_process_dispatch_factory,
     repeats: int = 1,
+    max_cost_usd: float | None = None,
 ) -> SweepResult:
     """Run one full eval sweep: allocate, seed one unit tenant per (arm, repeat), score, tear down.
 
@@ -835,6 +959,8 @@ def run_sweep(
         dispatch_factory: How every tool call is dispatched. Defaults to
             :func:`in_process_dispatch_factory` (the ``local`` substrate).
         repeats: How many times each arm runs the golden tasks (>= 1), each in its own unit tenant.
+        max_cost_usd: Cap on the sweep's priced spend, checked by a :class:`SweepCostGuard`
+            before each (arm, repeat) unit, or ``None`` for no cap.
 
     Returns:
         The full :class:`SweepResult`. Its ``demo``-tenant delta checks are also published to
@@ -847,12 +973,15 @@ def run_sweep(
         eval.live.LiveInvocationError: When a live turn failed for a reason the exclusion taxonomy
             cannot categorise.
         eval.tenancy.TenantTeardownError: When scoped teardown of any unit tenant fails.
+        SweepCostCapExceeded: When the next unit would breach ``max_cost_usd``; every unit
+            tenant is torn down and no artifact is written.
         eval.matrix.StubMatrixOverwriteRefused: When an all-stub sweep's ``output_dir`` is the
             tracked ``results/`` directory; the sweep has run and been torn down, nothing is
             written.
     """
     if repeats < 1:
         raise ValueError(f"repeats must be >= 1, got {repeats}")
+    cost_guard = SweepCostGuard(max_cost_usd) if max_cost_usd is not None else None
     resolved_run_id = run_id if run_id is not None else allocate_run_id()
     tenant = tenant_for_run(resolved_run_id)
     unit_tenants = unit_tenants_for_run(resolved_run_id, arm_count=len(arm_specs), repeats=repeats)
@@ -916,6 +1045,7 @@ def run_sweep(
                     dispatch_factory=dispatch_factory,
                     arm_index=arm_index,
                     raw_records_writer=raw_records_writer,
+                    cost_guard=cost_guard,
                 )
             )
     except BaseException as exc:  # noqa: BLE001 - re-raised verbatim below, never swallowed
@@ -1686,6 +1816,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Runtime identifier to record in provenance (never a real account ARN for stub).",
     )
     parser.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help=(
+            "Required with --live. Cap on the sweep's priced spend in USD, checked before each "
+            "(arm, repeat) unit: when the spend of completed units plus the largest completed "
+            "unit exceeds it, no further unit starts, every tenant is torn down, no matrix is "
+            "written and the exit code is 4. Priced cost estimates the bill; the Bedrock bill is "
+            "the authority."
+        ),
+    )
+    parser.add_argument(
         "--repeats",
         type=int,
         default=1,
@@ -1709,7 +1851,9 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Process exit code: ``0`` on success, ``1`` if teardown failed after a completed sweep or if
         ``--assert-artifacts`` found an artifact absent or malformed, or if a stub sweep was
-        pointed at the tracked ``results/`` directory.
+        pointed at the tracked ``results/`` directory; ``2`` for an unusable invocation, including
+        ``--live`` without a positive, finite ``--max-cost-usd``; ``4`` when the cost cap stopped
+        the sweep.
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -1734,6 +1878,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if mode == "live" and args.max_cost_usd is None:
+        print(
+            "--live requires --max-cost-usd: refusing a live sweep with no spend cap.",
+            file=sys.stderr,
+        )
+        return 2
+    if args.max_cost_usd is not None and not (
+        math.isfinite(args.max_cost_usd) and args.max_cost_usd > 0
+    ):
+        print(
+            f"--max-cost-usd must be a positive finite number, got {args.max_cost_usd}",
+            file=sys.stderr,
+        )
+        return 2
 
     store = _build_default_store(
         table_prefix=table_prefix, endpoint_url=args.endpoint_url, substrate=substrate
@@ -1753,7 +1911,11 @@ def main(argv: list[str] | None = None) -> int:
             archive_raw=args.archive_raw or args.assert_artifacts,
             dispatch_factory=dispatch_factory,
             repeats=args.repeats,
+            max_cost_usd=args.max_cost_usd,
         )
+    except SweepCostCapExceeded as exc:
+        print(f"{exc}; no matrix artifact written", file=sys.stderr)
+        return 4
     except TenantTeardownError as exc:
         print(f"eval sweep completed but tenant teardown failed: {exc}", file=sys.stderr)
         return 1
@@ -1839,6 +2001,8 @@ __all__ = [
     "EvalMode",
     "LiveSubstratePairingError",
     "Substrate",
+    "SweepCostCapExceeded",
+    "SweepCostGuard",
     "SweepResult",
     "TurnDispatch",
     "UndisclosedZeroInvocationRenderError",

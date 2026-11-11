@@ -13,12 +13,17 @@ verified identity. The check calls `get_account` and observes the allow/deny out
 be denied, and one that would narrow scope (an empty book) must still succeed. A result that does
 not unambiguously show the expected outcome is a `fail`.
 
-Also posts a raw JSON-RPC array body carrying one well-formed `tools/call` with a valid token, and
-asserts every reply member is a refusal (a JSON-RPC error, or a `result` with `isError: true`)
-and none carries tool output (`content` or `structuredContent`) without `isError: true`, recording
-the reply's shape without its values. That no tool Lambda was invoked cannot
-be tied to one request from outside the account's logs and metrics, so that row is reported as
-`defer`.
+Also posts a raw JSON-RPC array body carrying one well-formed `tools/call` with a valid token. The
+Gateway refuses an array body itself, before the interceptor or any tool runs, so the check asserts
+every reply member is a refusal (a JSON-RPC error, or a `result` with `isError: true`) and none
+carries tool output (`content` or `structuredContent`) without `isError: true`, recording the reply's
+shape without its values. That no tool Lambda was invoked cannot be tied to one request from outside
+the account's logs and metrics, so that row is reported as `defer`.
+
+After the refusal probes, the interceptor's log group is polled (bounded) for a denial decision
+(`gateway_auth_denied` or `gateway_service_identity_*`) written since the run started:
+`interceptor_denial_logged_at_warning` passes on one at WARNING, fails when every such line is at
+another level, and is a `defer` naming the unreached path when none appears.
 
 Also asserts an expired token and an underscoped token are both refused with a user-safe
 `{"error": {"code", "message"}}` body carrying no internal detail, each preceded by a premise check
@@ -999,7 +1004,9 @@ def _array_body_problems(reply: RawResult) -> list[str]:
 def _check_array_body_answers_no_tool_call(
     raw_caller: RawCaller, token: str | None, *, account_id: str, mcp_names: Mapping[str, str]
 ) -> list[CheckResult]:
-    """Post a JSON-RPC array body with a valid token; assert no tool call is answered.
+    """Post a JSON-RPC array body with a valid token; the Gateway refuses it itself.
+
+    Asserts the reply answers no tool call.
 
     Emits `array_body_answers_no_tool_call` and the deferred `array_body_reaches_no_tool`.
     """
@@ -1022,8 +1029,8 @@ def _check_array_body_answers_no_tool_call(
             detail="; ".join([*problems, shape])
             if problems
             else (
-                "a JSON-RPC array body carrying a valid get_account tools/call was answered with "
-                f"no tool-call output; {shape}"
+                "the Gateway refused a JSON-RPC array body carrying a valid get_account "
+                f"tools/call itself, with no tool-call output; {shape}"
             ),
         )
     no_tool = CheckResult(
@@ -1038,6 +1045,107 @@ def _check_array_body_answers_no_tool_call(
         ),
     )
     return [refused, no_tool]
+
+
+#: Reads the interceptor log group's messages written at or after a start time (epoch ms).
+DenialLogReader = Callable[[int], list[str]]
+
+#: The interceptor's denial and refusal decision events.
+INTERCEPTOR_DENIAL_EVENTS: Final[tuple[str, ...]] = (
+    "gateway_auth_denied",
+    "gateway_service_identity_",
+)
+DENIAL_LOG_POLL_ATTEMPTS: Final[int] = 6
+DENIAL_LOG_POLL_INTERVAL_SECONDS: Final[float] = 10.0
+DENIAL_LOG_POLL_WINDOW_SECONDS: Final[float] = (
+    DENIAL_LOG_POLL_ATTEMPTS - 1
+) * DENIAL_LOG_POLL_INTERVAL_SECONDS
+_DENIAL_NOT_OBSERVED_DEFER_REASON: Final[str] = "interceptor_denial_not_reached"
+
+
+def _message_level(message: str) -> str:
+    """The logging level a Lambda Python log line carries, text or JSON format; `""` if none."""
+    stripped = message.lstrip()
+    if stripped.startswith("["):
+        return stripped[1:].split("]", 1)[0].upper()
+    try:
+        record = json.loads(stripped)
+    except ValueError:
+        return ""
+    return str(record.get("level", "")).upper() if isinstance(record, Mapping) else ""
+
+
+def _check_interceptor_denial_logged(
+    reader: DenialLogReader | None,
+    *,
+    start_ms: int,
+    sleeper: Callable[[float], None],
+) -> CheckResult:
+    """Poll for one interceptor denial decision since `start_ms` and assert it is at WARNING."""
+    check = "interceptor_denial_logged_at_warning"
+    if reader is None:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=check,
+            status="skip",
+            detail="no interceptor log reader supplied",
+        )
+    denials: list[str] = []
+    for attempt in range(DENIAL_LOG_POLL_ATTEMPTS):
+        try:
+            messages = reader(start_ms)
+        except Exception as exc:  # noqa: BLE001 - an unreadable log group verified nothing
+            return CheckResult(
+                resource=RESOURCE_CLASS,
+                check=check,
+                status="fail",
+                detail=f"reading the interceptor log group raised {type(exc).__name__}: {exc}",
+            )
+        denials = [m for m in messages if any(e in m for e in INTERCEPTOR_DENIAL_EVENTS)]
+        if any(_message_level(m) in {"WARNING", "WARN"} for m in denials):
+            break
+        if attempt + 1 < DENIAL_LOG_POLL_ATTEMPTS:
+            sleeper(DENIAL_LOG_POLL_INTERVAL_SECONDS)
+    levels = sorted({_message_level(m) or "<none>" for m in denials})
+    if not denials:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=check,
+            status=DEFER,
+            defer_reason=_DENIAL_NOT_OBSERVED_DEFER_REASON,
+            detail=(
+                f"no interceptor denial line observed within {DENIAL_LOG_POLL_WINDOW_SECONDS:g} s "
+                f"({DENIAL_LOG_POLL_ATTEMPTS} reads); the expired-token, underscoped-token and "
+                "array-body probes are expected to be refused before the interceptor, by the "
+                "Gateway's own JWT authorizer or body handling"
+            ),
+        )
+    warned = any(level in {"WARNING", "WARN"} for level in levels)
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=check,
+        status="pass" if warned else "fail",
+        detail=f"{len(denials)} interceptor denial line(s) at levels {levels}"
+        + ("" if warned else "; expected WARNING"),
+    )
+
+
+def live_denial_log_reader(ctx: SmokeContext) -> DenialLogReader:
+    """Read the tool Gateway interceptor's log group through `ctx`'s `logs` client."""
+
+    def _read(start_ms: int) -> list[str]:
+        group = f"/aws/lambda/{_live_table_prefix(ctx)}-identity-interceptor"
+        paginator = ctx.client("logs").get_paginator("filter_log_events")
+        messages: list[str] = []
+        for page in paginator.paginate(
+            logGroupName=group,
+            startTime=start_ms,
+            filterPattern='?"gateway_auth_denied" ?"gateway_service_identity_"',
+        ):
+            messages.extend(str(e.get("message", "")) for e in page.get("events", []))
+        return messages
+
+    return _read
 
 
 def _is_success(result: McpResult) -> bool:
@@ -1770,6 +1878,7 @@ def checks(
     clock: Callable[[], float] | None = None,
     jwks_url: str | None = None,
     raw_caller: RawCaller | None = None,
+    denial_log_reader: DenialLogReader | None = None,
 ) -> Iterable[CheckResult]:
     """Yield one `CheckResult` per (tool-or-resource-class, check) pair.
 
@@ -1798,6 +1907,9 @@ def checks(
         jwks_url: JWKS endpoint the expired and underscoped tokens are verified against; the
             pool's by default.
         raw_caller: Raw-body transport seam override for the array-body check.
+        denial_log_reader: Reads the interceptor log group for
+            `interceptor_denial_logged_at_warning`; `None` reports that row `skip`. The live entry
+            point always supplies `live_denial_log_reader`.
     """
     gateway_url = ctx.outputs.require_str("agentcore_gateway_url")
     caller = (
@@ -1814,18 +1926,28 @@ def checks(
         else functools.partial(default_raw_caller, gateway_url=gateway_url)
     )
 
+    start_ms = int(now() * 1000)
+
+    def _then_denial_log(rows: list[CheckResult]) -> list[CheckResult]:
+        return [
+            *rows,
+            _check_interceptor_denial_logged(denial_log_reader, start_ms=start_ms, sleeper=wait),
+        ]
+
     if token is not None or provisioner is None:
-        return _gateway_checks(
-            caller,
-            token=token,
-            expired_token=expired_token,
-            underscoped_token=underscoped_token,
-            in_book_account=in_book_account,
-            out_of_book_account=out_of_book_account,
-            sleeper=wait,
-            clock=now,
-            verifiers=verifiers,
-            raw_caller=raw,
+        return _then_denial_log(
+            _gateway_checks(
+                caller,
+                token=token,
+                expired_token=expired_token,
+                underscoped_token=underscoped_token,
+                in_book_account=in_book_account,
+                out_of_book_account=out_of_book_account,
+                sleeper=wait,
+                clock=now,
+                verifiers=verifiers,
+                raw_caller=raw,
+            )
         )
 
     # Minted before the tenant is seeded, so the run's own work ages it.
@@ -1840,17 +1962,19 @@ def checks(
                 f"{type(exc).__name__}: {exc})"
             )
 
-    return _provisioned_checks(
-        caller,
-        provisioner,
-        expired_token=aging_token,
-        expired_reason=expired_reason,
-        underscoped_token=underscoped_token,
-        user_provisioner=user_provisioner if underscoped_token is None else None,
-        sleeper=wait,
-        clock=now,
-        verifiers=verifiers,
-        raw_caller=raw,
+    return _then_denial_log(
+        _provisioned_checks(
+            caller,
+            provisioner,
+            expired_token=aging_token,
+            expired_reason=expired_reason,
+            underscoped_token=underscoped_token,
+            user_provisioner=user_provisioner if underscoped_token is None else None,
+            sleeper=wait,
+            clock=now,
+            verifiers=verifiers,
+            raw_caller=raw,
+        )
     )
 
 
@@ -2075,6 +2199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 None if underscoped_token is not None else LiveBareMfaUserProvisioner(ctx)
             ),
             expired_token_minter=lambda: mint_machine_token(ctx),
+            denial_log_reader=live_denial_log_reader(ctx),
         ),
         extra_arguments=[
             "--gateway-token",

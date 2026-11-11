@@ -109,6 +109,7 @@ describe("toEventFrame", () => {
           output_tokens: 22,
           cache_read_tokens: 33,
           cache_write_tokens: 44,
+          long_context_calls: 0,
           cost_usd: 0.5,
         },
       ],

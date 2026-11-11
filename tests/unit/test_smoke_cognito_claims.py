@@ -813,7 +813,18 @@ def _checks_with_provisioner(
     queue_revocation: bool = True,
 ) -> list[Any]:
     client, stubber = _idp_client()
-    _add_pool(stubber, _compliant_pool(), spa_client=spa_client)
+    _add_pool(stubber, _compliant_pool(Domain=_DOMAIN), spa_client=spa_client)
+    stubber.add_response(
+        "describe_user_pool_client",
+        {
+            "UserPoolClient": {
+                "UserPoolId": _USER_POOL_ID,
+                "ClientId": _SPA_CLIENT_ID,
+                "LogoutURLs": [_LOGOUT_URL],
+            }
+        },
+        {"UserPoolId": _USER_POOL_ID, "ClientId": _SPA_CLIENT_ID},
+    )
     if queue_revocation:
         _queue_revocation(stubber, revoke_error=revoke_error, refresh_outcome=refresh_outcome)
     with stubber:
@@ -824,6 +835,7 @@ def _checks_with_provisioner(
                 provisioner=provisioner,
                 decode_id_token=_live_decode_for(ctx, jwks_url=test_key.jwks_url()),
                 signup_client=_refusing_signup_client(),
+                logout_probe=_Probe(),
             )
         )
 
@@ -1201,7 +1213,7 @@ def test_token_revocation_not_enabled_reds_exactly_its_row(value: object) -> Non
         ({"refresh_outcome": "InvalidParameterException"}, {}),
         ({"refresh_outcome": "TooManyRequestsException"}, {}),
         ({"revoke_error": "UnsupportedTokenTypeException"}, {}),
-        ({"queue_revocation": False}, {"refresh_token": ""}),
+        ({"queue_revocation": False}, {"refresh_token": ""}),  # nosec B105  # empty-token fixture
     ],
     ids=["refresh-accepted", "other-error", "throttled", "revoke-failed", "no-refresh-token"],
 )
@@ -1241,5 +1253,129 @@ def test_the_live_provisioner_carries_the_issued_refresh_token() -> None:
         id_token, _secret = provisioner._one_auth_attempt(
             username="u", password=_password(), secret=None
         )
-    assert id_token == "id"
+    assert id_token == "id"  # nosec B105  # a stub token value, not a credential
     assert provisioner._refresh_token == _REFRESH_TOKEN
+
+
+# ---------------------------------------------------------------------------
+# Hosted UI sign-out: registered logout_uri -> 302 to it; unregistered -> no redirect to it.
+# ---------------------------------------------------------------------------
+
+_LOGOUT_URL = "https://d111111abcdef8.cloudfront.net/logout"
+_DOMAIN = "crm-fixture"
+_LOGOUT_BASE = f"https://{_DOMAIN}.auth.us-east-1.amazoncognito.com/logout"
+
+
+class _Probe:
+    """Answers like Cognito: a registered logout_uri redirects there, anything else to /error."""
+
+    def __init__(self, registered: str = _LOGOUT_URL, *, echo: bool = False) -> None:
+        self.registered = registered
+        self.echo = echo
+        self.urls: list[str] = []
+
+    def __call__(self, url: str) -> tuple[int, str]:
+        from urllib.parse import parse_qs, urlsplit
+
+        self.urls.append(url)
+        query = parse_qs(urlsplit(url).query)
+        uri = query["logout_uri"][0]
+        if uri == self.registered or self.echo:
+            return 302, uri
+        return (
+            302,
+            f"https://{_DOMAIN}.auth.us-east-1.amazoncognito.com/error?error=redirect_mismatch",
+        )
+
+
+def _logout_rows(
+    *,
+    probe: Any,
+    domain: str | None = _DOMAIN,
+    logout_urls: list[str] | None = None,
+) -> dict[str, Any]:
+    client, stubber = _idp_client()
+    pool = _compliant_pool(**({"Domain": domain} if domain is not None else {}))
+    _add_pool(stubber, pool)
+    if domain:
+        stubber.add_response(
+            "describe_user_pool_client",
+            {
+                "UserPoolClient": {
+                    "UserPoolId": _USER_POOL_ID,
+                    "ClientId": _SPA_CLIENT_ID,
+                    "LogoutURLs": [_LOGOUT_URL] if logout_urls is None else logout_urls,
+                }
+            },
+            {"UserPoolId": _USER_POOL_ID, "ClientId": _SPA_CLIENT_ID},
+        )
+    with stubber:
+        ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": client})
+        results = list(checks(ctx, logout_probe=probe))
+    return {r.check: r for r in results if r.check.startswith("hosted_ui_logout_")}
+
+
+def test_the_registered_logout_redirects_and_the_unregistered_one_does_not() -> None:
+    probe = _Probe()
+    rows = _logout_rows(probe=probe)
+    assert {c: r.status for c, r in rows.items()} == {
+        "hosted_ui_logout_registered_redirects": "pass",
+        "hosted_ui_logout_unregistered_refused": "pass",
+    }
+    assert all(url.startswith(f"{_LOGOUT_BASE}?") for url in probe.urls)
+    assert f"client_id={_SPA_CLIENT_ID}" in probe.urls[0]
+
+
+def test_a_registered_logout_that_does_not_redirect_there_fails() -> None:
+    rows = _logout_rows(probe=_Probe(registered="https://elsewhere.example/logout"))
+    assert rows["hosted_ui_logout_registered_redirects"].status == "fail"
+    assert rows["hosted_ui_logout_unregistered_refused"].status == "pass"
+
+
+def test_an_endpoint_that_redirects_to_any_logout_uri_fails_the_unregistered_row() -> None:
+    rows = _logout_rows(probe=_Probe(echo=True))
+    assert rows["hosted_ui_logout_registered_redirects"].status == "pass"
+    assert rows["hosted_ui_logout_unregistered_refused"].status == "fail"
+
+
+def test_an_unreachable_hosted_ui_defers_both_rows_with_a_reason() -> None:
+    def _down(url: str) -> tuple[int, str]:
+        raise OSError("connection refused")
+
+    rows = _logout_rows(probe=_down)
+    assert {r.status for r in rows.values()} == {"defer"}
+    assert {r.defer_reason for r in rows.values()} == {"hosted_ui_unreachable"}
+
+
+def test_a_pool_without_a_domain_defers_both_rows_with_a_reason() -> None:
+    rows = _logout_rows(probe=_Probe(), domain=None)
+    assert {r.status for r in rows.values()} == {"defer"}
+    assert {r.defer_reason for r in rows.values()} == {"hosted_ui_domain_absent"}
+
+
+def test_a_client_with_no_logout_url_fails_both_rows() -> None:
+    rows = _logout_rows(probe=_Probe(), logout_urls=[])
+    assert {r.status for r in rows.values()} == {"fail"}
+
+
+def test_no_probe_skips_both_rows_never_passes() -> None:
+    results = _run_checks_with_describe(_compliant_pool())
+    rows = {r.check: r.status for r in results if r.check.startswith("hosted_ui_logout_")}
+    assert rows == {
+        "hosted_ui_logout_registered_redirects": "skip",
+        "hosted_ui_logout_unregistered_refused": "skip",
+    }
+
+
+def test_the_live_probe_refuses_a_non_https_url() -> None:
+    with pytest.raises(ValueError, match="non-HTTPS"):
+        cognito_claims._live_logout_probe(
+            "http://crm-fixture.auth.us-east-1.amazoncognito.com/logout"
+        )
+
+
+def test_the_live_entry_point_supplies_the_logout_probe() -> None:
+    import inspect
+
+    source = inspect.getsource(cognito_claims.main)
+    assert "logout_probe=_live_logout_probe" in source

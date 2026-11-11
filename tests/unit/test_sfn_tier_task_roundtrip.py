@@ -14,7 +14,7 @@ from eval.sweep_units import ArmSpec, TaskUnitResult
 from providers.capabilities import Family
 from tests.unit.test_sweep_units_tier_task import REP_ID, assemble, units_for
 
-_TASK: dict[str, object] = {"actor": {"rep_id": REP_ID}}
+_TASK: dict[str, object] = {"actor": {"rep_id": REP_ID, "principal_type": "user"}}
 
 Row = dict[str, Any]
 
