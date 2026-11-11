@@ -260,7 +260,7 @@ describe("every rejection is a rejection, never a permissive default", () => {
     ["absent", undefined],
     ["blank", ""],
     ["whitespace only", "   "],
-    ["another scheme", "Basic YWJjOmRlZg=="],
+    ["another scheme", `Basic ${Buffer.from("fixture-user:fixture-pass").toString("base64")}`],
     ["a bare token with no scheme", "eyJhbGciOiJSUzI1NiJ9" + ".e30.AAAA"], // gitleaks:allow
     ["a scheme with no token", "Bearer"],
     ["a scheme with an empty token", "Bearer    "],

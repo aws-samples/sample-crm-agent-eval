@@ -11,6 +11,7 @@ import contextlib
 import importlib.util
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
@@ -351,6 +352,81 @@ def test_the_real_relay_consumer_matches_the_schema() -> None:
         "events.ts", consumer.read_text(encoding="utf-8"), build_event_schema(), SCHEMA_VERSION
     )
     assert problems == [], problems
+
+
+# ---------------------------------------------------------------------------
+# The string-literal union pattern.
+# ---------------------------------------------------------------------------
+
+FRONTEND_CONSUMER = REPO_ROOT / "frontend" / "src" / "types" / "generated" / "agentEvents.ts"
+
+
+class TestStringLiteralUnionPattern:
+    def test_the_relay_consumer_yields_the_schema_event_kinds(self) -> None:
+        """`find_matching_union` reads the schema's event-kind set from the committed relay file."""
+        expected = gate.schema_enum(build_event_schema(), "kind")
+        text = (REPO_ROOT / "src" / "relay" / "src" / "generated" / "events.ts").read_text(
+            encoding="utf-8"
+        )
+        assert gate.find_matching_union(text, expected) == ("EVENT_KINDS", expected)
+
+    def test_the_frontend_consumer_yields_the_schema_event_kinds_when_generated(self) -> None:
+        """The frontend generated consumer, when present, yields the same event-kind set."""
+        if not FRONTEND_CONSUMER.is_file():
+            pytest.skip(f"{FRONTEND_CONSUMER.relative_to(REPO_ROOT)} is not generated")
+        expected = gate.schema_enum(build_event_schema(), "kind")
+        text = FRONTEND_CONSUMER.read_text(encoding="utf-8")
+        assert gate.find_matching_union(text, expected) == ("EVENT_KINDS", expected)
+
+    @pytest.mark.parametrize(
+        ("source", "name", "members"),
+        [
+            ('type K = "a" | "b";', "K", {"a", "b"}),
+            ("export type K =\n  | 'a'\n  | 'b'\n  | 'c';\n", "K", {"a", "b", "c"}),
+            ("type K = | \"a\" |'b';", "K", {"a", "b"}),
+            ("type K = 'a' | \"b\"  ;", "K", {"a", "b"}),
+            ('enum K = "only";', "K", {"only"}),
+            ("type K =\t'a'\n|\n\t'b';", "K", {"a", "b"}),
+            ('type K = "a" "b";', "K", {"a", "b"}),
+        ],
+    )
+    def test_union_forms_are_recognised(self, source: str, name: str, members: set[str]) -> None:
+        """Single- and multi-line unions, with or without a leading `|` and mixed quotes, match."""
+        match = gate._TS_UNION.search(source)
+        assert match is not None
+        assert match.group("name") == name
+        assert set(gate._TS_STRING_LITERAL.findall(match.group("body"))) == members
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'type K = "a" | "b"',
+            'type K = "a" | B;',
+            "type K = (typeof KINDS)[number];",
+            'type K = "a" | | "b";',
+            'type K = "";',
+            'const K = ["a", "b"] as const;',
+            'interface K = "a";',
+        ],
+    )
+    def test_non_unions_are_not_matched(self, source: str) -> None:
+        """Unterminated, non-literal, doubled-bar, empty-literal and non-type sources do not match."""
+        assert gate._TS_UNION.search(source) is None
+
+    def test_as_const_arrays_still_resolve_through_their_own_pattern(self) -> None:
+        """An `as const` array declaration is read by the array pattern, unaffected by the union."""
+        text = (
+            'export const KINDS = ["a", "b"] as const;\nexport type K = (typeof KINDS)[number];\n'
+        )
+        assert gate._TS_UNION.search(text) is None
+        assert gate.find_matching_union(text, {"a", "b"}) == ("KINDS", {"a", "b"})
+
+    def test_a_pathological_unterminated_union_completes_quickly(self) -> None:
+        """A long unterminated union is rejected in well under two seconds."""
+        source = "type 0=" + ' "!"' * 5000
+        started = time.perf_counter()
+        assert gate._TS_UNION.search(source) is None
+        assert time.perf_counter() - started < 2.0
 
 
 # ---------------------------------------------------------------------------

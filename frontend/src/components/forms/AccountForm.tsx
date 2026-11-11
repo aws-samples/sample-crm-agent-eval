@@ -6,6 +6,7 @@
 import { useId, useState, type FormEvent, type JSX } from "react";
 
 import { useCrmApi } from "../../api/useCrmApi";
+import { randomToken } from "../../lib/randomToken";
 import type { Account } from "../../types/domain";
 import { ErrorBanner } from "./ErrorBanner";
 
@@ -79,7 +80,7 @@ export function AccountForm({ initial, onSaved, onCancel }: AccountFormProps): J
           region: values.region || undefined,
           website: values.website || undefined,
           employee_count: employeeCount,
-          transaction_key: `create-account-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          transaction_key: `create-account-${Date.now()}-${randomToken(11)}`,
         });
         const accountId = extractAccountId(response);
         onSaved(accountId ?? "");

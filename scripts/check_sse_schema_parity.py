@@ -58,7 +58,7 @@ DEFAULT_CONSUMERS: tuple[Path, ...] = (
 
 #: A TypeScript string-literal union: `type EventKind = "tool_call" | "usage";`, across lines.
 _TS_UNION = re.compile(
-    r"(?:type|enum)\s+(?P<name>\w+)\s*=\s*(?P<body>(?:\s*\|?\s*['\"][^'\"]+['\"])+)\s*;",
+    r"(?:type|enum)\s+(?P<name>\w+)\s*=\s*(?P<body>(?:\s*(?:\|\s*)?['\"][^'\"]+['\"])+)\s*;",
     re.MULTILINE,
 )
 

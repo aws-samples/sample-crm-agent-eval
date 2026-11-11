@@ -6,17 +6,12 @@
 import { useId, useState, type FormEvent, type JSX } from "react";
 
 import { useCrmApi } from "../../api/useCrmApi";
+import { newTransactionKey } from "../../lib/randomToken";
 import { ACTIVITY_KINDS, type ActivityKind } from "../../types/domain";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { cn, focusRing } from "../ui/utils";
 import { ApiErrorBanner } from "../../pages/opportunities/ApiErrorBanner";
-
-function newTransactionKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `txn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 /** Field label styling, shared by every control on this form. */
 const fieldLabel = "text-xs font-medium tracking-wide text-text-secondary";

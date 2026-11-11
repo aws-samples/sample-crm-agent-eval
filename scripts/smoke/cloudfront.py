@@ -800,7 +800,7 @@ _SCRIPT_HASH_SOURCE = re.compile(r"^'sha256-[A-Za-z0-9+/]{43}='$")
 
 #: An inline `<script>` element of any case and attributes, excluding one with a `src` attribute.
 _INLINE_SCRIPT = re.compile(
-    r"<script\b(?![^>]*\ssrc\s*=)[^>]*>(.*?)</script\s*>", re.DOTALL | re.IGNORECASE
+    r"<script\b(?![^>]*\ssrc\s*=)[^>]*>(.*?)</script\b[^>]*>", re.DOTALL | re.IGNORECASE
 )
 
 #: An unauthenticated `/agent/*` probe. The relay refuses it before routing, so any path works.

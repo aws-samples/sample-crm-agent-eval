@@ -1965,6 +1965,93 @@ def _index_only_main_tf(
     return path
 
 
+def _string_list_locals(text: str) -> dict[str, list[str]]:
+    return {
+        match.group("name"): re.findall(r'"([^"]*)"', match.group("items"))
+        for match in iam_roles._STRING_LIST_LOCAL_RE.finditer(text)
+    }
+
+
+class TestStringListLocalPattern:
+    """`_STRING_LIST_LOCAL_RE` reads one-line string-list locals, and only those."""
+
+    def test_the_root_composition_string_list_locals_are_read(self) -> None:
+        """The real root composition yields exactly the known string-list locals."""
+        lists = _string_list_locals(iam_roles._root_composition_text())
+        assert set(lists) == {
+            "agent_only_tools",
+            "cognito_required_custom_claims",
+            "cursor_tools",
+            "default",
+            "dynamodb_grants",
+            "gateway_endpoint_service_names",
+            "sfn_vended_log_delivery_actions",
+            "sfn_xray_tracing_actions",
+            "spa_callback_urls",
+            "spa_connect_src_extra",
+            "spa_logout_urls",
+            "sweep_control_demo_select",
+            "sweep_control_tenant_query_keys",
+            "sweep_task_tenant_tables",
+            "sweep_task_unconditioned_read_tables",
+        }
+        assert lists["sweep_task_tenant_tables"] == [
+            "accounts",
+            "contacts",
+            "opportunities",
+            "activities",
+            "notes",
+        ]
+        assert lists["sweep_control_tenant_query_keys"] == ["eval-*", "canary"]
+        assert lists["sweep_task_unconditioned_read_tables"] == ["proposals"]
+
+    def test_the_sweep_task_comprehension_expands_to_its_five_tables(self) -> None:
+        """The real sweep-task comprehension is rewritten with each listed table quoted."""
+        text = iam_roles._root_composition_text()
+        assert "local.sweep_task_tenant_tables :" not in text
+        for table in ("accounts", "contacts", "opportunities", "activities", "notes"):
+            assert f'table = "{table}"' in text, table
+
+    @pytest.mark.parametrize(
+        ("line", "items"),
+        [
+            ("  t = []", []),
+            ("  t = [ ]", []),
+            ('  t = ["a"]', ["a"]),
+            ('  t = ["a", "b"]', ["a", "b"]),
+            ('  t = ["a", "b",]', ["a", "b"]),
+            ('  t = ["a" "b"]', ["a", "b"]),
+            ('  t   =   [  "a"  ,   "b"  ,  ]  ', ["a", "b"]),
+            ('  t = ["", "x y"]', ["", "x y"]),
+        ],
+    )
+    def test_string_list_forms_are_read(self, line: str, items: list[str]) -> None:
+        """Empty, trailing-comma, comma-less and multi-space lists are read item for item."""
+        assert _string_list_locals(f"locals {{\n{line}\n}}\n") == {"t": items}
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            '  t = ["a", b]',
+            '  t = ["a",, "b"]',
+            '  t = ["a"',
+            '    t = ["a"]',
+            '  t = ["a"] # note',
+            "  t = [for x in local.y : x]",
+        ],
+    )
+    def test_non_string_lists_are_not_read(self, line: str) -> None:
+        """Bare words, doubled commas, unterminated, nested and annotated lines are not read."""
+        assert _string_list_locals(f"locals {{\n{line}\n}}\n") == {}
+
+    def test_a_pathological_unterminated_list_completes_quickly(self) -> None:
+        """A long unterminated list is rejected in well under two seconds."""
+        source = '  0=[""' + ' ""' * 5000
+        started = time.perf_counter()
+        assert iam_roles._STRING_LIST_LOCAL_RE.search(source) is None
+        assert time.perf_counter() - started < 2.0
+
+
 class TestIndexOnlyGrantReader:
     """`_terraform_index_only_grants` reads which grants cover only an index, never the table."""
 
