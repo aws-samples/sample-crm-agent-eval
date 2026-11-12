@@ -10,6 +10,7 @@ import { useCrmApi } from "../../api/useCrmApi";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { cn, focusRing } from "../../components/ui/utils";
+import { newTransactionKey } from "../../lib/randomToken";
 import { OPPORTUNITY_STAGES } from "../../types/domain";
 import { ApiErrorBanner } from "./ApiErrorBanner";
 import { asRecord } from "./types";
@@ -26,12 +27,6 @@ const textArea = cn(
   "min-h-24 w-full rounded-control border border-hairline border-border-control bg-surface-raised px-4 py-3 text-sm text-text-primary",
   focusRing,
 );
-
-function newTransactionKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `txn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 export function OpportunityCreatePage(): JSX.Element {
   const api = useCrmApi();

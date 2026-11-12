@@ -23,6 +23,7 @@ import type { Page, TestInfo } from "@playwright/test";
 
 import { expect, test as signedInTest } from "./auth";
 import { postAsSignedInUser, transactionKey } from "./pageApi";
+import { randomToken } from "./randomToken";
 
 const RUN_ID_ENV_VAR = "CRM_E2E_RUN_ID";
 const RUN_ID_PATTERN = /^[a-z0-9-]{1,32}$/;
@@ -38,7 +39,7 @@ const PROPOSAL_REBASED = "proposal_rebased";
 function runId(): string {
   const supplied = process.env[RUN_ID_ENV_VAR];
   if (supplied === undefined || supplied === "") {
-    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    return `${Date.now().toString(36)}${randomToken(4)}`;
   }
   if (!RUN_ID_PATTERN.test(supplied)) {
     throw new Error(`${RUN_ID_ENV_VAR}=${JSON.stringify(supplied)} must match ${RUN_ID_PATTERN}`);

@@ -7,8 +7,10 @@ has one, and that a publishable currency figure is refused under an unconfirmed 
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Final, get_args
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -30,6 +32,16 @@ from crm.metering import (
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _PRICING_PATH: Final[Path] = _REPO_ROOT / "config" / "pricing.yaml"
+_EVIDENCE_URL: Final[re.Pattern[str]] = re.compile(r"https?://[^\s\"')]+")
+
+
+def _assert_every_evidence_url_is_on_aws(evidence: str) -> None:
+    """Assert `evidence` cites at least one URL and that every cited URL's host is AWS's."""
+    urls = _EVIDENCE_URL.findall(evidence)
+    assert urls, "a declaration must cite its source URL"
+    for url in urls:
+        assert urlparse(url).hostname == "aws.amazon.com", url
+
 
 #: Distinct non-zero per-category rates, so a wrong charge base shows in the computed cost.
 _INPUT_RATE: Final[float] = 3.0
@@ -111,13 +123,14 @@ def test_both_families_are_settled_from_authoritative_aws_docs() -> None:
     assert anthropic.cache_read_accounting == "exclusive"
     assert anthropic.evidence_direction == "exclusive"
     assert "optimizing-cost-and-latency-with-amazon-bedrock-prompt-caching" in anthropic.evidence
-    assert "aws.amazon.com" in anthropic.evidence
+    _assert_every_evidence_url_is_on_aws(anthropic.evidence)
 
     openai = token_accounting_for("openai")
     assert openai.cache_read_accounting == "inclusive"
     assert openai.evidence_direction == "inclusive"
     assert "input_tokens = cached_tokens + cache_write_tokens" in openai.evidence
     assert "introducing-explicit-prompt-caching-for-openai" in openai.evidence
+    _assert_every_evidence_url_is_on_aws(openai.evidence)
     # The OpenAI evidence carries a caveat covering the OpenAI models in the matrix.
     assert "CAVEAT:" in openai.evidence
     assert "the OpenAI models in the matrix" in openai.evidence

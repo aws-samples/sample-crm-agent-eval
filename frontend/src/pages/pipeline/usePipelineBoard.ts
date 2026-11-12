@@ -8,14 +8,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useCrmApi } from "../../api/useCrmApi";
 import { CrmApiError } from "../../api/CrmApiClient";
 import { useReportView } from "../../components/AssistantPanel/useReportView";
+import { newTransactionKey as transactionKeyWithPrefix } from "../../lib/randomToken";
 import { OPPORTUNITY_STAGES } from "../../types/domain";
 import type { Opportunity, OpportunityStage, Proposal } from "../../types/domain";
 import type { ListProposalsResponse, SearchOpportunitiesResponse, SubmitProposalResponse } from "./types";
 
 function newTransactionKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `tk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return transactionKeyWithPrefix("tk");
 }
 
 export interface PendingStageChange {

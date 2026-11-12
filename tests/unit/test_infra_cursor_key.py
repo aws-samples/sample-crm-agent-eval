@@ -544,7 +544,7 @@ def test_the_cursor_tools_are_exactly_the_tools_whose_handlers_use_the_codec() -
 
 
 def _inline_script_hashes() -> list[str]:
-    scripts = re.findall(r"<script>(.*?)</script>", INDEX_HTML.read_text("utf-8"), re.S)
+    scripts = re.findall(r"<script>(.*?)</script[^>]*>", INDEX_HTML.read_text("utf-8"), re.S | re.I)
     return [
         "sha256-" + base64.b64encode(hashlib.sha256(s.encode("utf-8")).digest()).decode()
         for s in scripts

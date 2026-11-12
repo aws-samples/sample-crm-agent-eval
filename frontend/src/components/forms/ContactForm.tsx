@@ -6,6 +6,7 @@
 import { useId, useState, type FormEvent, type JSX } from "react";
 
 import { useCrmApi } from "../../api/useCrmApi";
+import { randomToken } from "../../lib/randomToken";
 import type { Contact, ContactStatus } from "../../types/domain";
 import { ErrorBanner } from "./ErrorBanner";
 
@@ -86,7 +87,7 @@ export function ContactForm({
           email: values.email || undefined,
           phone: values.phone || undefined,
           status: values.status,
-          transaction_key: `create-contact-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          transaction_key: `create-contact-${Date.now()}-${randomToken(11)}`,
         });
         const contactId = extractContactId(response);
         onSaved(contactId ?? "");

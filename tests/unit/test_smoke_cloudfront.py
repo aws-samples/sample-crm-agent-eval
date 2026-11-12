@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1804,6 +1805,8 @@ def test_an_unhashed_inline_script_in_any_spelling_fails(tag: str) -> None:
         '<script type="module">window.x = 1;</script>',
         "<script>window.x = 1;</script >",
         '<Script nonce="n">window.x = 1;</sCrIpT\t>',
+        "<script>window.x = 1;</script\t\n bar>",
+        '<script>window.x = 1;</SCRIPT foo="1">',
     ],
     ids=[
         "plain",
@@ -1811,11 +1814,25 @@ def test_an_unhashed_inline_script_in_any_spelling_fails(tag: str) -> None:
         "module-attribute",
         "space-before-close",
         "mixed-case-attribute-tab",
+        "whitespace-and-junk-before-close",
+        "uppercase-close-with-attribute",
     ],
 )
 def test_the_inline_script_pattern_captures_exactly_the_body(tag: str) -> None:
     document = f"<head>{tag}</head><body><script src='/a.js'></script></body>"
     assert _INLINE_SCRIPT.findall(document) == ["window.x = 1;"]
+
+
+def test_the_inline_script_pattern_extracts_the_real_index_html_theme_script_unchanged() -> None:
+    """On the shipped `frontend/index.html`, the one inline body is the literal-tag slice."""
+    html = (Path(__file__).resolve().parents[2] / "frontend" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    open_tag, close_tag = "<script>", "</script>"
+    start = html.index(open_tag) + len(open_tag)
+    expected = html[start : html.index(close_tag, start)]
+    assert expected.strip(), "the real index.html must carry a non-empty inline script"
+    assert _INLINE_SCRIPT.findall(html) == [expected]
 
 
 @pytest.mark.parametrize(

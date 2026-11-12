@@ -4573,7 +4573,10 @@ class TestAlbAccessLogDeliveryGrant:
             _ALB_LOG_DELIVERY_TF,
         )
         assert "AllowAlbAccessLogDelivery" not in tf, "the substitution did not apply"
-        assert "logging.s3.amazonaws.com" in tf, "the S3 grant must remain, to isolate the ELB arm"
+        assert (
+            re.search(r'^\s*identifiers\s*=\s*\["logging\.s3\.amazonaws\.com"\]\s*$', tf, re.M)
+            is not None
+        ), "the S3 grant must remain, to isolate the ELB arm"
         failed = _failed(_alb_findings(tmp_path, tf))
         assert any("aws_lb.this" in row for row in failed), failed
         assert "present in the tree=False" in str(failed)

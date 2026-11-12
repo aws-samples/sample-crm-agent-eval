@@ -9,13 +9,12 @@ import { useCallback, useEffect, useState } from "react";
 import { useCrmApi } from "../../api/useCrmApi";
 import { CrmApiError } from "../../api/CrmApiClient";
 import { useReportView } from "../../components/AssistantPanel/useReportView";
+import { newTransactionKey as transactionKeyWithPrefix } from "../../lib/randomToken";
 import type { Activity, ActivityKind, Opportunity } from "../../types/domain";
 import type { ListActivitiesResponse, LogActivityResponse } from "./types";
 
 function newTransactionKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `tk-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return transactionKeyWithPrefix("tk");
 }
 
 export interface UseActivitiesState {

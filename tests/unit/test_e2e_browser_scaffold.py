@@ -79,7 +79,10 @@ def strip_comments(source: str) -> str:
 
 def test_the_comment_stripper_preserves_urls() -> None:
     """The comment stripper removes comments and keeps URLs."""
-    assert "https://example.test" in strip_comments('const a = "https://example.test"; // note')
+    assert (
+        strip_comments('const a = "https://example.test"; // note')
+        == 'const a = "https://example.test"; '
+    )
     assert "note" not in strip_comments("const a = 1; // note")
     assert "block" not in strip_comments("/* block */ const a = 1;")
 
@@ -210,6 +213,41 @@ def import_specifiers(source: str) -> list[str]:
     return found
 
 
+#: A line that opens an import or re-export statement, read off the raw source independently of
+#: :data:`_IMPORT_PATTERNS`.
+_IMPORT_STATEMENT = re.compile(
+    r"""(?m)^\s*(?:import\b|export\s+(?:type\s+)?(?:\*|\{[^}]*\})[^;]*?\bfrom\s*["'])"""
+)
+
+
+def extractor_missed_imports(source: str) -> bool:
+    """Whether `source` has an import or re-export statement but :func:`import_specifiers` finds
+    no specifier in it."""
+    return _IMPORT_STATEMENT.search(source) is not None and not import_specifiers(source)
+
+
+def test_the_extractor_check_fails_a_source_whose_import_is_not_extracted() -> None:
+    """An import the extractor cannot read is reported as missed."""
+    source = 'import {\n  helper,\n} from "./helper";\n\nexport const x = helper();\n'
+    assert import_specifiers(source) == []
+    assert extractor_missed_imports(source)
+
+
+def test_the_extractor_check_passes_an_import_free_source() -> None:
+    """A source with no import or re-export statement is not reported as missed."""
+    source = (
+        '// SPDX-License-Identifier: MIT\nexport function token(): string {\n  return "a";\n}\n'
+    )
+    assert not extractor_missed_imports(source)
+
+
+def test_the_extractor_check_passes_a_source_whose_imports_are_extracted() -> None:
+    """Single-line imports and re-exports are extracted, so nothing is reported as missed."""
+    source = 'import { a } from "./a";\nexport * from "./b";\n'
+    assert import_specifiers(source) == ["./a", "./b"]
+    assert not extractor_missed_imports(source)
+
+
 def import_escapes_the_package(specifier: str, containing: Path) -> bool:
     """Whether a relative `specifier` resolves outside `tests/e2e/browser/`.
 
@@ -267,8 +305,12 @@ def test_no_journey_imports_application_code() -> None:
     first_party = first_party_package_names()
     for path in sources:
         shown = path.relative_to(BROWSER_DIR).as_posix()
-        specifiers = import_specifiers(path.read_text(encoding="utf-8"))
-        assert specifiers, f"{shown} imports nothing; the extractor is probably broken"
+        source = path.read_text(encoding="utf-8")
+        assert not extractor_missed_imports(source), (
+            f"{shown} has an import statement but no specifier was extracted from it; the "
+            "extractor is probably broken"
+        )
+        specifiers = import_specifiers(source)
         for specifier in specifiers:
             assert specifier not in first_party, (
                 f"{shown} imports {specifier!r}, a package in this repository"

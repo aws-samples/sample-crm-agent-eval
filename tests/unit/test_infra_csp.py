@@ -52,7 +52,10 @@ FIXTURE_CONNECT: Final = (
 )
 
 #: An inline `<script>` with no attributes: the only kind a `script-src` hash governs here.
-_INLINE_SCRIPT: Final = re.compile(r"<script>(.*?)</script>", re.DOTALL)
+_INLINE_SCRIPT: Final = re.compile(r"<script>(.*?)</script[^>]*>", re.DOTALL | re.IGNORECASE)
+
+_OPENING_SCRIPT_TAG: Final = re.compile(r"<script\b[^>]*>", re.IGNORECASE)
+_CLOSING_SCRIPT_TAG: Final = re.compile(r"</script[^>]*>", re.IGNORECASE)
 
 
 def _skip_unless_terraform() -> None:
@@ -71,6 +74,21 @@ def _csp_hash(script: str) -> str:
 
 def _inline_script_hashes(html: str) -> list[str]:
     return [_csp_hash(body) for body in _INLINE_SCRIPT.findall(html)]
+
+
+def _script_tag_form_violations(html: str) -> list[str]:
+    """Script tags outside the forms the Terraform hash expression reads identically.
+
+    An opening tag must be exactly `<script>` or carry `src=`; a closing tag must be exactly
+    `</script>`. Returns the offending tags, in document order.
+    """
+    openings = [
+        tag
+        for tag in _OPENING_SCRIPT_TAG.findall(html)
+        if tag != "<script>" and not re.search(r"\bsrc=", tag, re.IGNORECASE)
+    ]
+    closings = [tag for tag in _CLOSING_SCRIPT_TAG.findall(html) if tag != "</script>"]
+    return openings + closings
 
 
 def _hcl_list(values: tuple[str, ...] | list[str]) -> str:
@@ -231,6 +249,29 @@ def test_index_html_carries_exactly_one_inline_script() -> None:
     assert "data-theme" in bodies[0]
     attributed = re.findall(r"<script\s[^>]*>", html)
     assert all(re.search(r"\bsrc=", tag) for tag in attributed), attributed
+
+
+def test_index_html_script_tags_use_only_the_forms_terraform_hashes() -> None:
+    """Every script tag in `index.html` is one the case-sensitive Terraform regex reads alike."""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert _OPENING_SCRIPT_TAG.findall(html), "the guard found no script tags to check"
+    assert _script_tag_form_violations(html) == []
+
+
+@pytest.mark.parametrize(
+    ("planted", "offending"),
+    [
+        ("<SCRIPT>x()</script>", "<SCRIPT>"),
+        ("<script>x()</script >", "</script >"),
+        ("<script>x()</SCRIPT>", "</SCRIPT>"),
+        ("<script defer>x()</script>", "<script defer>"),
+    ],
+)
+def test_the_tag_form_guard_rejects_a_planted_variant(planted: str, offending: str) -> None:
+    """The guard fails on a tag the Python regex accepts but the Terraform regex does not."""
+    html = INDEX_HTML.read_text(encoding="utf-8").replace("</head>", f"{planted}\n</head>", 1)
+    assert planted in html
+    assert _script_tag_form_violations(html) == [offending]
 
 
 def test_a_changed_inline_script_changes_its_hash() -> None:

@@ -19,6 +19,7 @@ import { cn, focusRing } from "../../components/ui/utils";
 import { OPPORTUNITY_STAGES, type OpportunityStage } from "../../types/domain";
 import { ApiErrorBanner } from "./ApiErrorBanner";
 import { formatCurrency, formatDate } from "../../lib/format";
+import { newTransactionKey } from "../../lib/randomToken";
 import {
   OPPORTUNITY_HIGH_RISK_FIELDS,
   OPPORTUNITY_LOW_RISK_FIELDS,
@@ -53,12 +54,6 @@ const selectControl = cn(
   "h-control-md w-full rounded-control border border-hairline border-border-control bg-surface-raised px-4 text-sm text-text-primary",
   focusRing,
 );
-
-function newTransactionKey(): string {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `txn-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
 
 export function OpportunityDetailPage(): JSX.Element {
   const { opportunityId } = useParams<{ opportunityId: string }>();

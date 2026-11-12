@@ -7,6 +7,8 @@
  */
 import { expect, type Page } from "@playwright/test";
 
+import { randomToken } from "./randomToken";
+
 /** A route's HTTP status and parsed JSON body (`null` when the body is not JSON). */
 export interface ApiReply {
   readonly status: number;
@@ -76,5 +78,5 @@ export function field(body: unknown, ...path: string[]): unknown {
 
 /** A unique idempotency key for one write. */
 export function transactionKey(label: string): string {
-  return `e2e-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `e2e-${label}-${Date.now()}-${randomToken(8)}`;
 }

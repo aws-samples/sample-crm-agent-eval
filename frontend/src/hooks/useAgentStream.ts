@@ -44,6 +44,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AuthContextValue } from "../auth/AuthProvider";
 import { buildRelayRequest, type RelayRequest } from "../lib/agentClient";
+import { randomToken } from "../lib/randomToken";
 import type { AgentEventFrame } from "../types/generated/agentEvents";
 
 /** The closed set of event kinds this hook understands natively. */
@@ -178,15 +179,6 @@ const RECONNECT_BACKOFF_MS = 1000;
 export const SESSION_ID_MIN_LENGTH = 33;
 export const SESSION_ID_MAX_LENGTH = 256;
 
-/** Base-36 randomness of exactly `length` characters, drawing again as needed. */
-function randomBase36(length: number): string {
-  let out = "";
-  while (out.length < length) {
-    out += Math.random().toString(36).slice(2);
-  }
-  return out.slice(0, length);
-}
-
 /**
  * A session id within {@link SESSION_ID_MIN_LENGTH} and {@link SESSION_ID_MAX_LENGTH}.
  *
@@ -199,7 +191,7 @@ export function newSessionId(): string {
   }
   const prefix = `session-${Date.now()}-`;
   const shortfall = Math.max(0, SESSION_ID_MIN_LENGTH - prefix.length);
-  return `${prefix}${randomBase36(Math.max(shortfall, 11))}`.slice(0, SESSION_ID_MAX_LENGTH);
+  return `${prefix}${randomToken(Math.max(shortfall, 11))}`.slice(0, SESSION_ID_MAX_LENGTH);
 }
 
 /**
@@ -325,7 +317,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     ];
     const unrecognised = !knownKinds.includes(event.kind as KnownEventKind);
     eventCountRef.current += 1;
-    const key = `evt-${eventCountRef.current}-${Math.random().toString(36).slice(2, 8)}`;
+    const key = `evt-${eventCountRef.current}-${randomToken(6)}`;
     setTranscript((prev) => [...prev, { key, event, unrecognised }]);
     if (event.kind === "completed" || event.kind === "error") {
       setTurnEnded(true);

@@ -16,6 +16,7 @@ absent optionals. Failing to locate either side is a failure, never a skip.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Final
@@ -52,6 +53,12 @@ _ROOT_TF: Final[Path] = _REPO_ROOT / "infra" / "main.tf"
 
 #: The merged route map every routed resource in the api module is generated from.
 _ROUTE_MAP: Final[str] = "local.route_invoke_arns"
+
+#: The route map's definition: a ``merge(`` whose arguments, before any ``)``, include the tool
+#: Lambda invoke-ARN map.
+_ROUTE_MAP_MERGE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"route_invoke_arns\s*=\s*merge\([^)]*var\.tool_lambda_invoke_arns"
+)
 
 #: The three facts that together fix the servable path shape to a single root-level segment.
 _RESOURCE_FACTS: Final[tuple[tuple[str, str], ...]] = (
@@ -306,12 +313,7 @@ def _assert_route_mechanism(api_source: str) -> None:
 
     # The key set itself.
     assert (
-        re.search(
-            r"route_invoke_arns\s*=\s*merge\((?:[^)]*\n)*?[^)]*var\.tool_lambda_invoke_arns",
-            api_source,
-        )
-        is not None
-        and "var.extra_routes" in api_source
+        _ROUTE_MAP_MERGE_PATTERN.search(api_source) is not None and "var.extra_routes" in api_source
     ), (
         f"{_ROUTE_MAP} is no longer the merge of `var.tool_lambda_invoke_arns` and "
         "`var.extra_routes`, so the servable route names cannot be derived from `extra_routes`. "
@@ -482,6 +484,38 @@ def test_the_client_requests_a_route_the_deployment_serves() -> None:
         "unmatched method with 403, which is indistinguishable at the edge from an authorization "
         "failure."
     )
+
+
+def test_the_route_map_pattern_matches_the_real_api_module() -> None:
+    """The route-map pattern finds the merge in the api module's source."""
+    api_source = _read(_API_MODULE_TF, what="the api module")
+    assert _ROUTE_MAP_MERGE_PATTERN.search(api_source) is not None
+
+
+def test_the_route_map_pattern_matches_a_multi_line_merge() -> None:
+    """Arguments spread over several lines before the tool map still match."""
+    source = (
+        "  route_invoke_arns = merge(\n"
+        "    local.other_routes,\n"
+        "\n"
+        "    var.tool_lambda_invoke_arns,\n"
+        "  )\n"
+    )
+    assert _ROUTE_MAP_MERGE_PATTERN.search(source) is not None
+
+
+def test_the_route_map_pattern_rejects_a_token_after_the_merge_closes() -> None:
+    """A tool map named only after the merge's closing parenthesis is not part of the merge."""
+    source = "  route_invoke_arns = merge(local.other_routes)\n  x = var.tool_lambda_invoke_arns\n"
+    assert _ROUTE_MAP_MERGE_PATTERN.search(source) is None
+
+
+def test_the_route_map_pattern_is_linear_on_an_unterminated_merge() -> None:
+    """An unterminated merge of 5000 newlines is rejected in well under two seconds."""
+    source = "route_invoke_arns=merge(" + "\n" * 5000
+    started = time.perf_counter()
+    assert _ROUTE_MAP_MERGE_PATTERN.search(source) is None
+    assert time.perf_counter() - started < 2.0
 
 
 def test_this_file_can_never_skip() -> None:

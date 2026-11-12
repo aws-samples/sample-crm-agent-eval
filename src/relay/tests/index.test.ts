@@ -907,7 +907,7 @@ describe("the authentication gate, driven through the handler with the real veri
   it.each([
     ["absent", undefined],
     ["blank", ""],
-    ["another scheme", "Basic YWJjOmRlZg=="],
+    ["another scheme", `Basic ${Buffer.from("fixture-user:fixture-pass").toString("base64")}`],
     ["a bare token with no scheme", "eyJhbGciOiJSUzI1NiJ9" + ".e30.AAAA"], // gitleaks:allow
     ["a scheme with no token", "Bearer"],
   ])(`answers 401 for a ${JWT_HEADER} header that is %s`, async (_label, header) => {

@@ -414,6 +414,20 @@ describe("newSessionId satisfies the runtimeSessionId bound", () => {
     expect(id).not.toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
   });
 
+  it("pads the fallback from crypto.getRandomValues, never Math.random", () => {
+    const randomSpy = vi.spyOn(Math, "random");
+    try {
+      withoutRandomUUID(() => {
+        const cryptoSpy = vi.spyOn(globalThis.crypto, "getRandomValues");
+        newSessionId();
+        expect(cryptoSpy).toHaveBeenCalled();
+      });
+      expect(randomSpy).not.toHaveBeenCalled();
+    } finally {
+      randomSpy.mockRestore();
+    }
+  });
+
   it("complies on the fallback path across many draws, not just one", () => {
     // The fallback's random suffix varies in length, so the bound is checked over many draws.
     const lengths = new Set<number>();

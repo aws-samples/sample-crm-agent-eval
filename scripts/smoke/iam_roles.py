@@ -181,7 +181,7 @@ def _root_composition_text(path: Path = _MAIN_TF_PATH) -> str:
 
 #: A `locals` value that is a one-line list of quoted strings: `  tables = ["a", "b"]`.
 _STRING_LIST_LOCAL_RE: Final[re.Pattern[str]] = re.compile(
-    r'^  (?P<name>\w+)\s*=\s*\[(?P<items>(?:\s*"[^"]*"\s*,?)*)\s*\]\s*$', re.MULTILINE
+    r'^  (?P<name>\w+)\s*=\s*\[(?P<items>(?:\s*"[^"]*"(?:\s*,)?)*)\s*\]\s*$', re.MULTILINE
 )
 #: `[for <var> in local.<list> : { ... }]`, on one line or several, whose object may nest one level.
 _OBJECT_COMPREHENSION_RE: Final[re.Pattern[str]] = re.compile(
