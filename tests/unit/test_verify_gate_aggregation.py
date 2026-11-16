@@ -169,9 +169,9 @@ EXPECTED_OFFLINE_SKIPS: dict[str, str] = {
     ),
     "check_emitted_css": (
         "The gate compiles the real stylesheet, so it needs `frontend/node_modules/@tailwindcss/postcss` "
-        "and a `node`. The CI `verify` job cannot have them: it installs the RELAY's Node major (22, "
+        "and a `node`. The CI `verify` job cannot have them: it installs the RELAY's Node major ("
         "derived from the relay's Lambda runtime) and runs `npm ci` only in src/relay, while "
-        "frontend/package.json pins `engines.node` to an exact 26.13.0 -- so the toolchain cannot exist "
+        "frontend/package.json pins `engines.node` to an exact Node 26 release -- so the toolchain cannot exist "
         "in that job and the skip there is structural, not a missing `npm ci`. "
         "Coverage is the SEPARATE `frontend` job in both .gitlab-ci.yml and "
         ".github/workflows/verify.yml, which owns the frontend Node pin, runs `npm ci` in frontend/, "
@@ -225,6 +225,14 @@ EXPECTED_OFFLINE_SKIPS: dict[str, str] = {
         "present and this one is not. "
         "REMOVAL TRIGGER: an offline job that runs scripts/package_relay.sh before the gates, at which "
         "point the probe reports the zip present in CI too and the entry must go."
+    ),
+    "verify_terraform_plan_with_kms_absent": (
+        "The gate plans a fixture module against the cached providers in infra/.terraform/providers "
+        "(gitignored), so it skips where `terraform` is not on PATH or `terraform init` has not run: "
+        "a fresh clone or a scratch worktree. Its coverage is both CI `verify` jobs, which run "
+        "`terraform -chdir=infra init -backend=false` before the gates, so there the probe reports "
+        "the input present and the gate must not skip. "
+        "This entry is CONDITIONAL (see SKIP_PRECONDITION_PROBES)."
     ),
 }
 
@@ -282,12 +290,37 @@ def _lambda_zip_gate_module() -> Any:
     return check_lambda_zip_imports
 
 
+def _terraform_plan_inputs_absent() -> str | None:
+    """Why `verify_terraform_plan_with_kms_absent` cannot plan here, or `None` if it can.
+
+    Mirrors the gate's two skip predicates: `terraform` on PATH, and its `PLUGIN_DIR`, read from the
+    script so the probe follows the gate.
+    """
+    if shutil.which("terraform") is None:
+        return "terraform is not on PATH"
+    plugin_dir = REPO_ROOT / _kms_absent_gate_plugin_relpath()
+    if not plugin_dir.is_dir():
+        return f"no cached providers at {plugin_dir}"
+    return None
+
+
+def _kms_absent_gate_plugin_relpath() -> str:
+    """The repo-relative `PLUGIN_DIR` of `scripts/verify_terraform_plan_with_kms_absent.sh`."""
+    script = (REPO_ROOT / "scripts" / "verify_terraform_plan_with_kms_absent.sh").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'^PLUGIN_DIR="\$\{REPO_ROOT\}/([^"]+)"$', script, re.MULTILINE)
+    assert match is not None, "the gate no longer defines PLUGIN_DIR under REPO_ROOT"
+    return match.group(1)
+
+
 #: Precondition probes for conditional entries in `EXPECTED_OFFLINE_SKIPS`. `None` means the gate's
 #: input exists here, so it must not skip; a string means it is absent, so it must skip, and why.
 SKIP_PRECONDITION_PROBES: dict[str, Callable[[], str | None]] = {
     "check_emitted_css": _emitted_css_toolchain_absent,
     "check_lambda_zip_imports": _lambda_zips_absent,
     "check_relay_zip": _relay_zip_absent,
+    "verify_terraform_plan_with_kms_absent": _terraform_plan_inputs_absent,
 }
 
 #: Gates expected to report `[PARTIAL]` offline, each with its reason, where the deferred controls
@@ -570,6 +603,42 @@ def test_the_set_of_skipping_gates_is_exactly_the_declared_set(
 
 def _gate_stdout(report: list[dict[str, object]], name: str) -> str:
     return str(next((g["stdout"] for g in report if g["name"] == name), ""))[-400:]
+
+
+def test_the_terraform_plan_probe_reads_the_gates_plugin_dir() -> None:
+    """The probe's provider path is the one the gate skips on."""
+    assert _kms_absent_gate_plugin_relpath() == "infra/.terraform/providers"
+
+
+@pytest.mark.parametrize(
+    ("terraform_on_path", "plugin_dir_present", "expected"),
+    [
+        (False, True, "terraform is not on PATH"),
+        (True, False, "no cached providers"),
+        (True, True, None),
+    ],
+)
+def test_the_terraform_plan_probe_reports_each_absent_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terraform_on_path: bool,
+    plugin_dir_present: bool,
+    expected: str | None,
+) -> None:
+    """The probe names whichever input the gate would skip on, and `None` when both exist."""
+    monkeypatch.setattr(
+        shutil, "which", lambda _name: "/usr/bin/terraform" if terraform_on_path else None
+    )
+    relpath = "infra/.terraform/providers"
+    if plugin_dir_present:
+        (tmp_path / relpath).mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_kms_absent_gate_plugin_relpath", lambda: relpath)
+    reason = _terraform_plan_inputs_absent()
+    if expected is None:
+        assert reason is None
+    else:
+        assert reason is not None and expected in reason
 
 
 def test_every_skip_precondition_probe_belongs_to_a_declared_skip() -> None:

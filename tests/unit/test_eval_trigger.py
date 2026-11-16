@@ -32,6 +32,7 @@ from crm.handlers import eval_trigger as handler_module
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval import trigger
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
 from eval.runs import RunRecord
 from eval.tenancy import (
     tenant_for_run,
@@ -395,6 +396,31 @@ def _record(matrix_report: dict[str, Any] | None) -> RunRecord:
     )
 
 
+#: The row labels every tier section of the payload table carries, in order.
+_ROW_LABELS = [
+    "Model",
+    "Effort",
+    "Task completion rate",
+    "Task completion over repeats",
+    "Task accuracy",
+    "Cost per completed task",
+    "P50 latency per completed task (ms)",
+    "P95 latency per completed task (ms)",
+    "Model invocations",
+    "Long-context invocations",
+    "Total input tokens",
+    "Cache read tokens",
+    "Cache write tokens",
+    "Uncached input tokens",
+    "Total output tokens",
+    "Cost per applicable task",
+    "Self-corrected retries",
+    "Budget-exhausted tasks",
+    "Truncated tool calls",
+    "Truncated tasks",
+]
+
+
 def _summary() -> dict[str, object]:
     note = "Columns are the sweep's arms in run order."
     entry: dict[str, object] = {
@@ -405,21 +431,35 @@ def _summary() -> dict[str, object]:
         "accuracy": 0.5,
         "cost_withheld_provisional": True,
         "cost_per_completed_task": None,
-        "cost_per_task": None,
+        "cost_per_applicable_task": None,
         "completed_task_latency_ms_p50": None,
         "completed_task_latency_ms_p95": None,
         "latency_sample_count": None,
         "invocation_count": 3,
         "input_tokens": 10,
+        "total_prompt_tokens": 14,
+        "cache_read_tokens": 3,
+        "cache_write_tokens": 1,
         "output_tokens": 2,
         "retry_count": None,
+        "budget_exhausted_task_count": 0,
+        "truncated_tool_call_count": 0,
+        "truncated_task_count": 0,
     }
     return {
+        RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
         "columns": [{"label": "anthropic", "mode": "stub"}],
         "tiers": {
-            "supervisor": [{**entry, "budget_exhausted_task_count": 0}],
-            "subagent": [{**entry, "delegation_outcomes": None}],
-            "tool": [{**entry, "truncated_task_count": 0}],
+            "supervisor": [entry],
+            "subagent": [
+                {
+                    **entry,
+                    "truncated_tool_call_count": None,
+                    "truncated_task_count": None,
+                    "delegation_outcomes": None,
+                }
+            ],
+            "tool": [entry],
         },
         "notes": [note],
     }
@@ -440,14 +480,24 @@ def _table_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 def test_the_payload_carries_the_tier_table_of_the_stored_summary() -> None:
     from eval.matrix import tier_comparison_table
 
-    payload = _record({"tier_comparison": _summary(), "arms": []}).to_payload()
+    payload = _record(
+        {RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "tier_comparison": _summary(), "arms": []}
+    ).to_payload()
     assert payload["tier_comparison_table"] == tier_comparison_table(_summary())
     table = payload["tier_comparison_table"]
     assert table["headers"] == ["Metric", "anthropic"]
     assert [section["tier"] for section in table["sections"]] == ["supervisor", "subagent", "tool"]
+    for section in table["sections"]:
+        assert [row[0] for row in section["rows"]] == _ROW_LABELS, section["tier"]
     supervisor = {row[0]: row[1:] for row in table["sections"][0]["rows"]}
     assert supervisor["Cost per completed task"] == ["withheld"]
     assert supervisor["P95 latency per completed task (ms)"] == ["not measured"]
+    assert supervisor["Total input tokens"] == ["14"]
+    assert supervisor["Uncached input tokens"] == ["10"]
+    assert supervisor["Cost per applicable task"] == ["withheld"]
+    assert supervisor["Truncated tool calls"] == ["0"]
+    subagent = {row[0]: row[1:] for row in table["sections"][1]["rows"]}
+    assert subagent["Truncated tasks"] == ["not applicable"]
     assert payload["matrix"]["tier_comparison"] == _summary()
     json.dumps(payload)
 
@@ -472,8 +522,17 @@ def test_a_record_without_a_summary_mapping_omits_the_table(
         lambda s: s["tiers"].pop("tool"),
         lambda s: s.update(notes=[7]),
         lambda s: s["tiers"]["supervisor"][0].update(model_ids=[1, 2]),
+        lambda s: s.pop(RECORD_SHAPE_VERSION_KEY),
+        lambda s: s["tiers"]["tool"][0].pop("total_prompt_tokens"),
     ],
-    ids=["no-columns", "missing-tier", "non-string-note", "non-string-model"],
+    ids=[
+        "no-columns",
+        "missing-tier",
+        "non-string-note",
+        "non-string-model",
+        "no-record-shape",
+        "missing-token-field",
+    ],
 )
 def test_a_malformed_summary_is_omitted_and_logged_never_raised(
     corrupt: Any, caplog: pytest.LogCaptureFixture
@@ -481,7 +540,9 @@ def test_a_malformed_summary_is_omitted_and_logged_never_raised(
     summary = _summary()
     corrupt(summary)
     caplog.set_level("INFO")
-    payload = _record({"tier_comparison": summary}).to_payload()
+    payload = _record(
+        {RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "tier_comparison": summary}
+    ).to_payload()
     assert "tier_comparison_table" not in payload
     assert payload["status"] == "completed"
     events = _table_events(caplog)

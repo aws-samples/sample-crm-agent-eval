@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""Plan-time bound: every VPC Lambda role's IAM policy sizes stay under `iam_policy_budget`.
+"""Plan-time bound: the VPC Lambda and Runtime roles' IAM policy sizes stay under `iam_policy_budget`.
 
 Plans the root's real `lambda_action`, `agent_relay`, `eval_artifacts` and `eni_function_code_deny`
-blocks, its locals, and the root inline and managed policies attached to those roles, read verbatim
+blocks, its locals, and the root inline and managed policies attached to those roles and to the
+AgentCore Runtime's execution role, read verbatim
 from `infra/main.tf` and every sibling `infra/*.tf`. The modules they depend on but that attach no
 policy to these roles (dynamodb, vpc, observability, cognito, agentcore, frontend_cdn) are replaced
 by stub modules whose outputs are literals shaped like the deployed values: DynamoDB table and index
@@ -52,6 +53,9 @@ ACCOUNT: Final[str] = "123456789012"
 REGION: Final[str] = "us-east-1"
 _KEY_ID: Final[str] = "11111111-2222-3333-4444-5555eeee5555"
 
+#: The AgentCore Runtime's execution role; its root inline policies are planned and measured too.
+RUNTIME_ROLE: Final[str] = "crm-agent-eval-runtime-role"
+
 #: Modules planned from their real source. Every other referenced module becomes a stub.
 REAL_MODULES: Final[frozenset[str]] = frozenset(
     {
@@ -72,6 +76,13 @@ ROOT_SUBSTITUTIONS: Final[dict[str, str]] = {
     "aws_kms_key.cursor.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
     "aws_kms_key.api_allowlist.arn": f'"arn:aws:kms:{REGION}:{ACCOUNT}:key/{_KEY_ID}"',
     '"${path.module}/../frontend/index.html"': f'"{REPO_ROOT / "frontend" / "index.html"}"',
+    # A whole-module reference waits on every output of the module, so the read would be deferred.
+    "[for name, m in module.lambda_action : m.function_arn if": (
+        '[for name, _ in local.tools : "arn:aws:lambda:${var.aws_region}:'
+        f'{ACCOUNT}:function:crm-agent-eval-${{name}}" if'
+    ),
+    "aws_iam_role.agentcore_runtime.arn": f'"arn:aws:iam::{ACCOUNT}:role/{RUNTIME_ROLE}"',
+    "aws_iam_role.agentcore_runtime.id": f'"{RUNTIME_ROLE}"',
     "aws_iam_role.agentcore_gateway.arn": (
         f'"arn:aws:iam::{ACCOUNT}:role/crm-agent-eval-agentcore-gateway-role"'
     ),
@@ -110,6 +121,11 @@ OUTPUT_SUBSTITUTIONS: Final[dict[str, str]] = {
 #: Literal outputs for stub-module references that land in an inline policy on these roles.
 _RUNTIME_ARN: Final[str] = (
     f"arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:runtime/crm_agent_eval_runtime-AAAAAAAAAA"
+)
+
+_RUNTIME_LOG_GROUP_ARN: Final[str] = (
+    f"arn:aws:logs:{REGION}:{ACCOUNT}:log-group:/aws/bedrock-agentcore/runtimes/"
+    "crm_agent_eval_runtime-AAAAAAAAAA-DEFAULT"
 )
 
 _BLOCK_START = re.compile(r"^(locals|module|resource|data|variable|check)\b[^\n]*\{\s*(\}\s*)?$")
@@ -166,7 +182,8 @@ def _selected_root(text: str) -> str:
         else:
             continue
         role = re.search(r"^\s*role\s*=\s*module\.([a-z_]+)\.", block, re.MULTILINE)
-        if role is None or role.group(1) not in real_names:
+        on_runtime = re.search(r"^\s*role\s*=\s*aws_iam_role\.agentcore_runtime\.", block, re.M)
+        if on_runtime is None and (role is None or role.group(1) not in real_names):
             continue
         selected.append(block)
         if policy_block is not block:
@@ -211,6 +228,8 @@ def _stub_value(module: str, output: str) -> Any:
         return _dynamodb_outputs()[output]
     if output == "agent_runtime_arn":
         return _RUNTIME_ARN
+    if output == "agent_runtime_log_group_arn":
+        return _RUNTIME_LOG_GROUP_ARN
     if output.endswith("_ids"):
         return [f"stub-{module}-{output}-a", f"stub-{module}-{output}-b"]
     if "kms" in output and output.endswith("_arn"):
@@ -403,8 +422,8 @@ RELAY_ROLE: Final[str] = "crm-agent-eval-agent-relay-role"
 def test_the_harness_measures_every_vpc_lambda_role(
     plan: Plan, aggregates: dict[str, tuple[int, int]]
 ) -> None:
-    """One role per `lambda_action` instantiation in any `infra/*.tf`, plus the relay."""
-    expected = set(_lambda_action_roles(plan).values()) | {RELAY_ROLE}
+    """One role per `lambda_action` instantiation in any `infra/*.tf`, plus the relay and Runtime."""
+    expected = set(_lambda_action_roles(plan).values()) | {RELAY_ROLE, RUNTIME_ROLE}
     assert len(_lambda_action_roles(plan)) == len(_expected_lambda_action_modules())
     assert set(aggregates) == expected, sorted(set(aggregates) ^ expected)
     # The module's five, plus the root's `eval_trigger_states` and `eval_trigger_artifacts`.
@@ -697,3 +716,37 @@ def test_capabilities_inline_aggregate_stays_under_the_fail_threshold(
     chars, count = aggregates[CAPABILITIES_ROLE]
     assert count == 4, "logs, vpc-access, dynamodb and config-kms"
     assert chars < FAIL_USAGE_FRACTION * INLINE_POLICY_AGGREGATE_LIMIT_CHARS, chars
+
+
+RUNTIME_POLICIES: Final[frozenset[str]] = frozenset(
+    {
+        "crm-agent-eval-runtime-permissions",
+        "crm-agent-eval-runtime-history",
+        "crm-agent-eval-runtime-logs",
+    }
+)
+
+
+def test_the_runtime_role_measures_its_three_inline_policies_under_the_threshold(
+    plan: Plan, aggregates: dict[str, tuple[int, int]]
+) -> None:
+    """The Runtime role's permissions, history and logs policies, measured with real-shaped ARNs."""
+    sizes = {
+        str(plan.after(address)["name"]): _policy_document_chars(
+            json.loads(plan.after(address)["policy"])
+        )
+        for address in plan.addresses_of_type("aws_iam_role_policy")
+        if plan.after(address).get("role") == RUNTIME_ROLE
+    }
+    assert set(sizes) == RUNTIME_POLICIES, sorted(sizes)
+    chars, count = aggregates[RUNTIME_ROLE]
+    assert (chars, count) == (sum(sizes.values()), 3)
+    limit = FAIL_USAGE_FRACTION * INLINE_POLICY_AGGREGATE_LIMIT_CHARS
+    assert chars < limit, (
+        f"{RUNTIME_ROLE}: {chars} chars ({chars / INLINE_POLICY_AGGREGATE_LIMIT_CHARS:.1%}) "
+        f"per policy {sizes}"
+    )
+    print(
+        f"{RUNTIME_ROLE} inline aggregate {chars} chars "
+        f"({chars / INLINE_POLICY_AGGREGATE_LIMIT_CHARS:.1%}); per policy {sizes}"
+    )

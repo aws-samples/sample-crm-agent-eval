@@ -173,6 +173,7 @@ def _fixture_arm(model_id: str, family: str, *, index: int) -> Any:
             runtime_identifier="local-runtime",
             price_table_version="provisional-copy",
             answer_style_sha256="0" * 64,
+            prompt_caching="explicit cache points",
         ),
         model_metrics_fields=metrics.to_report_fields(),
         aggregate_score_fields={

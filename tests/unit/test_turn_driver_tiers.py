@@ -9,7 +9,9 @@ priced cost lines and resolved tiers; the budget comes from a :class:`~agents.bu
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+import copy
+import json
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +49,7 @@ class _Script:
 
     rounds: list[list[ProviderEvent]]
     calls: list[tuple[Family, ResolvedInvocation]] = field(default_factory=list)
+    seen: list[list[dict[str, object]]] = field(default_factory=list)
 
 
 @dataclass
@@ -67,6 +70,7 @@ class _FamilyProvider(ModelProvider):
         )
         assert self.script.rounds, "provider.stream called more times than scripted"
         self.script.calls.append((self.family, invocation))
+        self.script.seen.append(copy.deepcopy(messages))
         return self._emit(self.script.rounds.pop(0))
 
     async def _emit(self, events: list[ProviderEvent]) -> AsyncIterator[ProviderEvent]:
@@ -129,6 +133,7 @@ def _drive(
     rounds: list[list[ProviderEvent]] | None = None,
     budget: TurnBudgetSpec = CHAT_BUDGET,
     max_rounds: int | None = None,
+    dispatch: Callable[[RegisteredTool, dict[str, object]], dict[str, Any]] = _dispatch,
 ) -> tuple[list[AgentEvent], TurnRecords, _Resolver]:
     script = _Script(rounds if rounds is not None else _delegating_rounds())
     resolver = _Resolver(script)
@@ -144,7 +149,7 @@ def _drive(
                 matrix=MATRIX,
                 tuning=tuning,
                 budget=budget,
-                dispatch=_dispatch,
+                dispatch=dispatch,
                 records=records,
                 page_context=None,
                 history_messages=None,
@@ -260,9 +265,10 @@ def test_the_budget_spec_bounds_the_turn() -> None:
             ProviderEvent(type="completed", awaiting_tools=True),
         ],
     ]
-    events, _, _ = _drive(MIXED, rounds=rounds, budget=one_call)
+    events, records, _ = _drive(MIXED, rounds=rounds, budget=one_call)
     assert events[-1].kind == "error"
     assert events[-1].error_kind == "budget_exhausted"
+    assert records.budget_exhausted_tier == "supervisor"
 
 
 def test_session_turn_tuning_puts_effort_on_the_supervisor_only() -> None:
@@ -280,3 +286,92 @@ def test_eval_budget_is_smaller_than_chat_budget() -> None:
     """The two specs a caller chooses between keep their ordering."""
     assert EVAL_BUDGET.max_tool_calls < CHAT_BUDGET.max_tool_calls
     assert EVAL_BUDGET.max_wall_clock_seconds < CHAT_BUDGET.max_wall_clock_seconds
+
+
+# --- the shared bound on the direct-dispatch path ---------------------------------------------
+
+
+def _activities_dispatch(
+    count: int,
+) -> Callable[[RegisteredTool, dict[str, object]], dict[str, Any]]:
+    def _dispatch_activities(tool: RegisteredTool, tool_input: dict[str, object]) -> dict[str, Any]:
+        del tool, tool_input
+        return {
+            "statusCode": 200,
+            "body": {
+                "items": [{"activity_id": f"act-{n:04d}", "note": "x" * 700} for n in range(count)]
+            },
+        }
+
+    return _dispatch_activities
+
+
+def _direct_rounds() -> list[list[ProviderEvent]]:
+    return [
+        [
+            ProviderEvent(
+                type="tool_call",
+                tool_name="list_activities",
+                tool_input={"opportunity_id": "opp-0000"},
+                tool_id="d1",
+            ),
+            ProviderEvent(type="usage", input_tokens=100, output_tokens=20),
+            ProviderEvent(type="completed", awaiting_tools=True),
+        ],
+        [
+            ProviderEvent(type="text_delta", text="Here are the activities."),
+            ProviderEvent(type="usage", input_tokens=50, output_tokens=15),
+            ProviderEvent(type="completed", awaiting_tools=False),
+        ],
+    ]
+
+
+def _direct_tool_result_sent(resolver: _Resolver) -> dict[str, Any]:
+    tool_messages = [m for m in resolver.script.seen[1] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    results = tool_messages[0]["tool_results"]
+    assert isinstance(results, list) and len(results) == 1
+    sent = json.loads(str(results[0]["output"]))
+    assert isinstance(sent, dict)
+    return sent
+
+
+def test_a_direct_tool_result_over_the_ceiling_reaches_the_model_bounded() -> None:
+    """The supervisor model, the tool_result event and the attribution all see the bound."""
+    from agents.events import TOOL_OUTPUT_TRUNCATED_KEY, TOOL_RESULT_BYTE_CEILING, TRUNCATION_MARKER
+
+    events, records, resolver = _drive(
+        MIXED, rounds=_direct_rounds(), dispatch=_activities_dispatch(60)
+    )
+
+    sent = _direct_tool_result_sent(resolver)
+    body = sent["body"]
+    assert body[TOOL_OUTPUT_TRUNCATED_KEY] is True
+    assert body["items"][-1] == {TRUNCATION_MARKER: True}
+    assert len(repr(body).encode("utf-8")) <= TOOL_RESULT_BYTE_CEILING
+    (tool_result,) = [e for e in events if e.kind == "tool_result"]
+    assert tool_result.truncated is True
+    assert tool_result.tool_output == sent
+    (call,) = records.tool_calls
+    assert call.tool_name == "list_activities" and call.truncated is True
+
+
+def test_a_direct_tool_result_under_the_ceiling_is_sent_unchanged_and_not_flagged() -> None:
+    events, records, resolver = _drive(
+        MIXED, rounds=_direct_rounds(), dispatch=_activities_dispatch(3)
+    )
+
+    assert _direct_tool_result_sent(resolver) == _activities_dispatch(3)(
+        _registered_tool("list_activities"), {}
+    )
+    (tool_result,) = [e for e in events if e.kind == "tool_result"]
+    assert tool_result.truncated is False
+    (call,) = records.tool_calls
+    assert call.truncated is False
+
+
+def _registered_tool(name: str) -> RegisteredTool:
+    from agents.registry import tool_registry_for
+    from agents.supervisor import SUPERVISOR_ROLE
+
+    return next(tool for tool in tool_registry_for(SUPERVISOR_ROLE) if tool.name == name)

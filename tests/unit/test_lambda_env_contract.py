@@ -55,6 +55,7 @@ _EVAL_TRIGGER_OPTIONAL: frozenset[str] = frozenset(
         "AWS_CONFIG_FILE",
         "AWS_PROFILE",
         "AWS_SHARED_CREDENTIALS_FILE",
+        "CONVERSATION_HISTORY_STORE",
         "EVAL_SUBSTRATE",
         "LOG_LEVEL",
     }

@@ -124,7 +124,12 @@ def _published_arm(store: Store) -> dict[str, Any]:
         stream_calls=len(INVOCATIONS),
     )
     unit = run_task_unit(
-        store=store, task=task, tenant=_TENANT, family="anthropic", turn_runner=lambda _t, _n: turn
+        store=store,
+        task=task,
+        tenant=_TENANT,
+        family="anthropic",
+        turn_runner=lambda _t, _n: turn,
+        repeat_index=0,
     )
     arm = assemble_arm(
         [unit],

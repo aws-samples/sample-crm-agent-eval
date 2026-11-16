@@ -18,7 +18,14 @@ from pathlib import Path
 from typing import Final
 
 from agents.tier_attribution import InvocationAttribution, OutcomeKind, ToolCallAttribution
-from crm.metering import Tier, TokenUsage, UsageRecord, cost_for_usage
+from crm.metering import (
+    Tier,
+    TokenUsage,
+    UsageRecord,
+    cost_for_usage,
+    family_for_model_id,
+    prompt_tokens,
+)
 from eval.pricing import cache_min_checkpoint_tokens as _cache_min_checkpoint_tokens
 from eval.pricing import inference_profile_for
 from eval.scoring import SCORED_TIERS, TierScores
@@ -551,6 +558,8 @@ class TierRoleModelMetrics:
         call_latency_ms_p95: Nearest-rank P95 call latency in ms, or ``None`` when not measured.
         long_context_invocation_count: How many of the group's calls were priced at the model's
             long-context rates.
+        prompt_tokens: Sum over the group's calls of each call's
+            :func:`crm.metering.prompt_tokens` under the model's family.
     """
 
     tier: Tier
@@ -563,6 +572,7 @@ class TierRoleModelMetrics:
     call_latency_ms_p50: float | None
     call_latency_ms_p95: float | None
     long_context_invocation_count: int = 0
+    prompt_tokens: int = 0
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping; cost keys appear only when cost is not withheld."""
@@ -576,6 +586,7 @@ class TierRoleModelMetrics:
             "output_tokens": self.usage.output_tokens,
             "cache_read_tokens": self.usage.cache_read_tokens,
             "cache_write_tokens": self.usage.cache_write_tokens,
+            "prompt_tokens": self.prompt_tokens,
             "call_latency_measured": self.call_latency_measured,
             "latency_percentile_method": LATENCY_PERCENTILE_METHOD,
             "call_latency_ms_p50": self.call_latency_ms_p50,
@@ -660,9 +671,29 @@ def aggregate_tier_role_model(
                 call_latency_ms_p50=p50,
                 call_latency_ms_p95=p95,
                 long_context_invocation_count=long_context_count,
+                prompt_tokens=sum(attribution_prompt_tokens(a) for a in group),
             )
         )
     return tuple(results)
+
+
+def attribution_prompt_tokens(attribution: InvocationAttribution) -> int:
+    """Return one call's :func:`crm.metering.prompt_tokens` under its model's family.
+
+    A call that bears no tokens counts ``0`` whatever its ``model_id``.
+
+    Raises:
+        ValueError: A token-bearing call's ``model_id`` names no recognised family.
+    """
+    if not attribution.bears_tokens:
+        return 0
+    usage = TokenUsage(
+        input_tokens=attribution.tokens.input_tokens,
+        output_tokens=attribution.tokens.output_tokens,
+        cache_write_tokens=attribution.cache.write_tokens,
+        cache_read_tokens=attribution.cache.read_tokens,
+    )
+    return prompt_tokens(usage, family_for_model_id(attribution.model_id))
 
 
 def _price_group(
@@ -988,7 +1019,8 @@ class TierSummaryEntry:
 
     Attributes:
         tier: The model tier.
-        input_tokens: Summed input tokens of every invocation at this tier.
+        input_tokens: Summed input tokens of every invocation at this tier, as each family reports
+            them.
         output_tokens: Summed output tokens of every invocation at this tier.
         cost_total: Summed cost of this tier's invocations, or ``None`` while cost is withheld.
         latency_p50_ms: The tier's nearest-rank P50 call latency, or ``None`` when unmeasured.
@@ -997,6 +1029,9 @@ class TierSummaryEntry:
         completion_over_repeats: The tier's task completion over repeats.
         long_context_invocation_count: How many of this tier's calls were priced at long-context
             rates.
+        total_prompt_tokens: Summed per-call prompt size of this tier's invocations.
+        cache_read_tokens: Summed cache-read tokens of this tier's invocations.
+        cache_write_tokens: Summed cache-write tokens of this tier's invocations.
     """
 
     tier: Tier
@@ -1008,11 +1043,17 @@ class TierSummaryEntry:
     success: TierSuccess
     completion_over_repeats: RepeatCompletion
     long_context_invocation_count: int = 0
+    total_prompt_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping in a fixed key order."""
         return {
             "input_tokens": self.input_tokens,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
             "output_tokens": self.output_tokens,
             "cost_total": self.cost_total,
             "long_context_invocation_count": self.long_context_invocation_count,
@@ -1088,6 +1129,9 @@ def aggregate_tier_summary(
                 long_context_invocation_count=sum(
                     row.long_context_invocation_count for row in rows
                 ),
+                total_prompt_tokens=sum(row.prompt_tokens for row in rows),
+                cache_read_tokens=sum(row.usage.cache_read_tokens for row in rows),
+                cache_write_tokens=sum(row.usage.cache_write_tokens for row in rows),
             )
         )
     return TierSummary(entries=tuple(entries))
@@ -1111,6 +1155,8 @@ class TaskTierObservation:
             model takes no effort), or ``None`` when the turn recorded no resolved tiers.
         tool_calls: Every dispatched tool call of the turn, in call order, each attributed to the
             role that dispatched it.
+        budget_exhausted_tier: The tier where the turn's budget ran out, or ``None`` when it did
+            not.
     """
 
     task_id: str
@@ -1119,6 +1165,7 @@ class TaskTierObservation:
     delegation_outcome: str | None
     resolved_efforts: Mapping[Tier, str | None] | None
     tool_calls: tuple[ToolCallAttribution, ...] = ()
+    budget_exhausted_tier: Tier | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1136,6 +1183,11 @@ class TierTaskLatency:
         completed_task_latency_ms_p95: Nearest-rank P95 likewise.
         retry_count: Self-corrected retries (:func:`retried_failure_positions`) among the tool
             calls this tier dispatched, over every task the arm ran; always 0 at the tool tier.
+        budget_exhausted_task_count: Tasks whose budget ran out at this tier.
+        truncated_tool_call_count: Truncated tool calls at this tier (a supervisor-role call is the
+            supervisor's, any other the tool tier's); ``None`` at the subagent tier.
+        truncated_task_count: Tasks with at least one truncated tool call at this tier; ``None``
+            at the subagent tier.
     """
 
     tier: Tier
@@ -1144,7 +1196,10 @@ class TierTaskLatency:
     latency_sample_count: int
     completed_task_latency_ms_p50: float | None
     completed_task_latency_ms_p95: float | None
-    retry_count: int = 0
+    retry_count: int
+    budget_exhausted_task_count: int
+    truncated_tool_call_count: int | None
+    truncated_task_count: int | None
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping in a fixed key order."""
@@ -1155,6 +1210,9 @@ class TierTaskLatency:
             "completed_task_latency_ms_p50": self.completed_task_latency_ms_p50,
             "completed_task_latency_ms_p95": self.completed_task_latency_ms_p95,
             "retry_count": self.retry_count,
+            "budget_exhausted_task_count": self.budget_exhausted_task_count,
+            "truncated_tool_call_count": self.truncated_tool_call_count,
+            "truncated_task_count": self.truncated_task_count,
         }
 
 
@@ -1217,6 +1275,27 @@ def _tier_retry_count(observations: Sequence[TaskTierObservation], tier: Tier) -
     return count
 
 
+def _truncation_tier(call: ToolCallAttribution) -> Tier:
+    return "supervisor" if call.role == SUPERVISOR_ROLE else "tool"
+
+
+def _tier_truncation_counts(
+    observations: Sequence[TaskTierObservation], tier: Tier
+) -> tuple[int | None, int | None]:
+    """Return the tier's truncated tool-call and task counts; ``(None, None)`` at the subagent."""
+    if tier == "subagent":
+        return None, None
+    per_task = [
+        sum(
+            1
+            for call in observation.tool_calls
+            if call.truncated and _truncation_tier(call) == tier
+        )
+        for observation in observations
+    ]
+    return sum(per_task), sum(1 for count in per_task if count)
+
+
 def _sorted_efforts(values: set[str | None]) -> tuple[str | None, ...]:
     named = sorted(value for value in values if value is not None)
     return (*named, None) if None in values else tuple(named)
@@ -1234,8 +1313,10 @@ def aggregate_tier_task_metrics(
     A task is completed at a tier when that tier's score is applicable and met. Each completed
     task with at least one measured call at the tier contributes the sum of those calls' latencies;
     one with none contributes no sample. Percentiles are nearest-rank. When ``measured`` is
-    ``False`` every latency figure is ``None`` at a zero count. Efforts, delegation outcomes and
-    per-tier retry counts are collected over every observation regardless of ``measured``.
+    ``False`` every latency figure is ``None`` at a zero count. Efforts, delegation outcomes,
+    per-tier retry counts, budget-exhausted task counts and truncation counts are collected over
+    every observation regardless of ``measured``. A supervisor-role tool call's truncation counts at
+    the supervisor tier and any other role's at the tool tier; the subagent tier has none.
 
     Args:
         observations: One entry per task unit the arm ran.
@@ -1284,6 +1365,7 @@ def aggregate_tier_task_metrics(
             ]
             if values:
                 samples.append(sum(values))
+        truncated_calls, truncated_tasks = _tier_truncation_counts(observations, tier)
         by_tier.append(
             TierTaskLatency(
                 tier=tier,
@@ -1297,6 +1379,11 @@ def aggregate_tier_task_metrics(
                     nearest_rank_percentile(samples, 95) if samples else None
                 ),
                 retry_count=_tier_retry_count(observations, tier),
+                budget_exhausted_task_count=sum(
+                    1 for observation in observations if observation.budget_exhausted_tier == tier
+                ),
+                truncated_tool_call_count=truncated_calls,
+                truncated_task_count=truncated_tasks,
             )
         )
     return TierTaskMetrics(family=family, by_tier=tuple(by_tier), delegation_outcomes=outcomes)

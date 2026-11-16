@@ -72,7 +72,7 @@ from scripts.smoke.gateway_tools import (
 )
 from scripts.smoke.gateway_tools import _content_envelope as _envelope_of
 from scripts.smoke.gateway_tools import default_mcp_caller as _gateway_tools_mcp_caller
-from scripts.smoke.harness import CheckResult, SmokeContext, run_main
+from scripts.smoke.harness import CheckResult, SmokeContext, exception_detail, run_main
 
 from crm.envelope import AGENT_IDENTITY_KEY, IDENTITY_KEY, REQUEST_CONTEXT_KEY
 from crm.errors import ValidationFailed
@@ -378,7 +378,7 @@ def _canonicalise(value: Any) -> Any:
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return value
         if isinstance(parsed, dict | list):
             return json.dumps(_canonicalise(parsed), sort_keys=True, separators=(",", ":"))
@@ -1235,7 +1235,7 @@ def _provisioned_checks(
                     status="fail",
                     detail=(
                         "could not seed the service principal's book and mint its token: "
-                        f"{type(exc).__name__}: {exc}"
+                        + exception_detail(exc)
                     ),
                 )
             )
@@ -1275,7 +1275,7 @@ def _provisioned_checks(
                     resource=RESOURCE_CLASS,
                     check="cleanup_service_principal",
                     status="fail",
-                    detail=f"cleanup raised {type(exc).__name__}: {exc}",
+                    detail=f"cleanup raised {exception_detail(exc)}",
                 )
             )
         finally:

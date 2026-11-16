@@ -6990,6 +6990,30 @@ class TestDynamodbDataPlanePrincipalDeny:
         )
         assert list(self._failed_rows(infra)) == [f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
 
+    def test_a_missing_runtime_role_reds_the_local_row_only(self, infra: Path) -> None:
+        _mutate(infra / "main.tf", f"      {gate.RUNTIME_DATA_PLANE_ROLE},\n", "")
+        failed = self._failed_rows(infra)
+        assert list(failed) == [f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
+        assert "exactly once" in failed[f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
+
+    def test_a_duplicated_runtime_role_reds_the_local_row_only(self, infra: Path) -> None:
+        line = f"      {gate.RUNTIME_DATA_PLANE_ROLE},\n"
+        _mutate(infra / "main.tf", line, line + line)
+        assert list(self._failed_rows(infra)) == [f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
+
+    def test_the_runtime_role_is_the_only_accepted_non_module_entry(self, infra: Path) -> None:
+        _mutate(
+            infra / "main.tf",
+            f"      {gate.RUNTIME_DATA_PLANE_ROLE},\n",
+            "      aws_iam_role.agentcore_gateway.arn,\n",
+        )
+        failed = self._failed_rows(infra)
+        assert list(failed) == [f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
+        assert (
+            "aws_iam_role.agentcore_gateway.arn"
+            in failed[f"local.{gate.DYNAMODB_DATA_PLANE_LOCAL}"]
+        )
+
     @pytest.mark.parametrize(
         ("file", "policy"),
         [("modules/dynamodb/policy.tf", _TABLE_POLICY), ("modules/dynamodb/kms.tf", _KEY_POLICY)],
@@ -7822,3 +7846,116 @@ class TestMandatoryTagsIncludeAppName:
 
     def test_the_unmutated_copy_passes(self) -> None:
         assert self._first_finding(lambda _tags: None).status == "pass"
+
+
+class TestRuntimeHistoryGrant:
+    """`dynamodb_leading_keys_isolation` asserts the Runtime history document statement by statement."""
+
+    @staticmethod
+    def _findings(document: dict[str, Any]) -> list[gate.Finding]:
+        plan = gate.Plan(
+            resource_changes=document["resource_changes"],
+            configuration=document.get("configuration", {}),
+        )
+        return [
+            f
+            for f in gate.check_dynamodb_leading_keys_isolation(plan)
+            if f.resource.startswith(gate.RUNTIME_HISTORY_DOCUMENT)
+        ]
+
+    @staticmethod
+    def _statement(document: dict[str, Any], sid: str) -> dict[str, Any]:
+        change = next(
+            r for r in document["resource_changes"] if r["address"] == gate.RUNTIME_HISTORY_DOCUMENT
+        )
+        statement: dict[str, Any] = next(
+            s for s in change["change"]["after"]["statement"] if s["sid"] == sid
+        )
+        return statement
+
+    def _failed(self, document: dict[str, Any]) -> set[str]:
+        return {f.resource for f in self._findings(document) if f.status == "fail"}
+
+    def test_the_compliant_plan_passes_every_history_statement(self) -> None:
+        findings = self._findings(plan_fixtures.build("compliant"))
+        assert len(findings) == 7
+        assert all(f.status == "pass" for f in findings), findings
+
+    def test_the_gate_attributes_are_the_store_attributes(self) -> None:
+        from agents.conversation_history import HISTORY_ITEM_ATTRIBUTES
+
+        assert set(gate.RUNTIME_HISTORY_ATTRIBUTES) == set(HISTORY_ITEM_ATTRIBUTES)
+
+    @pytest.mark.parametrize(
+        ("sid", "edit"),
+        [
+            (
+                "ConversationHistoryRead",
+                lambda s: s.update(condition=[c for c in s["condition"] if c["test"] != "Null"]),
+            ),
+            ("ConversationHistoryRead", lambda s: s["actions"].append("dynamodb:Query")),
+            (
+                "ConversationHistoryWrite",
+                lambda s: s.update(
+                    condition=[c for c in s["condition"] if c["variable"] != "dynamodb:Attributes"]
+                ),
+            ),
+            (
+                "ConversationHistoryKms",
+                lambda s: next(
+                    c for c in s["condition"] if c["variable"] == "kms:ViaService"
+                ).update(values=["dynamodb.*.amazonaws.com"]),
+            ),
+            (
+                "ConversationHistoryKms",
+                lambda s: s.update(
+                    condition=[
+                        c
+                        for c in s["condition"]
+                        if c["variable"] != "kms:EncryptionContext:aws:dynamodb:tableName"
+                    ]
+                ),
+            ),
+            ("DenyRepsNonGrantedActions", lambda s: s["not_actions"].append("dynamodb:Query")),
+            ("DenyDynamoDbOtherTables", lambda s: s.update(effect="Allow")),
+            (
+                "DenyRepsOutsideHistoryPrefix",
+                lambda s: s["condition"][0].update(test="ForAllValues:StringNotLike"),
+            ),
+            ("DenyCanaryHistory", lambda s: s["condition"][0].update(values=["history#x#*"])),
+        ],
+    )
+    def test_each_weakening_reds_that_statement_only(self, sid: str, edit: Any) -> None:
+        document = plan_fixtures.build("compliant")
+        edit(self._statement(document, sid))
+        assert self._failed(document) == {f"{gate.RUNTIME_HISTORY_DOCUMENT}#{sid}"}
+
+    def test_a_dropped_statement_reds_the_statement_list(self) -> None:
+        document = plan_fixtures.build("compliant")
+        change = next(
+            r for r in document["resource_changes"] if r["address"] == gate.RUNTIME_HISTORY_DOCUMENT
+        )
+        change["change"]["after"]["statement"] = [
+            s for s in change["change"]["after"]["statement"] if s["sid"] != "DenyCanaryHistory"
+        ]
+        assert self._failed(document) == {f"{gate.RUNTIME_HISTORY_DOCUMENT} (statements)"}
+
+    def test_a_missing_history_policy_fails(self) -> None:
+        document = plan_fixtures.build("compliant")
+        document["resource_changes"] = [
+            r for r in document["resource_changes"] if r["address"] != gate.RUNTIME_HISTORY_POLICY
+        ]
+        assert self._failed(document) == {gate.RUNTIME_HISTORY_DOCUMENT}
+
+    def test_the_coverage_row_counts_the_history_policy(self) -> None:
+        document = plan_fixtures.build("compliant")
+        document["resource_changes"] = [
+            r for r in document["resource_changes"] if r["address"] != gate.RUNTIME_HISTORY_POLICY
+        ]
+        plan = gate.Plan(resource_changes=document["resource_changes"])
+        coverage = [
+            f
+            for f in gate.check_dynamodb_no_wildcard_action(plan)
+            if f.resource == "(coverage) one grant document per dynamodb role policy"
+        ]
+        assert [f.status for f in coverage] == ["fail"]

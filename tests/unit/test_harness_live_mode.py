@@ -20,7 +20,7 @@ import boto3
 import httpx2
 import openai
 import pytest
-from anthropic.lib.bedrock import _auth
+from anthropic.lib.aws import _auth
 from botocore.credentials import Credentials
 from moto import mock_aws
 

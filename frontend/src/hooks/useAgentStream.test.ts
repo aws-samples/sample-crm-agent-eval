@@ -131,6 +131,7 @@ describe("useAgentStream", () => {
   it("reconnects by session id with resume_from set to the events already applied, after a mid-stream drop", async () => {
     const sessionIds: string[] = [];
     const resumeFroms: number[] = [];
+    const resumeFlags: unknown[] = [];
 
     const fetchImpl = vi
       .fn()
@@ -138,6 +139,7 @@ describe("useAgentStream", () => {
         const body = JSON.parse(init.body as string);
         sessionIds.push(body.session_id);
         resumeFroms.push(body.resume_from);
+        resumeFlags.push(body.resume);
         // First call: emits one event then the stream drops (no terminal event, throws mid-read).
         const encoder = new TextEncoder();
         let delivered = false;
@@ -157,6 +159,7 @@ describe("useAgentStream", () => {
         const body = JSON.parse(init.body as string);
         sessionIds.push(body.session_id);
         resumeFroms.push(body.resume_from);
+        resumeFlags.push(body.resume);
         return Promise.resolve(sseResponse([frame({ kind: "completed", text: "Recovered." })]));
       });
 
@@ -173,6 +176,8 @@ describe("useAgentStream", () => {
     expect(sessionIds[0]).toBe(sessionIds[1]);
     expect(resumeFroms[0]).toBe(0);
     expect(resumeFroms[1]).toBe(1);
+    // Only the automatic reconnect asks the server to replay; the first send does not.
+    expect(resumeFlags).toEqual([undefined, true]);
     expect(result.current.transcript.map((e) => e.event.kind)).toEqual(["tool_call", "completed"]);
   });
 
@@ -1296,6 +1301,9 @@ describe("useAgentStream: a manual retry resumes the live turn, not the supersed
     expect(calls).toHaveLength(3);
     expect(calls[2].body.session_id).toBe(sessionB);
     expect(calls[2].body.prompt).toBe("turn-B");
+    // The retry resumes the current turn, so it asks for a replay; the two sends do not.
+    expect(calls[2].body.resume).toBe(true);
+    expect(calls.slice(0, 2).map((c) => "resume" in c.body)).toEqual([false, false]);
   });
 
   it("never issues a request carrying the superseded turn's session", async () => {
@@ -1652,7 +1660,7 @@ describe("useAgentStream: the supersede check's halves — one pinned, one a sta
 
 describe("useAgentStream: continuing a session across turns (caller opt-in)", () => {
   it("reuses the session id and resumes from the cumulative event count when the caller continues", async () => {
-    const bodies: { session_id: string; resume_from: number }[] = [];
+    const bodies: { session_id: string; resume_from: number; has_resume: boolean }[] = [];
     const responses = [
       sseResponse([
         frame({ kind: "tool_call", tool_name: "get_account", tool_input: {} }),
@@ -1663,7 +1671,11 @@ describe("useAgentStream: continuing a session across turns (caller opt-in)", ()
     let call = 0;
     const fetchImpl = vi.fn().mockImplementation((_url: string, init: RequestInit) => {
       const body = JSON.parse(init.body as string);
-      bodies.push({ session_id: body.session_id, resume_from: body.resume_from });
+      bodies.push({
+        session_id: body.session_id,
+        resume_from: body.resume_from,
+        has_resume: "resume" in body,
+      });
       return Promise.resolve(responses[call++]);
     });
 
@@ -1686,6 +1698,8 @@ describe("useAgentStream: continuing a session across turns (caller opt-in)", ()
     expect(bodies[0].resume_from).toBe(0);
     expect(bodies[1].session_id).toBe(firstSession);
     expect(bodies[1].resume_from).toBe(2);
+    // A follow-up is a new turn, never a replay request: neither send carries `resume`.
+    expect(bodies.map((b) => b.has_resume)).toEqual([false, false]);
     // The transcript holds the current turn only; the conversation across turns lives above the hook.
     expect(result.current.transcript.map((e) => e.event.kind)).toEqual(["completed"]);
   });

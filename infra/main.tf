@@ -474,7 +474,8 @@ module "dynamodb" {
   administrator_principal_arns = concat(var.crm_operator_principal_arns, ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"])
 }
 
-# The execution role of every `lambda_action` call with `dynamodb_kms_grant_enabled = true`.
+# The execution role of every `lambda_action` call with `dynamodb_kms_grant_enabled = true`, and the
+# AgentCore Runtime's role.
 locals {
   dynamodb_data_plane_role_arns = concat(
     [for tool in module.lambda_action : tool.role_arn],
@@ -487,6 +488,7 @@ locals {
       module.lambda_action_chat_interceptor.role_arn,
       module.lambda_action_chat_target.role_arn,
       module.lambda_action_user_settings.role_arn,
+      aws_iam_role.agentcore_runtime.arn,
     ],
   )
 }
@@ -643,7 +645,7 @@ module "lambda_action" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = each.value.handler
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = "${var.lambda_build_dir}/${each.key}.zip"
   source_code_hash       = filebase64sha256("${var.lambda_build_dir}/${each.key}.zip")
 
@@ -730,7 +732,7 @@ module "lambda_action_interceptor" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "gateway.identity_interceptor.lambda_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = "${var.lambda_build_dir}/identity_interceptor.zip"
   source_code_hash       = filebase64sha256("${var.lambda_build_dir}/identity_interceptor.zip")
 
@@ -868,7 +870,7 @@ module "lambda_action_eval_trigger" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "crm.handlers.eval_trigger.handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = local.eval_lambda_zip
   source_code_hash       = filebase64sha256(local.eval_lambda_zip)
 
@@ -931,7 +933,7 @@ module "lambda_action_capabilities" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "crm.handlers.capabilities.handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = local.eval_lambda_zip
   source_code_hash       = filebase64sha256(local.eval_lambda_zip)
 
@@ -1080,7 +1082,7 @@ module "lambda_action_pre_token_generation" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "crm.auth.pre_token_generation.lambda_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = "${var.lambda_build_dir}/pre_token_generation.zip"
   source_code_hash       = filebase64sha256("${var.lambda_build_dir}/pre_token_generation.zip")
 
@@ -2062,7 +2064,7 @@ module "agentcore" {
   # `aws_s3_object.agent_source` must exist before the image build reads it, and
   # `aws_iam_role_policy.agentcore_runtime` must be applied before the runtime, because
   # CreateAgentRuntime checks that the execution role can pull the ECR image.
-  depends_on = [aws_s3_object.agent_source, aws_iam_role_policy.agentcore_runtime]
+  depends_on = [aws_s3_object.agent_source, aws_iam_role_policy.agentcore_runtime, aws_iam_role_policy.agentcore_runtime_history]
 
   aws_profile = var.aws_profile
   aws_region  = var.aws_region
@@ -2103,6 +2105,8 @@ module "agentcore" {
 
     # Prefix of every `module.lambda_action` function name, used to resolve a tool to its Lambda.
     ACTION_LAMBDA_PREFIX = local.name_prefix
+
+    CONVERSATION_HISTORY_STORE = "dynamodb"
   }
 
   cognito_discovery_url      = "https://cognito-idp.${var.aws_region}.amazonaws.com/${module.cognito.user_pool_id}/.well-known/openid-configuration"
@@ -2271,6 +2275,121 @@ resource "aws_iam_role_policy" "agentcore_runtime" {
   name   = "crm-agent-eval-runtime-permissions"
   role   = aws_iam_role.agentcore_runtime.id
   policy = data.aws_iam_policy_document.agentcore_runtime_permissions.json
+}
+
+locals {
+  # Every table but `reps`, with its indexes; the Runtime role is denied all of them.
+  runtime_denied_table_arns = flatten([
+    for table_name, table_arn in module.dynamodb.table_arns : [table_arn, "${table_arn}/index/*"]
+    if table_name != "reps"
+  ])
+}
+
+# The Runtime's conversation history: `history#<tenant>#<session_id>` items in `reps`, read and
+# written once per turn, and nothing else in DynamoDB.
+data "aws_iam_policy_document" "agentcore_runtime_history" {
+  # The Null condition stops the ForAllValues test from matching a request that carries no key.
+  statement {
+    sid       = "ConversationHistoryRead"
+    effect    = "Allow"
+    actions   = ["dynamodb:GetItem"]
+    resources = [module.dynamodb.table_arns["reps"]]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["history#*"]
+    }
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+  }
+
+  # The attribute list is `agents.conversation_history.HISTORY_ITEM_ATTRIBUTES`; no `tenant`, so no
+  # history item reaches `gsi_tenant`.
+  statement {
+    sid       = "ConversationHistoryWrite"
+    effect    = "Allow"
+    actions   = ["dynamodb:PutItem"]
+    resources = [module.dynamodb.table_arns["reps"]]
+    condition {
+      test     = "ForAllValues:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["history#*"]
+    }
+    condition {
+      test     = "Null"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["false"]
+    }
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "dynamodb:Attributes"
+      values   = ["expires_at", "kind", "owner_rep_id", "owner_tenant", "rep_id", "turns", "updated_at", "version"]
+    }
+  }
+
+  statement {
+    sid       = "ConversationHistoryKms"
+    effect    = "Allow"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey"]
+    resources = [module.dynamodb.kms_key_arn]
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["dynamodb.${var.aws_region}.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:aws:dynamodb:tableName"
+      values   = [module.dynamodb.table_names["reps"]]
+    }
+  }
+
+  statement {
+    sid       = "DenyDynamoDbOtherTables"
+    effect    = "Deny"
+    actions   = ["dynamodb:*"]
+    resources = local.runtime_denied_table_arns
+  }
+
+  statement {
+    sid         = "DenyRepsNonGrantedActions"
+    effect      = "Deny"
+    not_actions = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    resources   = [module.dynamodb.table_arns["reps"], "${module.dynamodb.table_arns["reps"]}/index/*"]
+  }
+
+  statement {
+    sid       = "DenyRepsOutsideHistoryPrefix"
+    effect    = "Deny"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    resources = [module.dynamodb.table_arns["reps"]]
+    condition {
+      test     = "ForAnyValue:StringNotLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["history#*"]
+    }
+  }
+
+  statement {
+    sid       = "DenyCanaryHistory"
+    effect    = "Deny"
+    actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
+    resources = [module.dynamodb.table_arns["reps"]]
+    condition {
+      test     = "ForAnyValue:StringLike"
+      variable = "dynamodb:LeadingKeys"
+      values   = ["history#canary#*"]
+    }
+  }
+}
+
+resource "aws_iam_role_policy" "agentcore_runtime_history" {
+  name   = "crm-agent-eval-runtime-history"
+  role   = aws_iam_role.agentcore_runtime.id
+  policy = data.aws_iam_policy_document.agentcore_runtime_history.json
 }
 
 # Applied after the runtime, because the log group it scopes to is named from the runtime's id.

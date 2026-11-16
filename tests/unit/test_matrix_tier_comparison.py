@@ -22,6 +22,8 @@ import pytest
 
 from eval import harness, matrix
 from eval.matrix import (
+    RECORD_SHAPE_VERSION,
+    RECORD_SHAPE_VERSION_KEY,
     TIER_TASK_METRICS_KEY,
     ArmResult,
     MatrixResult,
@@ -41,10 +43,6 @@ HAIKU = "anthropic.claude-haiku-5-5"
 ASTRA = "openai.gpt-6-astra"
 SOL = "openai.gpt-6-1-sol"
 
-_LEGACY_ARTIFACT = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "eval" / "legacy_matrix_artifact.json"
-)
-
 _ENTRY_KEYS = [
     "model_ids",
     "efforts",
@@ -53,15 +51,22 @@ _ENTRY_KEYS = [
     "accuracy",
     "cost_withheld_provisional",
     "cost_per_completed_task",
-    "cost_per_task",
+    "cost_per_applicable_task",
     "completed_task_latency_ms_p50",
     "completed_task_latency_ms_p95",
     "latency_sample_count",
     "invocation_count",
     "long_context_invocation_count",
     "input_tokens",
+    "total_prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "uncached_input_tokens",
     "output_tokens",
     "retry_count",
+    "budget_exhausted_task_count",
+    "truncated_tool_call_count",
+    "truncated_task_count",
 ]
 
 _ROW_LABELS = [
@@ -71,14 +76,20 @@ _ROW_LABELS = [
     "Task completion over repeats",
     "Task accuracy",
     "Cost per completed task",
-    "P95 latency per completed task (ms)",
     "P50 latency per completed task (ms)",
+    "P95 latency per completed task (ms)",
     "Model invocations",
     "Long-context invocations",
-    "Input tokens",
-    "Output tokens",
-    "Cost per task, all tasks",
+    "Total input tokens",
+    "Cache read tokens",
+    "Cache write tokens",
+    "Uncached input tokens",
+    "Total output tokens",
+    "Cost per applicable task",
     "Self-corrected retries",
+    "Budget-exhausted tasks",
+    "Truncated tool calls",
+    "Truncated tasks",
 ]
 
 
@@ -95,6 +106,7 @@ def _provenance(
         runtime_identifier="local-stub-runtime",
         price_table_version="v1",
         answer_style_sha256="0" * 64,
+        prompt_caching="explicit cache points",
     )
 
 
@@ -134,8 +146,12 @@ def _metrics(*, withheld: bool) -> dict[str, object]:
 def _summary_entry(
     met: int, applicable: int, cost_total: float | None, tokens: tuple[int, int]
 ) -> dict[str, object]:
+    """A ``tier_summary`` entry; prompt and cache totals derive from ``tokens[0]``."""
     return {
         "input_tokens": tokens[0],
+        "total_prompt_tokens": tokens[0] + 3 * (tokens[0] // 10),
+        "cache_read_tokens": 2 * (tokens[0] // 10),
+        "cache_write_tokens": tokens[0] // 10,
         "output_tokens": tokens[1],
         "cost_total": cost_total,
         "latency_p50_ms": None,
@@ -167,8 +183,18 @@ def _block(
     efforts: dict[str, list[str | None]],
     outcomes: tuple[int, int, int, int, int],
     retries: tuple[int, int, int] | None = None,
+    counts: dict[str, tuple[int, int | None, int | None]] | None = None,
 ) -> dict[str, object]:
-    """An arm's ``tier_task_metrics`` block; ``retries=None`` omits ``retry_count``."""
+    """An arm's ``tier_task_metrics`` block; ``retries=None`` omits ``retry_count``.
+
+    ``counts`` maps each tier to its budget-exhausted, truncated-call and truncated-task counts;
+    absent, every count is zero (``None`` for the subagent truncation pair).
+    """
+    tier_counts = counts or {
+        "supervisor": (0, 0, 0),
+        "subagent": (0, None, None),
+        "tool": (0, 0, 0),
+    }
     tiers = ("supervisor", "subagent", "tool")
     by_tier: dict[str, dict[str, object]] = {
         tier: {
@@ -183,6 +209,18 @@ def _block(
     if retries is not None:
         for tier, count in zip(tiers, retries, strict=True):
             by_tier[tier]["retry_count"] = count
+    for tier in tiers:
+        by_tier[tier].update(
+            zip(
+                (
+                    "budget_exhausted_task_count",
+                    "truncated_tool_call_count",
+                    "truncated_task_count",
+                ),
+                tier_counts[tier],
+                strict=True,
+            )
+        )
     return {
         "family": family,
         "by_tier": by_tier,
@@ -227,6 +265,11 @@ def _anthropic_arm() -> ArmResult:
             efforts={"supervisor": ["medium"], "subagent": ["high"], "tool": [None]},
             outcomes=(2, 1, 1, 0, 1),
             retries=(2, 1, 0),
+            counts={
+                "supervisor": (2, 1, 1),
+                "subagent": (1, None, None),
+                "tool": (0, 4, 3),
+            },
         ),
     )
 
@@ -299,23 +342,32 @@ def _csv_rows(matrix_result: MatrixResult) -> list[dict[str, str]]:
 
 def test_matrix_json_leads_with_the_tier_comparison_block() -> None:
     payload = json.loads(render_json(_three_arm_matrix()))
-    assert list(payload) == ["tier_comparison", "arms", "figure_semantics"]
+    assert list(payload) == [
+        RECORD_SHAPE_VERSION_KEY,
+        "tier_comparison",
+        "arms",
+        "figure_semantics",
+    ]
+    assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION == 3
     summary = payload["tier_comparison"]
-    assert list(summary) == ["columns", "tiers", "notes"]
+    assert list(summary) == [RECORD_SHAPE_VERSION_KEY, "columns", "tiers", "notes"]
+    assert summary[RECORD_SHAPE_VERSION_KEY] == 3
+    assert all(list(arm)[0] == RECORD_SHAPE_VERSION_KEY for arm in payload["arms"])
+    assert all(arm[RECORD_SHAPE_VERSION_KEY] == 3 for arm in payload["arms"])
     assert list(summary["tiers"]) == ["supervisor", "subagent", "tool"]
     assert all(len(entries) == 3 for entries in summary["tiers"].values())
 
 
-def test_every_entry_carries_the_design_keys_in_order_with_one_tier_specific_key_last() -> None:
+def test_every_entry_carries_the_design_keys_in_order_and_subagent_adds_delegation() -> None:
     summary = tier_comparison(_three_arm_matrix())
-    specific = {
-        "supervisor": "budget_exhausted_task_count",
-        "subagent": "delegation_outcomes",
-        "tool": "truncated_task_count",
+    expected = {
+        "supervisor": _ENTRY_KEYS,
+        "subagent": [*_ENTRY_KEYS, "delegation_outcomes"],
+        "tool": _ENTRY_KEYS,
     }
-    for tier, last_key in specific.items():
+    for tier, keys in expected.items():
         for column in range(3):
-            assert list(_entry(summary, tier, column)) == [*_ENTRY_KEYS, last_key]
+            assert list(_entry(summary, tier, column)) == keys
 
 
 def test_columns_describe_each_arm_in_arm_order() -> None:
@@ -342,20 +394,27 @@ def test_every_figure_equals_its_definition_for_a_published_cost_arm() -> None:
     assert supervisor["accuracy"] == 0.7
     assert supervisor["cost_withheld_provisional"] is False
     assert supervisor["cost_per_completed_task"] == pytest.approx(0.6 / 3)
-    assert supervisor["cost_per_task"] == pytest.approx(0.6 / 5)
+    assert supervisor["cost_per_applicable_task"] == pytest.approx(0.6 / 5)
     assert supervisor["completed_task_latency_ms_p50"] == 1200.0
     assert supervisor["completed_task_latency_ms_p95"] == 2500.0
     assert supervisor["latency_sample_count"] == 3
     assert supervisor["invocation_count"] == 5
     assert (supervisor["input_tokens"], supervisor["output_tokens"]) == (1000, 200)
+    assert (
+        supervisor["total_prompt_tokens"],
+        supervisor["cache_read_tokens"],
+        supervisor["cache_write_tokens"],
+    ) == (1300, 200, 100)
     assert supervisor["budget_exhausted_task_count"] == 2
+    assert supervisor["truncated_tool_call_count"] == 1
+    assert supervisor["truncated_task_count"] == 1
 
     subagent = _entry(summary, "subagent", 0)
     assert subagent["model_ids"] == sorted([HAIKU, SONNET])
     assert subagent["completion"] == {"passed": 2, "applicable": 4, "rate": 0.5}
     assert subagent["accuracy"] == 0.5
     assert subagent["cost_per_completed_task"] == pytest.approx(0.2 / 2)
-    assert subagent["cost_per_task"] == pytest.approx(0.2 / 5)
+    assert subagent["cost_per_applicable_task"] == pytest.approx(0.2 / 4)
     assert subagent["invocation_count"] == 4
     assert subagent["delegation_outcomes"] == {
         "data": 2,
@@ -369,10 +428,21 @@ def test_every_figure_equals_its_definition_for_a_published_cost_arm() -> None:
     assert tool["efforts"] == [None]
     assert tool["completion"] == {"passed": 0, "applicable": 3, "rate": 0.0}
     assert tool["cost_per_completed_task"] is None
-    assert tool["cost_per_task"] == pytest.approx(0.09 / 5)
+    assert tool["cost_per_applicable_task"] == pytest.approx(0.09 / 3)
     assert tool["latency_sample_count"] == 0
     assert tool["completed_task_latency_ms_p95"] is None
     assert tool["truncated_task_count"] == 3
+    assert tool["truncated_tool_call_count"] == 4
+    assert tool["budget_exhausted_task_count"] == 0
+    subagent_counts = [
+        _entry(summary, "subagent", 0)[key]
+        for key in (
+            "budget_exhausted_task_count",
+            "truncated_tool_call_count",
+            "truncated_task_count",
+        )
+    ]
+    assert subagent_counts == [1, None, None]
 
 
 def test_a_withheld_arm_carries_no_cost_figure() -> None:
@@ -381,7 +451,7 @@ def test_a_withheld_arm_carries_no_cost_figure() -> None:
         entry = _entry(summary, tier, 1)
         assert entry["cost_withheld_provisional"] is True
         assert entry["cost_per_completed_task"] is None
-        assert entry["cost_per_task"] is None
+        assert entry["cost_per_applicable_task"] is None
 
 
 def test_the_model_row_is_the_configured_model_with_every_model_that_spent_tokens() -> None:
@@ -448,13 +518,12 @@ def test_matrix_md_orders_title_summary_intro_reading_then_arms() -> None:
     assert positions == sorted(positions)
 
 
-def test_every_section_carries_the_r1_rows_in_order() -> None:
+def test_every_section_carries_its_full_label_list_in_order() -> None:
     markdown = render_markdown(_three_arm_matrix())
-    delegation = [f"Delegation outcome: {kind}" for kind in matrix._DELEGATION_OUTCOME_KEYS]
     expected = {
-        "Supervisor": [*_ROW_LABELS, "Budget-exhausted tasks"],
-        "Subagent": [*_ROW_LABELS, *delegation],
-        "ToolCall": [*_ROW_LABELS, "Truncated tasks"],
+        "Supervisor": list(_ROW_LABELS),
+        "Subagent": list(_ROW_LABELS),
+        "ToolCall": list(_ROW_LABELS),
     }
     for heading, labels in expected.items():
         rows = _md_table_rows(markdown, heading)
@@ -479,7 +548,7 @@ def test_markdown_cells_render_each_definition() -> None:
     ]
     assert supervisor["Task accuracy"] == ["0.700000", "0.500000", "0.500000"]
     assert supervisor["Cost per completed task"] == ["0.200000", "withheld", "withheld"]
-    assert supervisor["Cost per task, all tasks"] == ["0.120000", "withheld", "withheld"]
+    assert supervisor["Cost per applicable task"] == ["0.120000", "withheld", "withheld"]
     assert supervisor["P95 latency per completed task (ms)"] == [
         "2500.000000 (n=3)",
         "900.000000 (n=1)",
@@ -487,8 +556,14 @@ def test_markdown_cells_render_each_definition() -> None:
     ]
     assert supervisor["P50 latency per completed task (ms)"][0] == "1200.000000 (n=3)"
     assert supervisor["Model invocations"] == ["5", "2", "2"]
-    assert supervisor["Input tokens"] == ["1000", "300", "300"]
+    assert supervisor["Total input tokens"] == ["1300", "390", "390"]
+    assert supervisor["Cache read tokens"] == ["200", "60", "60"]
+    assert supervisor["Cache write tokens"] == ["100", "30", "30"]
+    assert supervisor["Uncached input tokens"] == ["1000", "300", "300"]
+    assert supervisor["Total output tokens"] == ["200", "60", "60"]
     assert supervisor["Budget-exhausted tasks"] == ["2", "0", "0"]
+    assert supervisor["Truncated tool calls"] == ["1", "0", "0"]
+    assert supervisor["Truncated tasks"] == ["1", "0", "0"]
 
     subagent = _md_table_rows(markdown, "Subagent")
     assert subagent["Model"][0] == f"{HAIKU}, {SONNET}"
@@ -499,14 +574,20 @@ def test_markdown_cells_render_each_definition() -> None:
         "not applicable",
     ]
     assert subagent["Task accuracy"] == ["0.500000", "not applicable", "not applicable"]
-    assert subagent["Delegation outcome: none"] == ["1", "2", "2"]
+    assert subagent["Cost per applicable task"] == ["0.050000", "withheld", "withheld"]
 
     tool = _md_table_rows(markdown, "ToolCall")
     assert tool["Effort"][0] == "unsupported"
     assert tool["Task completion rate"][0] == "0.000000 (0/3)"
     assert tool["Cost per completed task"][0] == "—"
+    assert tool["Cost per applicable task"][0] == "0.030000"
     assert tool["P95 latency per completed task (ms)"][0] == "— (n=0)"
     assert tool["Truncated tasks"] == ["3", "0", "0"]
+    assert tool["Truncated tool calls"] == ["4", "0", "0"]
+    assert tool["Budget-exhausted tasks"] == ["0", "0", "0"]
+    assert subagent["Budget-exhausted tasks"] == ["1", "0", "0"]
+    assert subagent["Truncated tool calls"] == ["not applicable"] * 3
+    assert subagent["Truncated tasks"] == ["not applicable"] * 3
 
 
 def test_every_note_appears_verbatim_in_matrix_md() -> None:
@@ -580,24 +661,35 @@ def _expected_summary_columns() -> list[str]:
         "completion_over_repeats_rate",
         "accuracy",
         "cost_per_completed_task",
-        "cost_per_task",
+        "cost_per_applicable_task",
         "completed_task_latency_ms_p50",
         "completed_task_latency_ms_p95",
         "latency_sample_count",
         "invocation_count",
         "long_context_invocation_count",
         "input_tokens",
+        "total_prompt_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "uncached_input_tokens",
         "output_tokens",
     ]
     return [
         "summary_column",
         *(f"summary_{tier}_{s}" for tier in ("supervisor", "subagent", "tool") for s in suffixes),
-        "summary_supervisor_budget_exhausted_task_count",
+        *(
+            f"summary_{tier}_{key}"
+            for tier in ("supervisor", "subagent", "tool")
+            for key in (
+                "budget_exhausted_task_count",
+                "truncated_tool_call_count",
+                "truncated_task_count",
+            )
+        ),
         *(
             f"summary_subagent_delegation_{kind}"
             for kind in ("data", "no_match", "denied", "tool_failure", "none")
         ),
-        "summary_tool_truncated_task_count",
         *(f"summary_{tier}_retry_count" for tier in ("supervisor", "subagent", "tool")),
     ]
 
@@ -624,8 +716,16 @@ def test_csv_repeats_each_arms_summary_values_on_its_task_rows() -> None:
     assert first["summary_supervisor_latency_sample_count"] == "3"
     assert first["summary_subagent_delegation_data"] == "2"
     assert first["summary_tool_truncated_task_count"] == "3"
+    assert first["summary_supervisor_budget_exhausted_task_count"] == "2"
+    assert first["summary_subagent_budget_exhausted_task_count"] == "1"
+    assert first["summary_subagent_truncated_tool_call_count"] == ""
+    assert first["summary_subagent_truncated_task_count"] == ""
     withheld = rows[5]
-    assert withheld["summary_supervisor_cost_per_task"] == ""
+    assert first["summary_supervisor_cost_per_applicable_task"] == "0.120000"
+    assert first["summary_supervisor_total_prompt_tokens"] == "1300"
+    assert first["summary_subagent_cache_read_tokens"] == "80"
+    assert first["summary_tool_cache_write_tokens"] == "12"
+    assert withheld["summary_supervisor_cost_per_applicable_task"] == ""
     assert withheld["summary_subagent_efforts"] == ""
     assert withheld["summary_subagent_completion_rate"] == ""
 
@@ -665,6 +765,7 @@ def test_existing_sections_are_unchanged_once_the_summary_is_projected_out(
 
     payload = json.loads(render_json(matrix_result))
     payload.pop("tier_comparison")
+    assert payload.pop(RECORD_SHAPE_VERSION_KEY) == RECORD_SHAPE_VERSION
     assert payload == {
         "arms": [arm.to_report_fields() for arm in matrix_result.arms],
         "figure_semantics": matrix.render_figure_semantics(matrix_result),
@@ -681,9 +782,9 @@ def test_existing_sections_are_unchanged_once_the_summary_is_projected_out(
     assert [row[:-width] for row in rows] == [row[:-width] for row in bare_rows]
 
 
-def test_an_arm_without_the_block_emits_no_tier_task_metrics_key() -> None:
+def test_the_tier_task_metrics_key_is_written_even_when_the_block_is_empty() -> None:
     bare = dataclasses.replace(_anthropic_arm(), tier_task_metrics_fields={})
-    assert TIER_TASK_METRICS_KEY not in bare.to_report_fields()
+    assert bare.to_report_fields()[TIER_TASK_METRICS_KEY] == {}
     fields = list(_anthropic_arm().to_report_fields())
     assert fields.index(TIER_TASK_METRICS_KEY) == fields.index("tier_summary") + 1
 
@@ -691,21 +792,6 @@ def test_an_arm_without_the_block_emits_no_tier_task_metrics_key() -> None:
 # ---------------------------------------------------------------------------------------------
 # Archives and determinism
 # ---------------------------------------------------------------------------------------------
-
-
-def test_a_pre_spec_archive_re_renders_with_absent_rows_as_dashes() -> None:
-    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
-    arms = [arm_from_report_fields(fields) for fields in payload["arms"]]
-    assert all(arm.tier_task_metrics_fields == {} for arm in arms)
-    matrix_result = build_matrix_result(arms)
-    markdown = render_markdown(matrix_result)
-    supervisor = _md_table_rows(markdown, "Supervisor")
-    assert supervisor["Effort"] == ["—"] * len(arms)
-    assert supervisor["P95 latency per completed task (ms)"] == ["—"] * len(arms)
-    assert supervisor["Task completion rate"] == ["—"] * len(arms)
-    assert _md_table_rows(markdown, "Subagent")["Delegation outcome: data"] == ["—"] * len(arms)
-    render_csv(matrix_result)
-    render_json(matrix_result)
 
 
 def test_an_archived_arm_round_trips_its_block(tmp_path: Path) -> None:
@@ -761,30 +847,17 @@ def test_the_retry_count_is_in_the_json_entry_and_the_csv_columns() -> None:
     assert _csv_rows(_three_arm_matrix())[5]["summary_supervisor_retry_count"] == ""
 
 
-def test_a_pre_spec_archive_renders_the_retry_row_as_dashes() -> None:
-    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
-    arms = [arm_from_report_fields(fields) for fields in payload["arms"]]
-    markdown = render_markdown(build_matrix_result(arms))
-    assert _md_table_rows(markdown, "Supervisor")["Self-corrected retries"] == ["—"] * len(arms)
-
-
 # ---------------------------------------------------------------------------------------------
 # Display table (tier_comparison_table)
 # ---------------------------------------------------------------------------------------------
 
-#: sha256 of each fixture's ``## Tier comparison summary`` block as rendered before the display
-#: table was extracted; the Markdown must stay byte-identical.
+#: sha256 of each fixture's ``## Tier comparison summary`` block; the Markdown must stay
+#: byte-identical for identical input.
 _SUMMARY_BLOCK_SHA256 = {
-    "three_arm": "7b8e1b5660043e6a80f6a2872ab5515d0f97618d4ab48fa0ac04848ea021b243",
-    "single_anthropic": "e2e15c22b74b69b68645197b5b3df48f057f8173dea7b1334775b99d4399fb7c",
-    "single_openai_stub": "49e873b4c6f086c526a30e08cd97c5602deaaf2330d7c3fbde323cd14a726c96",
-    "legacy": "d3b5445014b8fabf050577255414115161ec7532d9d94b79d714a7dc52e23759",
+    "three_arm": "923317f03b8ea3de616207dd888e9f66df692d7356ce627fe4a208c37e4259b5",
+    "single_anthropic": "359173c77c3bae8ed3c172290269f0a0ac04f132fb49018762622dac6c761bae",
+    "single_openai_stub": "86c0d38dd5b1bb4feeb44560f9951d71a5620020a05cff922e35d0dddfd24026",
 }
-
-
-def _legacy_matrix() -> MatrixResult:
-    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
-    return build_matrix_result([arm_from_report_fields(fields) for fields in payload["arms"]])
 
 
 def _fixture_matrices() -> dict[str, MatrixResult]:
@@ -792,7 +865,6 @@ def _fixture_matrices() -> dict[str, MatrixResult]:
         "three_arm": _three_arm_matrix(),
         "single_anthropic": build_matrix_result([_anthropic_arm()]),
         "single_openai_stub": build_matrix_result([_openai_arm(SOL, mode="stub", effort="low")]),
-        "legacy": _legacy_matrix(),
     }
 
 
@@ -833,7 +905,7 @@ def _section_rows(table: dict[str, object], tier: str) -> dict[str, list[str]]:
 
 
 @pytest.mark.parametrize("name", sorted(_SUMMARY_BLOCK_SHA256))
-def test_the_summary_markdown_is_byte_identical_to_the_pre_extraction_render(name: str) -> None:
+def test_the_summary_markdown_is_byte_identical_to_its_pinned_render(name: str) -> None:
     block = _summary_block(render_markdown(_fixture_matrices()[name]))
     assert hashlib.sha256(block.encode("utf-8")).hexdigest() == _SUMMARY_BLOCK_SHA256[name]
 
@@ -884,14 +956,6 @@ def test_table_cells_render_null_withheld_and_not_applicable() -> None:
     assert tool["Self-corrected retries"] == ["not applicable"] * 3
 
 
-def test_a_pre_spec_archive_table_renders_absent_figures_as_dashes() -> None:
-    matrix_result = _legacy_matrix()
-    supervisor = _section_rows(_table(matrix_result), "supervisor")
-    columns = len(matrix_result.arms)
-    assert supervisor["Effort"] == ["—"] * columns
-    assert supervisor["Task completion rate"] == ["—"] * columns
-
-
 def test_a_single_arm_table_has_one_cell_per_row() -> None:
     table = _table(build_matrix_result([_anthropic_arm()]))
     assert table["headers"] == ["Metric", "anthropic"]
@@ -903,7 +967,7 @@ def test_an_unexercised_tier_still_renders_its_section() -> None:
     subagent = _section_rows(_table(build_matrix_result([_openai_arm()])), "subagent")
     assert subagent["Task completion rate"] == ["not applicable"]
     assert subagent["Model"] == [SOL]
-    assert subagent["Delegation outcome: none"] == ["2"]
+    assert subagent["Cost per applicable task"] == ["withheld"]
 
 
 @pytest.mark.parametrize(
@@ -1032,3 +1096,130 @@ def test_the_run_payload_tier_table_passes_the_count_through_and_dashes_an_older
         _section_rows(older, t)["Long-context invocations"]
         for t in ("supervisor", "subagent", "tool")
     ] == [["—"], ["—"], ["—"]]
+
+
+# ---------------------------------------------------------------------------------------------
+# Cost per applicable task, token rows and delegation counts
+# ---------------------------------------------------------------------------------------------
+
+
+def _all_completed_arm() -> ArmResult:
+    """The anthropic arm with every applicable task completed at every tier."""
+    arm = _anthropic_arm()
+    return dataclasses.replace(
+        arm,
+        tier_summary_fields={
+            "supervisor": _summary_entry(5, 5, 0.6, (1000, 200)),
+            "subagent": _summary_entry(4, 4, 0.2, (400, 80)),
+            "tool": _summary_entry(3, 3, 0.09, (120, 30)),
+        },
+    )
+
+
+def test_both_cost_rows_render_identical_cells_at_full_completion() -> None:
+    table = _table(build_matrix_result([_all_completed_arm(), _openai_arm()]))
+    for tier in ("supervisor", "subagent", "tool"):
+        rows = _section_rows(table, tier)
+        assert rows["Cost per completed task"] == rows["Cost per applicable task"]
+        assert rows["Cost per applicable task"][0] != "—"
+    entries = cast(
+        dict[str, list[dict[str, object]]],
+        tier_comparison(build_matrix_result([_all_completed_arm()]))["tiers"],
+    )
+    for tier, (total, applicable) in {
+        "supervisor": (0.6, 5),
+        "subagent": (0.2, 4),
+        "tool": (0.09, 3),
+    }.items():
+        assert entries[tier][0]["cost_per_applicable_task"] == pytest.approx(total / applicable)
+
+
+def test_the_cost_per_applicable_task_is_none_and_a_dash_when_nothing_was_applicable() -> None:
+    arm = dataclasses.replace(
+        _anthropic_arm(),
+        tier_summary_fields={
+            **_anthropic_arm().tier_summary_fields,
+            "subagent": _summary_entry(0, 0, 0.2, (400, 80)),
+        },
+    )
+    matrix_result = build_matrix_result([arm])
+    assert _entry(tier_comparison(matrix_result), "subagent", 0)["cost_per_applicable_task"] is None
+    assert _section_rows(_table(matrix_result), "subagent")["Cost per applicable task"] == ["—"]
+    assert _md_table_rows(render_markdown(matrix_result), "Subagent")[
+        "Cost per applicable task"
+    ] == ["—"]
+
+
+def test_no_delegation_outcome_row_is_rendered_but_json_and_csv_keep_the_counts() -> None:
+    matrix_result = _three_arm_matrix()
+    markdown = render_markdown(matrix_result)
+    assert "Delegation outcome" not in markdown
+    table = _table(matrix_result)
+    labels = [
+        row[0]
+        for section in cast(list[dict[str, object]], table["sections"])
+        for row in cast(list[list[str]], section["rows"])
+    ]
+    assert not any(label.startswith("Delegation outcome") for label in labels)
+    payload = json.loads(render_json(matrix_result))
+    assert payload["tier_comparison"]["tiers"]["subagent"][0]["delegation_outcomes"] == {
+        "data": 2,
+        "no_match": 1,
+        "denied": 1,
+        "tool_failure": 0,
+        "none": 1,
+    }
+    first = _csv_rows(matrix_result)[0]
+    assert [
+        first[f"summary_subagent_delegation_{kind}"]
+        for kind in ("data", "no_match", "denied", "tool_failure", "none")
+    ] == ["2", "1", "1", "0", "1"]
+
+
+def test_the_p50_row_precedes_the_p95_row_in_every_section() -> None:
+    for section in cast(list[dict[str, object]], _table(_three_arm_matrix())["sections"]):
+        labels = [row[0] for row in cast(list[list[str]], section["rows"])]
+        assert labels.index("P50 latency per completed task (ms)") + 1 == labels.index(
+            "P95 latency per completed task (ms)"
+        )
+
+
+def test_the_tokens_note_defines_each_token_row_and_compares_nothing() -> None:
+    note = matrix._TIER_COMPARISON_TOKENS_NOTE
+    for label in (
+        "Total input tokens",
+        "Cache read tokens",
+        "Cache write tokens",
+        "Uncached input tokens",
+        "Total output tokens",
+    ):
+        assert label in note
+    assert not re.search(r"\b(ratio|difference|winner|better|worse|cheaper)\b", note, re.I)
+
+
+def test_the_tokens_note_states_the_per_call_cache_clamp() -> None:
+    assert (
+        "reported input for OpenAI, whose reported input includes them, or that call's cache read "
+        "plus cache write tokens where they exceed it." in matrix._TIER_COMPARISON_TOKENS_NOTE
+    )
+
+
+def test_the_clamp_the_tokens_note_states_is_what_prompt_tokens_computes() -> None:
+    from crm.metering import TokenUsage, prompt_tokens
+
+    clamped = TokenUsage(
+        input_tokens=100, output_tokens=0, cache_read_tokens=90, cache_write_tokens=40
+    )
+    unclamped = TokenUsage(
+        input_tokens=200, output_tokens=0, cache_read_tokens=90, cache_write_tokens=40
+    )
+    assert prompt_tokens(clamped, "openai") == 130
+    assert prompt_tokens(unclamped, "openai") == 200
+
+
+def test_a_record_shape_3_summary_missing_a_token_or_cost_key_is_refused() -> None:
+    for key in ("cost_per_applicable_task", *matrix.TIER_SUMMARY_TOKEN_KEYS):
+        summary: dict[str, Any] = json.loads(json.dumps(tier_comparison(_three_arm_matrix())))
+        del summary["tiers"]["tool"][1][key]
+        with pytest.raises(matrix.RecordShapeRefused, match=rf"tiers\.tool\[1\]\.{key}"):
+            matrix.tier_comparison_table(summary)

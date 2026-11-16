@@ -581,7 +581,7 @@ def real_adapter_wires(monkeypatch: pytest.MonkeyPatch) -> dict[str, _ScriptedWi
     ``eval.live.build_live_provider`` and ``ThrottleRetryingProvider`` run unmodified.
     """
     from anthropic import AsyncAnthropicBedrock
-    from anthropic.lib.bedrock import _auth
+    from anthropic.lib.aws import _auth
     from openai import AsyncBedrockOpenAI
 
     from eval import live

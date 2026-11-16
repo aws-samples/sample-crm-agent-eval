@@ -7,7 +7,9 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from botocore.stub import ANY, Stubber
+from scripts.smoke import dynamodb_tables
 from scripts.smoke.dynamodb_tables import checks
 from scripts.smoke.harness import context_for_test
 
@@ -706,3 +708,37 @@ def test_main_missing_outputs_fails_cleanly(
     assert exit_code == 1
     assert '"layer": 4' in captured.out
     assert '"resource_class": "dynamodb_tables"' in captured.out
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+class _DeniedDynamoDb:
+    """Every call raises an `AccessDeniedException` whose message carries a planted ARN."""
+
+    def __getattr__(self, name: str) -> Any:
+        def _raise(**_: Any) -> Any:
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}},
+                name,
+            )
+
+        return _raise
+
+
+def test_a_failed_describe_names_the_code_never_the_message() -> None:
+    ctx = context_for_test(outputs=_outputs(), clients={"dynamodb": _DeniedDynamoDb()})
+    described = [r for r in checks(ctx) if r.check == "describe_table"]
+    assert len(described) == len(TABLE_NAMES)
+    for row in described:
+        assert row.detail == "dynamodb:DescribeTable failed (AccessDeniedException)"
+
+
+def test_a_failed_gsi_query_names_the_code_never_the_message() -> None:
+    ctx = context_for_test(outputs=_outputs(), clients={"dynamodb": _DeniedDynamoDb()})
+    gsi = next(iter(table_schema("accounts").gsis.values()))
+    row = dynamodb_tables._check_gsi_queryable(ctx, "accounts", gsi)
+    assert row.status == "fail"
+    assert "dynamodb:Query failed (AccessDeniedException)" in row.detail
+    assert gsi.name in row.detail
+    assert _PLANTED_ARN not in row.detail

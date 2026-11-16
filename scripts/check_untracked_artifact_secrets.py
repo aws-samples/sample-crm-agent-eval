@@ -195,7 +195,7 @@ def carries_real_material(path: Path, gate_path: Path = ACCOUNT_ID_GATE) -> bool
     """
     try:
         text = path.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
+    except UnicodeDecodeError, OSError:
         # An unreadable file is treated as sensitive.
         return True
     if _UNCONDITIONAL_MATERIAL.search(text) is not None:

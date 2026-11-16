@@ -20,9 +20,9 @@ from this module and nothing else:
 * :func:`require_credentials` resolves the credential chain once before the SDK call and raises
   :class:`CredentialPolicyError` when it is empty.
 * :func:`anthropic_client_kwargs` / :func:`openai_client_kwargs` are the only way to assemble the SDK
-  constructor arguments. They refuse the SDKs' bearer and base-URL environment fallbacks, pin an
-  explicit ``bedrock-runtime`` base URL, have no ``api_key`` field, and switch the Anthropic SDK's
-  OpenTelemetry tracing off. After constructing the client, pass it to :func:`assert_runtime_client`.
+  constructor arguments. They refuse the SDKs' bearer, base-URL and header environment variables,
+  pin an explicit ``bedrock-runtime`` base URL, have no ``api_key`` field, and switch the Anthropic
+  SDK's OpenTelemetry tracing off. After constructing the client, pass it to :func:`assert_runtime_client`.
 * :func:`session_credentials_provider` adapts a ``boto3`` session to the OpenAI SDK's
   ``aws_credentials_provider``, resolving credentials on every signed request.
 
@@ -58,7 +58,7 @@ import asyncio
 import os
 import re
 import time
-from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -84,18 +84,21 @@ MODEL_CALL_DEADLINE_SECONDS: Final[float] = PROVIDER_TIMEOUT_SECONDS
 #: The SDK retry count.
 MAX_RETRIES: Final[int] = 2
 
-#: Environment variables that would make an SDK authenticate with a bearer token or address a
-#: non-``bedrock-runtime`` endpoint. Their mere presence refuses client construction.
+#: Environment variables that would make an SDK authenticate with a bearer token, address a
+#: non-``bedrock-runtime`` endpoint, or add request headers (``ANTHROPIC_CUSTOM_HEADERS``, merged
+#: into the Anthropic Bedrock client's default headers). Their mere presence refuses client
+#: construction.
 FORBIDDEN_ENV_VARS: Final[tuple[str, ...]] = (
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_BEDROCK_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
 )
 
 RETRY_COUNT_HEADER: Final[str] = "x-stainless-retry-count"
 
-#: The Anthropic Bedrock signer deletes ``connection`` from its signing copy and raises
-#: ``KeyError`` when it is absent, so that client alone sends it, unsigned.
+#: The Anthropic Bedrock client's complete default headers. Its signer leaves ``connection`` out of
+#: the signature, so that client alone sends it, unsigned.
 ANTHROPIC_DEFAULT_HEADERS: Final[dict[str, str]] = {"Connection": "keep-alive"}
 OPENAI_PATH: Final[str] = "/openai/v1"
 
@@ -342,7 +345,7 @@ def runtime_base_url(region: str) -> str:
 
 
 def assert_no_bearer_or_mantle(base_url: str, *, region: str) -> None:
-    """Refuse the SDKs' bearer/base-URL environment fallbacks and any non-runtime endpoint.
+    """Refuse the SDKs' bearer/base-URL/header environment variables and any non-runtime endpoint.
 
     Args:
         base_url: The base URL about to be handed to (or already resolved by) an SDK client.
@@ -356,7 +359,8 @@ def assert_no_bearer_or_mantle(base_url: str, *, region: str) -> None:
     for name in FORBIDDEN_ENV_VARS:
         if name in os.environ:
             raise CredentialPolicyError(
-                f"{name} is set; Bedrock access is IAM/SigV4 on bedrock-runtime only.",
+                f"{name} is set; Bedrock access is IAM/SigV4 on bedrock-runtime only, and no "
+                "environment variable shapes a request.",
                 source=name,
             )
     url = httpx2.URL(base_url)
@@ -405,8 +409,8 @@ def anthropic_client_kwargs(
 
     Credentials come from the SDK's own ``boto3.Session(profile_name=profile, region_name=region)``,
     re-read on every signed request so refreshable (role) credentials stay current. Static keys are
-    never passed. :data:`ANTHROPIC_DEFAULT_HEADERS` restores the ``Connection`` header the SDK's
-    signer requires; it is excluded from the signature.
+    never passed. :data:`ANTHROPIC_DEFAULT_HEADERS` sets the ``Connection`` header, which the SDK's
+    signer excludes from the signature.
 
     Args:
         region: The region to sign for and address.
@@ -473,7 +477,9 @@ def assert_runtime_client(client: object, *, region: str) -> None:
     empty string included, so it must hold ``None``, and its OpenTelemetry traces must be disabled.
     The OpenAI client always holds ``""`` under SigV4, so it must hold a falsy key, and its own
     ``_uses_aws_auth()`` must report SigV4; that predicate is false for a ``bedrock_token_provider``
-    client, whose key is also ``""``. A client lacking the predicate is refused.
+    client, whose key is also ``""``. A client lacking the predicate is refused. An Anthropic
+    client's default headers must be exactly :data:`ANTHROPIC_DEFAULT_HEADERS`, so a header the
+    SDK merged in from the environment at construction is refused.
 
     Args:
         client: An ``AsyncAnthropicBedrock`` or ``AsyncBedrockOpenAI`` instance (or a sync twin).
@@ -483,7 +489,9 @@ def assert_runtime_client(client: object, *, region: str) -> None:
         CredentialPolicyError: When ``client`` is neither SDK's Bedrock client (``source="client"``),
             holds a bearer ``api_key`` (``source="api_key"``), is an OpenAI client not on SigV4
             (``source="auth_mode"``), is an Anthropic client with traces enabled
-            (``source="open_telemetry"``), or its resolved ``base_url`` fails
+            (``source="open_telemetry"``), is an Anthropic client carrying any default header
+            beyond :data:`ANTHROPIC_DEFAULT_HEADERS` (``source="default_headers"``), or its
+            resolved ``base_url`` fails
             :func:`assert_no_bearer_or_mantle`.
     """
     names = {cls.__name__ for cls in type(client).__mro__}
@@ -501,6 +509,14 @@ def assert_runtime_client(client: object, *, region: str) -> None:
         if traces.get("enabled") is not False:
             raise CredentialPolicyError(
                 "SDK client has OpenTelemetry traces enabled.", source="open_telemetry"
+            )
+        custom_headers = getattr(client, "_custom_headers", None)
+        if not isinstance(custom_headers, Mapping) or dict(custom_headers) != dict(
+            ANTHROPIC_DEFAULT_HEADERS
+        ):
+            raise CredentialPolicyError(
+                "SDK client carries default headers beyond the transport's own.",
+                source="default_headers",
             )
     else:
         uses_aws_auth = getattr(client, "_uses_aws_auth", None)
@@ -581,7 +597,7 @@ def session_credentials_provider(session: _CredentialSession) -> Callable[[], ob
     * OpenAI: ``openai.OpenAIError`` whose ``__cause__`` is the :class:`CredentialPolicyError`;
       :func:`credential_policy_cause` recovers it.
     * Anthropic (which resolves through its own ``boto3`` session, not this callable): a bare
-      ``RuntimeError("could not resolve credentials from session")`` from the request signer,
+      ``RuntimeError("Could not resolve AWS credentials from session")`` from the request signer,
       outside the SDK's error types.
 
     :func:`require_credentials` before the call makes both unreachable for an empty chain.

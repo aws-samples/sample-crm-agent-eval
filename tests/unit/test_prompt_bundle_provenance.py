@@ -86,6 +86,7 @@ def _unit(store: Store, turn: ObservedTurn) -> TaskUnitResult:
         tenant=TENANT,
         family="anthropic",
         turn_runner=lambda _t, _n: turn,
+        repeat_index=0,
     )
 
 
@@ -208,7 +209,11 @@ def _arm_fields(store: Store, digest: str | None) -> dict[str, object]:
 def test_the_digest_is_emitted_right_after_the_answer_style_digest(store: Store) -> None:
     provenance = list(cast(dict[str, object], _arm_fields(store, DIGEST_A)["provenance"]))
     assert provenance.index("prompt_bundle_sha256") == provenance.index("answer_style_sha256") + 1
-    assert list(matrix._PROVENANCE_FIELDS)[-2:] == ["answer_style_sha256", "prompt_bundle_sha256"]
+    assert list(matrix._PROVENANCE_FIELDS)[-3:] == [
+        "answer_style_sha256",
+        "prompt_bundle_sha256",
+        "prompt_caching",
+    ]
 
 
 def test_an_archive_with_the_digest_reloads_it(store: Store) -> None:
@@ -216,13 +221,13 @@ def test_an_archive_with_the_digest_reloads_it(store: Store) -> None:
     assert arm.provenance.prompt_bundle_sha256 == DIGEST_A
 
 
-def test_an_archive_without_the_field_loads_and_renders_a_dash(store: Store) -> None:
+def test_an_archive_without_the_field_is_refused(store: Store) -> None:
     fields = _arm_fields(store, DIGEST_A)
     del cast(dict[str, object], fields["provenance"])["prompt_bundle_sha256"]
-    arm = matrix.arm_from_report_fields(fields)
-    assert arm.provenance.prompt_bundle_sha256 is None
-    rendered = matrix.render_markdown(matrix.build_matrix_result([arm]))
-    assert "| prompt_bundle_sha256 | — |" in rendered
+    with pytest.raises(
+        matrix.RecordShapeRefused, match="missing required field provenance.prompt_bundle_sha256"
+    ):
+        matrix.arm_from_report_fields(fields)
 
 
 def test_an_archive_missing_a_required_field_is_still_refused(store: Store) -> None:
@@ -235,6 +240,13 @@ def test_an_archive_missing_a_required_field_is_still_refused(store: Store) -> N
 def test_the_provenance_dataclass_defaults_the_digest_to_none() -> None:
     field = {f.name: f for f in dataclasses.fields(matrix.RunProvenance)}["prompt_bundle_sha256"]
     assert field.default is None
+
+
+def test_the_prompt_caching_text_is_a_required_keyword_with_no_default() -> None:
+    field = {f.name: f for f in dataclasses.fields(matrix.RunProvenance)}["prompt_caching"]
+    assert field.kw_only is True
+    assert field.default is dataclasses.MISSING
+    assert field.default_factory is dataclasses.MISSING
 
 
 # --- one matrix, one instrument -------------------------------------------------------------------

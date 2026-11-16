@@ -435,6 +435,7 @@ def _run_tfvars_block(tmp_path: Path, tfvars_text: str) -> _PreflightRun:
     root = tmp_path / "repo"
     (root / "infra").mkdir(parents=True)
     (root / "scripts").mkdir()
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh")
     (root / "infra" / "terraform.tfvars").write_text(tfvars_text, encoding="utf-8")
     argv_file = tmp_path / "preflight.argv"
     (root / "scripts" / "preflight_adopted_vpc.sh").write_text(
@@ -449,9 +450,13 @@ def _run_tfvars_block(tmp_path: Path, tfvars_text: str) -> _PreflightRun:
         f'REPO_ROOT="{root}"\n'
         'INFRA_DIR="${REPO_ROOT}/infra"\n'
         "RESOLVED_REGION=us-east-1\n"
-        "RESOLVED_PROFILE=p2-test\n" + _tfvars_block() + "\n",
+        "RESOLVED_PROFILE=p2-test\n"
+        'REPO_PYTHON="$("${REPO_ROOT}/scripts/repo_python.sh" --print)"\n' + _tfvars_block() + "\n",
         encoding="utf-8",
     )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
     interpreter = shutil.which("bash")
     assert interpreter is not None, "bash is not on the host PATH"
     result = proc_run.run(
@@ -460,7 +465,7 @@ def _run_tfvars_block(tmp_path: Path, tfvars_text: str) -> _PreflightRun:
         capture_output=True,
         text=True,
         check=False,
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        env={"PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
     )
     argv = argv_file.read_text(encoding="utf-8").splitlines() if argv_file.exists() else None
     return _PreflightRun(result=result, argv=argv)
@@ -770,6 +775,7 @@ def _sandbox_bin(directory: Path, *, include_git: bool = True) -> Path:
 def _make_repo(root: Path, *, script_text: str | None = None) -> _Repo:
     """A throwaway git repo holding `scripts/deploy.sh`, so the script's own `REPO_ROOT` is this repo."""
     (root / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh")
     (root / "scripts" / "deploy.sh").write_text(
         _script() if script_text is None else script_text, encoding="utf-8"
     )
@@ -857,6 +863,7 @@ def _make_nested_repo(
         _leave_index_unmerged(repo, operation, scratch)
     inner = root / "vendored"
     (inner / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", (inner / "scripts") / "repo_python.sh")
     (inner / "scripts" / "deploy.sh").write_text(
         _script() if script_text is None else script_text, encoding="utf-8"
     )
@@ -1046,6 +1053,9 @@ class TestUnmergedIndexRefusal:
         """A present but unusable `.git` is refused."""
         root = tmp_path / "corrupt"
         (root / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh"
+        )
         (root / "scripts" / "deploy.sh").write_text(_script(), encoding="utf-8")
         (root / ".git").mkdir()
         bin_dir = _sandbox_bin(tmp_path / "sandbox-bin")
@@ -1063,6 +1073,9 @@ class TestUnmergedIndexRefusal:
         proceeds."""
         root = tmp_path / "no-checkout"
         (root / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh"
+        )
         (root / "scripts" / "deploy.sh").write_text(_script(), encoding="utf-8")
         bin_dir = _sandbox_bin(tmp_path / "sandbox-bin")
         # The fixture's control: git resolves no work tree from here.
@@ -1226,6 +1239,9 @@ class TestNestedCheckoutIsNotABypass:
         proceeds."""
         root = tmp_path / "no-checkout"
         (root / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh"
+        )
         (root / "scripts" / "deploy.sh").write_text(_script(), encoding="utf-8")
         bin_dir = _sandbox_bin(tmp_path / "sandbox-bin", include_git=False)
         assert shutil.which("git", path=str(bin_dir)) is None, "the sandbox PATH still reaches git"

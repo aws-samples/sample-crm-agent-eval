@@ -58,7 +58,9 @@ from scripts.smoke.gateway_tools import (
 from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
+    MissingTerraformOutputError,
     SmokeContext,
+    exception_detail,
     open_https,
     run_main,
 )
@@ -208,7 +210,7 @@ def _token_scopes(token: str, verifier: ClaimsVerifier) -> tuple[list[str], str]
     try:
         claims = verifier(token)
     except Exception as exc:  # noqa: BLE001 - the reason is reported by the caller's row
-        return [], f"the token failed claims verification ({type(exc).__name__}: {exc})"
+        return [], f"the token failed claims verification ({exception_detail(exc)})"
     return str(claims.get("scope") or "").split(), ""
 
 
@@ -393,7 +395,7 @@ def _forged_identity_row(
             resource=RESOURCE_CLASS,
             check=check,
             status="fail",
-            detail=f"user A's token failed claims verification ({type(exc).__name__}: {exc}), "
+            detail=f"user A's token failed claims verification ({exception_detail(exc)}), "
             "so there is no verified identity to forge",
         )
     forged = {
@@ -458,7 +460,7 @@ def _refused_row(check: str, call: McpCaller, token: str, what: str) -> CheckRes
             resource=RESOURCE_CLASS,
             check=check,
             status="fail",
-            detail=f"{what} tools/list could not be sent: {type(exc).__name__}: {exc}",
+            detail=f"{what} tools/list could not be sent: {exception_detail(exc)}",
         )
     leaked = isinstance(body, Mapping) and "result" in body
     refused = status in REFUSED_STATUSES and not leaked
@@ -488,7 +490,7 @@ def _invoke_only_token_row(
             resource=RESOURCE_CLASS,
             check=check,
             status="fail",
-            detail=f"could not mint a {scope}-only token: {type(exc).__name__}: {exc}",
+            detail=f"could not mint a {scope}-only token: {exception_detail(exc)}",
         )
     scopes, error = _token_scopes(token, verifier)
     if error:
@@ -570,8 +572,8 @@ def _remove_conversations(
             resource=RESOURCE_CLASS,
             check=check,
             status="fail",
-            detail=f"removing the smoke principals' conversation items: {type(exc).__name__}: "
-            f"{exc}; items may remain",
+            detail="removing the smoke principals' conversation items: "
+            f"{exception_detail(exc, 'dynamodb conversation cleanup')}; items may remain",
         )
     unidentified = sum(1 for c in issued if not CONVERSATION_ID_PATTERN.match(c))
     unknown_owners = sum(1 for o in owners if not o)
@@ -607,7 +609,7 @@ def checks(
     """
     try:
         url = _mcp_url(ctx)
-    except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
+    except MissingTerraformOutputError as exc:
         yield CheckResult(
             resource="mcp_chat_gateway_url",
             check="terraform_output_present",

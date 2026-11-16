@@ -38,6 +38,7 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    aws_error_detail,
     outputs_path,
     run_main,
 )
@@ -369,7 +370,7 @@ def rest_api_private_vpce_only(ctx: SmokeContext) -> Iterator[CheckResult]:
             check=REST_API_CHECK,
             status="fail",
             detail=(
-                f"apigateway.get_rest_api({api_id!r}) failed ({type(exc).__name__}: {exc}); the "
+                f"{aws_error_detail('apigateway:GetRestApi', exc)} for {api_id!r}; the "
                 "REST API's disposition could not be read. Reported as a fail so the TLS row below "
                 "is still emitted"
             ),
@@ -442,7 +443,7 @@ def _decode_rest_policy_document(policy_text: str) -> Any:
     except json.JSONDecodeError:
         try:
             decoded = json.loads(json.loads(f'"{policy_text}"'))
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return None
     if isinstance(decoded, str):
         try:
@@ -677,21 +678,21 @@ _CREDENTIAL_ERROR_CODES: Final[frozenset[str]] = frozenset(
 
 
 def credential_failure_reason(exc: BaseException) -> str | None:
-    """Return why `exc` means the account was never reached, or `None` if it is a real finding.
+    """Return the error name or code showing `exc` never reached the account, else `None`.
 
     Distinguishes "could not authenticate" (verified nothing) from "authenticated and was denied"
     (a finding).
     """
     name = type(exc).__name__
     if name in _CREDENTIAL_FAILURE_NAMES:
-        return f"{name}: {exc}"
+        return name
     code = (
         getattr(exc, "response", {}).get("Error", {}).get("Code")
         if hasattr(exc, "response")
         else None
     )
     if isinstance(code, str) and code in _CREDENTIAL_ERROR_CODES:
-        return f"{code}: {exc}"
+        return code
     return None
 
 

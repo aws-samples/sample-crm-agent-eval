@@ -12,7 +12,7 @@ SCRATCH_DIR="$(mktemp -d)"
 trap 'rm -rf "${SCRATCH_DIR}"' EXIT
 
 cd "${REPO_ROOT}"
-python3 -m fixtures.generate --tenant demo --out "${SCRATCH_DIR}"
+"${REPO_ROOT}/scripts/repo_python.sh" -m fixtures.generate --tenant demo --out "${SCRATCH_DIR}"
 
 STATUS=0
 for generated_file in "${SCRATCH_DIR}"/*.json; do

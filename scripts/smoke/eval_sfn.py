@@ -13,6 +13,11 @@ calls `POST /api/eval_trigger` with its ID token.
     holds rows;
   - the record reaches `completed` with `tasks_done == tasks_total` = arms x repeats x tasks,
     `repeats` recorded, both arms in the matrix and `tier_summary` for every tier;
+  - `matrix_is_record_shape_3`: the matrix and every arm carry `record_shape_version` 3, every arm a
+    non-empty `provenance.prompt_caching`, every tier's `tier_summary` integer
+    `total_prompt_tokens`/`cache_read_tokens`/`cache_write_tokens`, and every tier's
+    `tier_task_metrics.by_tier` entry `budget_exhausted_task_count`, `truncated_tool_call_count` and
+    `truncated_task_count` (integers; both truncation counts `null` at the subagent tier);
   - each arm's `provenance.effort` is `DEFAULT_ARM_EFFORT`, one `arm_effort_is_default:<family>`
     row per default-sweep family (arms in sweep order);
   - each arm's models are `config/models.yaml`'s, one `arm_models_are_configured:<family>` row per
@@ -30,6 +35,8 @@ calls `POST /api/eval_trigger` with its ID token.
   - `status_carries_tier_comparison_table`: the completed run's `status` payload carries
     `tier_comparison_table` with headers `Metric` plus one column per arm, the Supervisor,
     Subagent and ToolCall sections in that order, and every row as wide as the headers;
+  - `subagent_table_has_no_delegation_outcome_rows`: that table's Subagent section has rows and
+    none labelled `Delegation outcome…`;
   - `matrix_md_download_is_attachment` and `matrix_md_download_bytes_match_artefact`:
     `artefact_url` with `download: true` for the recorded `matrix_md` signs a URL whose https GET
     answers `Content-Disposition: attachment`, with bytes equal to those of the plain URL's GET;
@@ -58,9 +65,11 @@ calls `POST /api/eval_trigger` with its ID token.
   stops after the pre-checks, submits nothing and exits non-zero. Run once without it to read the
   mode, judge it, then re-run with it;
 - exactly one `submit {mode: live, confirmed: true}`, never retried;
-- poll to terminal, then assert `completed` 40/40, both arms, `tier_summary` per tier, cost spent,
-  tenant torn down, `canary` empty, and `assert_artifacts` on the downloaded S3 artifacts.
-A `failed` run is reported with its failure summary.
+- poll to terminal, then assert `completed` 40/40, both arms, `tier_summary` per tier, record
+  shape 3, cost spent, tenant torn down, `canary` empty, and `assert_artifacts` on the downloaded
+  S3 artifacts.
+A `failed` run is reported with its status and the classification of its `error` field
+(:func:`error_classification`), never the error text.
 
 Cleanup runs in a `finally`, each step's error reported as a failing row:
 - any run still non-terminal is cancelled cooperatively and reported as a failure;
@@ -100,7 +109,13 @@ from scripts.smoke.admin_authz import (
     simulation_result,
     summarise,
 )
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    exception_detail,
+    run_main,
+)
 from scripts.smoke.iam_roles import (
     INDEX_IN_SCOPE_LEADING_KEY,
     SWEEP_GRANT_LOCALS,
@@ -118,7 +133,7 @@ from crm.authz import ADMIN_GROUP, DEMO_TENANT
 from crm.store.keys import SWEEP_LOCK_ROW_ID
 from crm.store.schema import TABLES, TENANT_SCOPED_TABLES
 from eval.harness import ArtifactAssertionError, assert_artifacts
-from eval.matrix import TIER_TASK_METRICS_KEY
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY, TIER_TASK_METRICS_KEY
 from eval.runs import EVAL_RESULTS_TABLE, EVAL_RUNS_TABLE, MAX_SWEEP_REPEATS, execution_arn_for
 from eval.sweep_units import DEFAULT_ARM_EFFORT
 from eval.tenancy import (
@@ -206,6 +221,36 @@ def _row(check: str, ok: bool, detail: str, *, resource: str = RESOURCE_CLASS) -
     )
 
 
+_STEP_FAILED_PREFIX: Final[str] = "step failed: "
+_ERROR_CLASS_TOKEN: Final[re.Pattern[str]] = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_.]{0,127})(?=: |;|$)"
+)
+
+
+def error_classification(error: object) -> str | None:
+    """A message-free stand-in for a run record's `error` field.
+
+    Returns `None` when the field is absent or empty, `"present (<Class>)"` when the text (after an
+    optional `step failed: ` prefix) starts with an identifier-shaped token followed by `": "`,
+    `";"` or the end of the text, and `"present"` otherwise. No other part of the text is returned.
+    """
+    if error is None or error == "":
+        return None
+    if not isinstance(error, str):
+        return "present"
+    match = _ERROR_CLASS_TOKEN.match(error.removeprefix(_STEP_FAILED_PREFIX))
+    return f"present ({match.group(1)})" if match else "present"
+
+
+def _run_for_detail(run: Mapping[str, Any]) -> dict[str, Any]:
+    """A copy of a run record safe to render into a detail: `error` replaced by its
+    :func:`error_classification`."""
+    rendered = dict(run)
+    if "error" in rendered:
+        rendered["error"] = error_classification(rendered["error"])
+    return rendered
+
+
 class RunStatusError(RuntimeError):
     """`status` refused the admin (401/403) or kept answering non-200."""
 
@@ -231,7 +276,7 @@ def poll_run(
     while True:
         try:
             status, payload = api.status(run_id)
-        except (OSError, http.client.HTTPException):
+        except OSError, http.client.HTTPException:
             errors += 1
             if errors >= POLL_MAX_CONSECUTIVE_ERRORS:
                 raise
@@ -345,7 +390,98 @@ def check_completed_record(
         f"status={run.get('status')!r} done={run.get('tasks_done')}/{run.get('tasks_total')} "
         f"(expected {expected_total}) failed={run.get('tasks_failed')} "
         f"teardown={run.get('teardown_status')!r} arms={len(arms) if isinstance(arms, list) else None}"
-        f"/{arm_count} tier_summary_per_tier={tiers_ok} error={run.get('error')!r}",
+        f"/{arm_count} tier_summary_per_tier={tiers_ok} error={error_classification(run.get('error'))!r}",
+    )
+
+
+#: Integer token totals every arm's `tier_summary[<tier>]` carries in the current record shape.
+RECORD_SHAPE_TIER_SUMMARY_FIELDS: Final[tuple[str, ...]] = (
+    "total_prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
+
+#: Per-tier counts every arm's `tier_task_metrics.by_tier[<tier>]` carries, each mapped to the tiers
+#: where it is `null`; it is an integer at every other tier.
+RECORD_SHAPE_TIER_TASK_FIELDS: Final[Mapping[str, frozenset[str]]] = {
+    "budget_exhausted_task_count": frozenset(),
+    "truncated_tool_call_count": frozenset({"subagent"}),
+    "truncated_task_count": frozenset({"subagent"}),
+}
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def record_shape_problems(run: Mapping[str, Any]) -> list[str]:
+    """Every way the run's `matrix` falls short of the current record shape; empty when it holds.
+
+    Requires `record_shape_version` on the matrix and on each arm, a non-empty
+    `provenance.prompt_caching` string per arm, the integer token totals of
+    :data:`RECORD_SHAPE_TIER_SUMMARY_FIELDS` per tier, and the per-tier counts of
+    :data:`RECORD_SHAPE_TIER_TASK_FIELDS`, `null` exactly where that map says so.
+    """
+    matrix = run.get("matrix")
+    if not isinstance(matrix, Mapping):
+        return ["matrix absent"]
+    problems: list[str] = []
+    if matrix.get(RECORD_SHAPE_VERSION_KEY) != RECORD_SHAPE_VERSION:
+        problems.append(
+            f"matrix.{RECORD_SHAPE_VERSION_KEY}={matrix.get(RECORD_SHAPE_VERSION_KEY)!r}"
+        )
+    arms = matrix.get("arms")
+    if not isinstance(arms, list) or not arms:
+        return [*problems, "matrix.arms absent or empty"]
+    for index, arm in enumerate(arms):
+        where = f"arms[{index}]"
+        if not isinstance(arm, Mapping):
+            problems.append(f"{where} not an object")
+            continue
+        if arm.get(RECORD_SHAPE_VERSION_KEY) != RECORD_SHAPE_VERSION:
+            problems.append(
+                f"{where}.{RECORD_SHAPE_VERSION_KEY}={arm.get(RECORD_SHAPE_VERSION_KEY)!r}"
+            )
+        caching = (_mapping(arm, "provenance") or {}).get("prompt_caching")
+        if not (isinstance(caching, str) and caching):
+            problems.append(f"{where}.provenance.prompt_caching={caching!r}")
+        summary = _mapping(arm, "tier_summary")
+        by_tier = _mapping(_mapping(arm, TIER_TASK_METRICS_KEY), "by_tier")
+        for tier in TIERS:
+            entry = _mapping(summary, tier) or {}
+            problems.extend(
+                f"{where}.tier_summary.{tier}.{field}={entry.get(field)!r}"
+                for field in RECORD_SHAPE_TIER_SUMMARY_FIELDS
+                if not _is_count(entry.get(field))
+            )
+            metrics = _mapping(by_tier, tier)
+            for field, null_tiers in RECORD_SHAPE_TIER_TASK_FIELDS.items():
+                value = (metrics or {}).get(field, ...)
+                ok = (
+                    metrics is not None
+                    and field in metrics
+                    and (value is None if tier in null_tiers else _is_count(value))
+                )
+                if not ok:
+                    shown = "absent" if value is ... else repr(value)
+                    expected = "null" if tier in null_tiers else "an integer"
+                    problems.append(
+                        f"{where}.{TIER_TASK_METRICS_KEY}.by_tier.{tier}.{field}={shown} "
+                        f"(expected {expected})"
+                    )
+    return problems
+
+
+def check_record_shape(run: Mapping[str, Any]) -> CheckResult:
+    """The completed run's `matrix` is the current record shape (:func:`record_shape_problems`)."""
+    problems = record_shape_problems(run)
+    return _row(
+        f"matrix_is_record_shape_{RECORD_SHAPE_VERSION}",
+        not problems,
+        "; ".join(problems)
+        if problems
+        else f"matrix and every arm carry {RECORD_SHAPE_VERSION_KEY}={RECORD_SHAPE_VERSION} "
+        "and every required field",
     )
 
 
@@ -564,7 +700,11 @@ def check_tenant_emptied_by_the_workers_own_role(
     try:
         catalog = store.get_item(EVAL_RUNS_TABLE, {"run_id": run_id})
     except Exception as exc:  # noqa: BLE001 - an unreadable discriminator is a failing row
-        return _row(check, False, f"eval_runs catalog row unreadable: {type(exc).__name__}: {exc}")
+        return _row(
+            check,
+            False,
+            f"eval_runs catalog row unreadable: {exception_detail(exc)}",
+        )
     lifecycle = str(catalog.get("status") or "absent") if isinstance(catalog, Mapping) else "absent"
     by_tenant = {
         name: {table: n for table, n in tenant_row_counts(store, name).items() if n}
@@ -609,7 +749,9 @@ def check_unit_tenants_recorded(
         catalog = store.get_item(EVAL_RUNS_TABLE, {"run_id": run_id})
     except Exception as exc:  # noqa: BLE001 - an unreadable catalog row is a failing row
         return _row(
-            check, False, f"eval_runs catalog row unreadable: {type(exc).__name__}: {exc}"
+            check,
+            False,
+            f"eval_runs catalog row unreadable: {exception_detail(exc)}",
         ), ()
     raw = catalog.get("unit_tenants") if isinstance(catalog, Mapping) else None
     recorded = tuple(str(t) for t in raw) if isinstance(raw, list | tuple) else ()
@@ -767,7 +909,9 @@ def check_artefact_url(
     key = raw[0] if isinstance(raw, list) and raw and isinstance(raw[0], str) else None
     if not run_id or key is None:
         yield _row(
-            "artefact_url_issued", False, f"no recorded artefact to sign ({summarise(run, 160)})"
+            "artefact_url_issued",
+            False,
+            f"no recorded artefact to sign ({summarise(_run_for_detail(run), 160)})",
         )
         return
     status, payload = api.artefact_url(run_id, key)
@@ -812,6 +956,34 @@ def check_artefact_url(
 
 #: The `tier_comparison_table` sections a completed run carries, in order.
 TIER_TABLE_SECTIONS: Final[tuple[str, ...]] = ("supervisor", "subagent", "tool")
+
+#: Label prefix of a row the Subagent section must not carry.
+DELEGATION_OUTCOME_ROW_PREFIX: Final[str] = "Delegation outcome"
+
+
+def check_subagent_table_has_no_delegation_rows(run: Mapping[str, Any]) -> CheckResult:
+    """The `tier_comparison_table` Subagent section exists and has no "Delegation outcome" row."""
+    check = "subagent_table_has_no_delegation_outcome_rows"
+    table = run.get("tier_comparison_table")
+    sections = table.get("sections") if isinstance(table, Mapping) else None
+    subagent = [
+        section
+        for section in (sections if isinstance(sections, list) else [])
+        if isinstance(section, Mapping) and section.get("tier") == "subagent"
+    ]
+    if len(subagent) != 1 or not isinstance(subagent[0].get("rows"), list):
+        return _row(check, False, f"expected one subagent section with rows, found {len(subagent)}")
+    labels = [row[0] for row in subagent[0]["rows"] if isinstance(row, list) and row]
+    delegation = [
+        label
+        for label in labels
+        if isinstance(label, str) and label.startswith(DELEGATION_OUTCOME_ROW_PREFIX)
+    ]
+    return _row(
+        check,
+        bool(labels) and not delegation,
+        f"subagent rows {labels!r}; delegation-outcome rows {delegation!r}",
+    )
 
 
 def check_tier_comparison_table(run: Mapping[str, Any], *, arm_count: int) -> CheckResult:
@@ -888,7 +1060,7 @@ def check_matrix_md_download(
     artifacts = run.get("artifacts")
     key = artifacts.get("matrix_md") if isinstance(artifacts, Mapping) else None
     if not run_id or not isinstance(key, str) or not key:
-        detail = f"the run recorded no matrix_md artefact ({summarise(run, 160)})"
+        detail = f"the run recorded no matrix_md artefact ({summarise(_run_for_detail(run), 160)})"
         yield _row(attachment, False, detail)
         yield _row(matches, False, detail)
         return
@@ -1362,7 +1534,7 @@ def explicit_deny_result(iam: Any, row: SimulationRow, *, resource: str) -> Chec
             resource=resource,
             check=row.check,
             status="fail",
-            detail=f"simulate_principal_policy raised {type(exc).__name__}: {exc} ({subject})",
+            detail=f"{exception_detail(exc, 'iam:SimulatePrincipalPolicy')} ({subject})",
         )
     decisive = decisive_missing_keys(row.action, missing)
     unset = f"; MissingContextValues={list(decisive)}" if decisive else ""
@@ -1551,14 +1723,22 @@ def _reap_tenant(store: Any, tenant: str) -> Iterator[CheckResult]:
     try:
         residual = sum(tenant_row_counts(store, tenant).values())
     except Exception as exc:  # noqa: BLE001 - surfaced as a failing check
-        yield _row("leftover_tenant_counted", False, f"{tenant}: {type(exc).__name__}: {exc}")
+        yield _row(
+            "leftover_tenant_counted",
+            False,
+            f"{tenant}: {exception_detail(exc)}",
+        )
         return
     if not residual:
         return
     try:
         teardown_tenant(store, tenant=tenant)
     except Exception as exc:  # noqa: BLE001 - surfaced as a failing check
-        yield _row("leftover_tenant_reaped", False, f"{tenant}: {type(exc).__name__}: {exc}")
+        yield _row(
+            "leftover_tenant_reaped",
+            False,
+            f"{tenant}: {exception_detail(exc)}",
+        )
         return
     yield _row(
         "leftover_tenant_reaped",
@@ -1597,7 +1777,7 @@ def _settle_runs(
                 else:
                     cancel_status = 0
             except Exception as exc:  # noqa: BLE001 - surfaced as a failing check
-                yield _row("run_settled", False, f"{run_id}: {type(exc).__name__}: {exc}")
+                yield _row("run_settled", False, f"{run_id}: {exception_detail(exc)}")
                 continue
             if cancel_status:
                 yield _row(
@@ -1671,10 +1851,11 @@ def _rehearsal(
         yield _row(
             "rehearsal_reached_terminal",
             False,
-            f"not terminal after {poll_seconds:.0f}s: {summarise(run, 200)}",
+            f"not terminal after {poll_seconds:.0f}s: {summarise(_run_for_detail(run), 200)}",
         )
         return
     yield check_completed_record(run, expected_total=expected_total, arm_count=len(families))
+    yield check_record_shape(run)
     yield check_run_repeats(run, expected=repeats)
     yield from check_arm_efforts(run, families)
     yield from check_arm_models(run, families)
@@ -1702,6 +1883,7 @@ def _rehearsal(
     )
     yield from check_artefact_url(api, run, fetch=fetch)
     yield check_tier_comparison_table(run, arm_count=len(families))
+    yield check_subagent_table_has_no_delegation_rows(run)
     yield from check_matrix_md_download(api, run, get=artefact_get)
     yield check_tenant_empty(store, tenant, check="rehearsal_tenant_empty")
     yield check_tenant_emptied_by_the_workers_own_role(store, run_id, tenant, expected_units)
@@ -1743,7 +1925,7 @@ def _cancel_proof(
             "cancel_proof_reached_progress",
             False,
             f"run did not reach tasks_done>={CANCEL_AFTER_TASKS} while running: "
-            f"{summarise(progressed, 200)}",
+            f"{summarise(_run_for_detail(progressed), 200)}",
         )
         return
     cancel_status, cancel_payload = api.cancel(run_id)
@@ -1760,7 +1942,7 @@ def _cancel_proof(
         yield _row(
             "cancel_proof_reached_terminal",
             False,
-            f"not terminal after {STUB_POLL_SECONDS:.0f}s: {summarise(run, 200)}",
+            f"not terminal after {STUB_POLL_SECONDS:.0f}s: {summarise(_run_for_detail(run), 200)}",
         )
         return
     yield check_cancelled_record(run, expected_total=expected_total)
@@ -1819,7 +2001,7 @@ def checks(
     try:
         yield from simulate(ctx)
     except Exception as exc:  # noqa: BLE001 - the sweep checks still run
-        yield _row("role_simulations", False, f"{type(exc).__name__}: {exc}")
+        yield _row("role_simulations", False, exception_detail(exc))
     started: dict[str, str] = {}
     units: dict[str, tuple[str, ...]] = {}
     api: RunApi | None = None
@@ -1827,7 +2009,7 @@ def checks(
         try:
             user = admin.provision()
         except Exception as exc:  # noqa: BLE001 - one actionable failing check
-            yield _row("provision_admin_user", False, f"{type(exc).__name__}: {exc}")
+            yield _row("provision_admin_user", False, exception_detail(exc))
             return
         yield _row("provision_admin_user", True, user.detail)
         api = RunApi(api_post, user.id_token)
@@ -1986,7 +2168,7 @@ def live_once_checks(
         try:
             user = admin.provision()
         except Exception as exc:  # noqa: BLE001 - one actionable failing check
-            yield _row("provision_admin_user", False, f"{type(exc).__name__}: {exc}")
+            yield _row("provision_admin_user", False, exception_detail(exc))
             return
         yield _row("provision_admin_user", True, user.detail)
         api = RunApi(api_post, user.id_token)
@@ -2010,10 +2192,11 @@ def live_once_checks(
             yield _row(
                 "live_sweep_reached_terminal",
                 False,
-                f"not terminal after {LIVE_POLL_SECONDS:.0f}s: {summarise(run, 200)}",
+                f"not terminal after {LIVE_POLL_SECONDS:.0f}s: {summarise(_run_for_detail(run), 200)}",
             )
             return
         yield check_completed_record(run, expected_total=expected_total, arm_count=len(families))
+        yield check_record_shape(run)
         cost = run.get("cost_spent_usd")
         yield _row(
             "live_cost_recorded",

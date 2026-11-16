@@ -1983,3 +1983,67 @@ def test_the_array_body_premise_says_the_gateway_refuses_it_itself() -> None:
     assert "the Gateway refuses it itself" in (
         _gateway_tools._check_array_body_answers_no_tool_call.__doc__ or ""
     )
+
+
+# ---------------------------------------------------------------------------
+# AWS failures are reported by operation and code, never by message.
+# ---------------------------------------------------------------------------
+
+_PLANTED_ARN = "arn:aws:sts::" + "1234" + "5678" + "9012" + ":assumed-role/x/y"
+
+
+def _planted_client_error(operation: str) -> Exception:
+    """An AccessDenied `ClientError` whose message names a caller ARN."""
+    from botocore.exceptions import ClientError
+
+    exc: Exception = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} is not authorized"}},
+        operation,
+    )
+    assert _PLANTED_ARN in str(exc)
+    return exc
+
+
+def _assert_code_not_message(detail: str) -> None:
+    assert "(AccessDenied)" in detail, detail
+    assert _PLANTED_ARN not in detail and "assumed-role" not in detail, detail
+
+
+def test_a_denied_prior_row_read_refuses_without_the_aws_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dynamo = _RawDynamo(existing=_OPERATOR_ROW)
+
+    def denied_get(**_kw: Any) -> dict[str, Any]:
+        raise _planted_client_error("GetItem")
+
+    monkeypatch.setattr(dynamo, "get_item", denied_get)
+    provisioner, _ = _live_provisioner(monkeypatch, dynamo)
+    with pytest.raises(RuntimeError, match="refusing to overwrite") as raised:
+        provisioner.provision()
+    _assert_code_not_message(str(raised.value))
+
+
+def test_a_denied_restore_fails_without_the_aws_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dynamo = _RawDynamo(existing=_OPERATOR_ROW)
+    provisioner, _ = _live_provisioner(monkeypatch, dynamo)
+    provisioner.provision()
+
+    def denied_put(**_kw: Any) -> dict[str, Any]:
+        raise _planted_client_error("PutItem")
+
+    monkeypatch.setattr(dynamo, "put_item", denied_put)
+    restored = next(r for r in provisioner.cleanup() if r.resource == "service_principal")
+    assert (restored.check, restored.status) == ("reps_row_restored", "fail")
+    _assert_code_not_message(restored.detail)
+
+
+def test_a_denied_interceptor_log_read_fails_without_the_aws_error_message() -> None:
+    def denied_reader(_start_ms: int) -> list[str]:
+        raise _planted_client_error("FilterLogEvents")
+
+    row = _denial_row(denied_reader)
+    assert row.status == "fail"
+    _assert_code_not_message(row.detail)

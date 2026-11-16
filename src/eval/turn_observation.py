@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Final, Protocol, cast, get_args, runtime_checkable
 
 from agents.budget import EVAL_BUDGET
+from agents.events import TOOL_OUTPUT_TRUNCATED_KEY, bound_tool_output
 from agents.registry import RegisteredTool
 from agents.supervisor import classify_tool_result, describe_truncation
 from agents.tier_attribution import (
@@ -40,11 +41,7 @@ from providers.capabilities import CapabilityMatrix, Family, Tier
 from providers.tier_tuning import TurnTuning
 
 #: Version of the :func:`serialise_turn` wire shape.
-SERIALISED_TURN_SCHEMA: Final[int] = 2
-
-#: The tool-result payload key a bounded read sets to report truncation; the same value as
-#: :data:`agents.supervisor._SEARCH_TRUNCATED_KEY`.
-TOOL_OUTPUT_TRUNCATED_KEY: Final[str] = "truncated"
+SERIALISED_TURN_SCHEMA: Final[int] = 3
 
 
 def tool_output_reports_truncation(tool_output: Mapping[str, object]) -> bool:
@@ -86,16 +83,21 @@ class ObservingDispatch:
         self._truncation_disclosed = False
 
     def __call__(self, tool: RegisteredTool, tool_input: dict[str, object]) -> dict[str, Any]:
-        """Dispatch one tool call and record its effects; returns the output unchanged."""
+        """Dispatch one tool call and record its effects; returns the output unchanged.
+
+        Truncation is observed on the copy :func:`agents.events.bound_tool_output` makes, the
+        bound every dispatch path applies before the model sees a result.
+        """
         self._tool_arguments.append(
             ObservedToolArguments(tool_name=tool.name, arguments=dict(tool_input))
         )
         tool_output = self._base(tool, tool_input)
         tool_name = tool.name
 
-        if tool_output_reports_truncation(tool_output):
+        bounded_output, bound_truncated = bound_tool_output(tool_output)
+        if tool_output_reports_truncation(bounded_output):
             self._truncated = True
-            if describe_truncation(tool_output, event_truncated=False) is not None:
+            if describe_truncation(bounded_output, event_truncated=bound_truncated) is not None:
                 self._truncation_disclosed = True
 
         self._tool_calls.append(
@@ -157,6 +159,7 @@ class ObservingDispatch:
         *,
         tenant: str,
         budget_exhausted: bool,
+        budget_exhausted_tier: Tier | None = None,
         tool_calls: Sequence[ToolCallAttribution] = (),
     ) -> TurnOutcome:
         """Build the turn's :class:`eval.scoring.TurnOutcome` from everything observed so far.
@@ -195,6 +198,7 @@ class ObservingDispatch:
             denial_outcome=denial_outcome,
             denial_missing_scope=self._denial_missing_scope,
             budget_exhausted=budget_exhausted,
+            budget_exhausted_tier=budget_exhausted_tier,
             truncated=self._truncated,
             truncation_disclosed=self._truncation_disclosed,
             observed_outcomes=frozenset(self._observed_outcomes),
@@ -359,7 +363,10 @@ async def observe_turn(
     ]
     return ObservedTurn(
         outcome=observing.outcome(
-            tenant=tenant, budget_exhausted=budget_exhausted, tool_calls=records.tool_calls
+            tenant=tenant,
+            budget_exhausted=budget_exhausted,
+            budget_exhausted_tier=records.budget_exhausted_tier,
+            tool_calls=records.tool_calls,
         ),
         tool_arguments=observing.tool_arguments,
         invocations=tuple(records.invocations),
@@ -408,6 +415,7 @@ def serialise_turn(turn: ObservedTurn) -> dict[str, Any]:
             "denial_outcome": outcome.denial_outcome,
             "denial_missing_scope": outcome.denial_missing_scope,
             "budget_exhausted": outcome.budget_exhausted,
+            "budget_exhausted_tier": outcome.budget_exhausted_tier,
             "truncated": outcome.truncated,
             "truncation_disclosed": outcome.truncation_disclosed,
             "observed_outcomes": sorted(outcome.observed_outcomes),
@@ -554,6 +562,7 @@ def _outcome(raw: object) -> TurnOutcome:
             "denial_outcome",
             "denial_missing_scope",
             "budget_exhausted",
+            "budget_exhausted_tier",
             "truncated",
             "truncation_disclosed",
             "observed_outcomes",
@@ -582,6 +591,9 @@ def _outcome(raw: object) -> TurnOutcome:
     labels = reader.array("observed_outcomes")
     if not all(isinstance(label, str) for label in labels):
         raise ValueError("outcome.observed_outcomes must be an array of strings")
+    exhausted_tier = reader.optional_string("budget_exhausted_tier")
+    if exhausted_tier is not None and exhausted_tier not in _TIERS:
+        raise ValueError(f"outcome.budget_exhausted_tier names an unknown tier {exhausted_tier!r}")
     return TurnOutcome(
         tenant=reader.string("tenant"),
         tool_calls=tuple(tool_calls),
@@ -589,6 +601,7 @@ def _outcome(raw: object) -> TurnOutcome:
         denial_outcome=reader.optional_string("denial_outcome"),
         denial_missing_scope=reader.optional_string("denial_missing_scope"),
         budget_exhausted=reader.boolean("budget_exhausted"),
+        budget_exhausted_tier=cast(Tier | None, exhausted_tier),
         truncated=reader.boolean("truncated"),
         truncation_disclosed=reader.boolean("truncation_disclosed"),
         observed_outcomes=frozenset(cast("list[str]", labels)),
@@ -618,8 +631,9 @@ def deserialise_turn(payload: Mapping[str, Any]) -> ObservedTurn:
 
     Raises:
         ValueError: ``payload`` is not exactly the :data:`SERIALISED_TURN_SCHEMA` shape: a key is
-            missing or extra, a value has the wrong type, or an attribution fails its own
-            validation.
+            missing or extra, a value has the wrong type, ``outcome.budget_exhausted_tier`` names
+            no tier or is not set exactly when ``outcome.budget_exhausted`` is true, or an
+            attribution fails its own validation.
     """
     body = dict(payload) if isinstance(payload, Mapping) else payload
     usage_lower_bound = False

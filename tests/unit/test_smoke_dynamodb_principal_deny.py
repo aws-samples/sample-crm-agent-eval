@@ -6,7 +6,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,11 +31,17 @@ _ROOT_ARN = f"arn:aws:iam::{_ACCOUNT}:root"
 _CMK_ARN = f"arn:aws:kms:{_REGION}:{_ACCOUNT}:key/11111111-1111-1111-1111-111111111111"
 _DATA_ROLE_ARN = f"arn:aws:iam::{_ACCOUNT}:role/crm-agent-eval-accounts-get-role"
 _RELAY_ROLE_ARN = f"arn:aws:iam::{_ACCOUNT}:role/crm-agent-eval-agent-relay-role"
+_RUNTIME_ROLE_ARN = f"arn:aws:iam::{_ACCOUNT}:role/crm-agent-eval-runtime-role"
+_RUNTIME_ID = "crm_agent_eval_runtime-abc123"
+_RUNTIME_ARN = f"arn:aws:bedrock-agentcore:{_REGION}:{_ACCOUNT}:runtime/{_RUNTIME_ID}"
 _TABLES = {name: f"crm-agent-eval-{name}" for name in sorted(TABLE_NAMES)}
 _OUTPUTS: dict[str, Any] = {
     "dynamodb_table_names": _TABLES,
     "crm_operator_principal_arns": [_OPERATOR_ARN],
+    "agentcore_runtime_arn": _RUNTIME_ARN,
 }
+#: The data-plane allowlist the deployed policies carry: discovered roles plus the operator.
+_DATA_PLANE = [_DATA_ROLE_ARN, _RUNTIME_ROLE_ARN, _OPERATOR_ARN]
 
 #: The action tables, literal here so a drift in the module constants reds.
 _DESIGN_TABLE_DATA_PLANE = [
@@ -90,7 +96,7 @@ def _table_arn(physical: str) -> str:
 
 def _table_policy(physical: str, **overrides: Any) -> dict[str, Any]:
     arn = _table_arn(physical)
-    data_plane = overrides.pop("data_plane", [_DATA_ROLE_ARN, _OPERATOR_ARN])
+    data_plane = overrides.pop("data_plane", list(_DATA_PLANE))
     return {
         "Version": "2012-10-17",
         "Statement": [
@@ -133,7 +139,7 @@ def _key_policy() -> dict[str, Any]:
                 "Action": list(_DESIGN_KEY_USE),
                 "Resource": "*",
                 "Condition": {
-                    "ArnNotEquals": {"aws:PrincipalArn": [_DATA_ROLE_ARN, _OPERATOR_ARN]},
+                    "ArnNotEquals": {"aws:PrincipalArn": list(_DATA_PLANE)},
                     "Bool": {"aws:PrincipalIsAWSService": "false"},
                 },
             },
@@ -208,7 +214,10 @@ class Scenario:
     """Queues every operator and probe response `run_checks` consumes, in its call order."""
 
     def __init__(self) -> None:
-        self.clients = {s: _client(s) for s in ("sts", "iam", "lambda", "dynamodb", "kms")}
+        self.clients = {
+            s: _client(s)
+            for s in ("sts", "iam", "lambda", "dynamodb", "kms", "bedrock-agentcore-control")
+        }
         self.stubs = {s: Stubber(c) for s, c in self.clients.items()}
         self.probe_clients = {s: _client(s) for s in ("dynamodb", "kms")}
         self.probe_stubs = {s: Stubber(c) for s, c in self.probe_clients.items()}
@@ -224,8 +233,12 @@ class Scenario:
         self.assume_denials = 0
         self.create_role_error: str | None = None
         self.delete_role_error: str | None = None
+        self.iam_error_message: str | None = None
+        self.policy_error_message = "Resource-based policy not found"
         self.fetch_policies = True
         self.probe_params: dict[str, dict[str, Any]] = {}
+        self.runtime_role_arn: str | None = _RUNTIME_ROLE_ARN
+        self.runtime_error: str | None = None
 
     def _queue_identity(self) -> None:
         self.stubs["sts"].add_response(
@@ -293,6 +306,32 @@ class Scenario:
             {"RoleName": "crm-agent-eval-agent-relay-role"},
         )
 
+    def _queue_runtime(self, outputs: dict[str, Any]) -> None:
+        if not str(outputs.get("agentcore_runtime_arn", "")).count("/"):
+            return
+        stub = self.stubs["bedrock-agentcore-control"]
+        if self.runtime_error:
+            stub.add_client_error(
+                "get_agent_runtime",
+                service_error_code=self.runtime_error,
+                service_message="refused",
+                http_status_code=403,
+            )
+            return
+        response: dict[str, Any] = {
+            "agentRuntimeArn": _RUNTIME_ARN,
+            "agentRuntimeName": "crm_agent_eval_runtime",
+            "agentRuntimeId": _RUNTIME_ID,
+            "agentRuntimeVersion": "1",
+            "createdAt": datetime(2026, 10, 20, tzinfo=UTC),
+            "lastUpdatedAt": datetime(2026, 10, 20, tzinfo=UTC),
+            "networkConfiguration": {"networkMode": "VPC"},
+            "status": "READY",
+            "lifecycleConfiguration": {},
+            "roleArn": self.runtime_role_arn or "not-a-role-arn",
+        }
+        stub.add_response("get_agent_runtime", response, {"agentRuntimeId": _RUNTIME_ID})
+
     def _queue_policies(self) -> None:
         if not self.fetch_policies:
             return
@@ -302,7 +341,7 @@ class Scenario:
                 self.stubs["dynamodb"].add_client_error(
                     "get_resource_policy",
                     service_error_code="PolicyNotFoundException",
-                    service_message="Resource-based policy not found",
+                    service_message=self.policy_error_message,
                     http_status_code=400,
                 )
                 continue
@@ -334,7 +373,7 @@ class Scenario:
             iam.add_client_error(
                 "create_role",
                 service_error_code=self.create_role_error,
-                service_message="refused",
+                service_message=self.iam_error_message or "refused",
                 http_status_code=400,
             )
             return
@@ -431,7 +470,8 @@ class Scenario:
             iam.add_client_error(
                 "delete_role",
                 service_error_code=self.delete_role_error,
-                service_message="Cannot delete entity, must remove roles from instance profile",
+                service_message=self.iam_error_message
+                or "Cannot delete entity, must remove roles from instance profile",
                 http_status_code=409,
             )
             return
@@ -454,6 +494,7 @@ class Scenario:
         self._queue_identity()
         self._queue_tables()
         self._queue_discovery()
+        self._queue_runtime(outputs or _OUTPUTS)
         self._queue_policies()
         self._queue_operator_get_item()
         self._queue_probe_setup()
@@ -668,18 +709,63 @@ def test_an_explicit_deny_naming_another_principal_fails() -> None:
         ("ValidationException", "1 validation error detected"),
     ],
 )
-def test_any_other_error_defers_with_its_message(code: str, message: str) -> None:
+def test_any_other_error_defers_with_its_code_and_not_its_message(code: str, message: str) -> None:
     scenario = Scenario()
     scenario.outcomes[smoke.PROBE_QUERY_GSI] = (code, message)
     row = _by_check(scenario.run())[f"probe_denied:{smoke.PROBE_QUERY_GSI}"]
     assert row.status == "defer"
     assert row.defer_reason == "probe_call_unclassified_error"
-    assert message in row.detail
+    assert code in row.detail
+    assert message not in row.detail
 
 
-def test_the_pass_detail_quotes_the_denial() -> None:
+def test_the_pass_detail_names_the_code_and_the_probe_role_but_not_the_denial_text() -> None:
     row = _by_check(Scenario().run())[f"probe_denied:{smoke.PROBE_GET_ITEM}"]
-    assert row.detail.startswith("AccessDeniedException: User: ")
+    assert row.detail.startswith(
+        "AccessDeniedException: an explicit deny in a resource-based policy"
+    )
+    assert _PROBE_ROLE in row.detail
+    assert "User: " not in row.detail
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _assert_no_planted_arn(rows: Sequence[CheckResult]) -> None:
+    assert not any(_PLANTED_ARN in r.detail for r in rows), rows
+    assert not any(f"arn:aws:sts::{_ACCOUNT}:" in r.detail for r in rows), rows
+
+
+def test_no_probe_row_carries_the_denial_message_or_its_principal_arn() -> None:
+    scenario = Scenario()
+    scenario.outcomes[smoke.PROBE_QUERY_GSI] = ("ThrottlingException", f"{_PLANTED_ARN} throttled")
+    scenario.outcomes[smoke.PROBE_PUT_ITEM] = (
+        "AccessDeniedException",
+        _explicit_deny("dynamodb:PutItem", "x", principal="SomeoneElse"),
+    )
+    scenario.outcomes[smoke.PROBE_GENERATE_DATA_KEY] = (
+        "AccessDeniedException",
+        _implicit_deny("kms:GenerateDataKey", "x"),
+    )
+    rows = scenario.run()
+    assert {r.status for r in rows if r.check.startswith("probe_denied:")} == {
+        "pass",
+        "fail",
+        "defer",
+    }
+    _assert_no_planted_arn(rows)
+
+
+def test_an_operator_get_item_error_carries_its_code_but_never_its_message() -> None:
+    scenario = Scenario()
+    scenario.operator_get_item_error = (
+        "AccessDeniedException",
+        f"{_PLANTED_ARN} is not authorized",
+    )
+    rows = scenario.run()
+    failed = [r for r in rows if r.check == "operator_data_plane_admitted" and r.status == "fail"]
+    assert failed and all("AccessDeniedException" in r.detail for r in failed)
+    _assert_no_planted_arn(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -763,10 +849,10 @@ _TABLE_MUTANTS: dict[str, Callable[[dict[str, Any]], None]] = {
     "missing_action": lambda p: _first(p)["Action"].remove("dynamodb:Scan"),
     "extra_action": lambda p: _second(p)["Action"].append("dynamodb:DescribeTable"),
     "if_exists": lambda p: _first(p).update(
-        Condition={"ArnNotEqualsIfExists": {"aws:PrincipalArn": [_DATA_ROLE_ARN, _OPERATOR_ARN]}}
+        Condition={"ArnNotEqualsIfExists": {"aws:PrincipalArn": list(_DATA_PLANE)}}
     ),
     "string_not_equals": lambda p: _first(p).update(
-        Condition={"StringNotEquals": {"aws:PrincipalArn": [_DATA_ROLE_ARN, _OPERATOR_ARN]}}
+        Condition={"StringNotEquals": {"aws:PrincipalArn": list(_DATA_PLANE)}}
     ),
     "extra_via_aws_service": lambda p: _first(p)["Condition"].update(
         Bool={"aws:ViaAWSService": "false"}
@@ -891,6 +977,70 @@ def test_discovery_keeps_only_project_roles_holding_the_dynamodb_kms_policy() ->
     assert row.detail.startswith("1 execution role")
 
 
+def _shape_rows() -> set[str]:
+    return {f"table_policy_shape:{physical}" for physical in _TABLES.values()} | {
+        "key_policy_shape"
+    }
+
+
+def test_the_runtime_role_is_discovered_from_get_agent_runtime() -> None:
+    rows = Scenario().run()
+    row = _by_check(rows)["runtime_role_discovered"]
+    assert row.status == "pass"
+    assert _RUNTIME_ROLE_ARN in row.detail
+    assert not [r.check for r in rows if r.status == "fail"]
+
+
+@pytest.mark.parametrize(
+    ("case", "configure", "outputs"),
+    [
+        (
+            "output_absent",
+            lambda _s: None,
+            {k: v for k, v in _OUTPUTS.items() if k != "agentcore_runtime_arn"},
+        ),
+        ("describe_refused", lambda s: setattr(s, "runtime_error", "AccessDeniedException"), None),
+        ("no_role_arn", lambda s: setattr(s, "runtime_role_arn", None), None),
+    ],
+)
+def test_a_runtime_role_in_the_policies_but_not_discovered_reds_every_shape_row(
+    case: str, configure: Callable[[Scenario], None], outputs: dict[str, Any] | None
+) -> None:
+    scenario = Scenario()
+    configure(scenario)
+    rows = scenario.run(outputs=outputs)
+    failing = {r.check for r in rows if r.status == "fail"}
+    assert failing == _shape_rows() | {"runtime_role_discovered"}, (case, failing)
+
+
+def test_a_discovered_runtime_role_missing_from_the_policies_reds_every_shape_row() -> None:
+    scenario = Scenario()
+    without_runtime = [_DATA_ROLE_ARN, _OPERATOR_ARN]
+    scenario.table_policies = {
+        logical: _table_policy(physical, data_plane=list(without_runtime))
+        for logical, physical in _TABLES.items()
+    }
+    _first_key_use(scenario.key_policy)["Condition"]["ArnNotEquals"]["aws:PrincipalArn"] = list(
+        without_runtime
+    )
+    failing = {r.check for r in scenario.run() if r.status == "fail"}
+    assert failing == _shape_rows(), failing
+
+
+def test_a_different_runtime_role_reds_every_shape_row() -> None:
+    scenario = Scenario()
+    scenario.runtime_role_arn = f"arn:aws:iam::{_ACCOUNT}:role/some-other-runtime-role"
+    failing = {r.check for r in scenario.run() if r.status == "fail"}
+    assert failing == _shape_rows(), failing
+
+
+def _first_key_use(policy: dict[str, Any]) -> dict[str, Any]:
+    statement: dict[str, Any] = next(
+        s for s in policy["Statement"] if s["Sid"] == "DenyKeyUseToNonProjectPrincipals"
+    )
+    return statement
+
+
 # ---------------------------------------------------------------------------
 # Operator path, probe setup and teardown.
 # ---------------------------------------------------------------------------
@@ -952,13 +1102,14 @@ def test_a_non_role_non_user_caller_is_refused() -> None:
         {"UserId": "x", "Account": _ACCOUNT, "Arn": f"arn:aws:iam::{_ACCOUNT}:root"},
     )
     stub.activate()
-    with pytest.raises(ValueError, match="neither an assumed role nor an IAM user"):
+    with pytest.raises(ValueError, match="neither an assumed role nor an IAM user") as raised:
         smoke.caller_identity(context_for_test(clients={"sts": sts}))
+    assert _ACCOUNT not in str(raised.value)
 
 
 def test_the_expected_check_count_is_derived_from_the_table_output() -> None:
     expected = smoke.expected_check_count(context_for_test(outputs=_OUTPUTS))
-    assert expected.minimum == 2 * len(_TABLES) + 4 + 5
+    assert expected.minimum == 2 * len(_TABLES) + 5 + 5
 
 
 # ---------------------------------------------------------------------------
@@ -1020,7 +1171,7 @@ def test_pre_apply_against_moto_writes_nothing_and_fails_every_probe_row(moto_en
     )
     boto3.client("lambda", region_name=_REGION).create_function(
         FunctionName="crm-agent-eval-accounts-get",
-        Runtime="python3.13",
+        Runtime="python3.14",
         Role=data_role,
         Handler="h.h",
         Code={"ZipFile": _lambda_zip()},
@@ -1078,3 +1229,31 @@ def test_pre_apply_against_moto_writes_nothing_and_fails_every_probe_row(moto_en
     assert ddb.scan(TableName=_TABLES["accounts"])["Count"] == 0
     roles = iam.list_roles()["Roles"]
     assert not [r for r in roles if r["RoleName"].startswith("crm-agent-eval-probe-")]
+
+
+def test_probe_setup_and_teardown_errors_carry_their_codes_but_never_their_messages() -> None:
+    setup = Scenario()
+    setup.create_role_error = "AccessDenied"
+    setup.iam_error_message = f"{_PLANTED_ARN} is not authorized to perform: iam:CreateRole"
+    setup_rows = _by_check(setup.run())
+    assert setup_rows["probe_role_setup"].status == "fail"
+    assert "AccessDenied" in setup_rows["probe_role_setup"].detail
+    _assert_no_planted_arn(list(setup_rows.values()))
+
+    teardown = Scenario()
+    teardown.delete_role_error = "DeleteConflict"
+    teardown.iam_error_message = f"{_PLANTED_ARN} cannot delete the role"
+    teardown_rows = _by_check(teardown.run())
+    assert "DeleteConflict" in teardown_rows["probe_role_deleted"].detail
+    assert _PROBE_ROLE in teardown_rows["probe_role_deleted"].detail
+    _assert_no_planted_arn(list(teardown_rows.values()))
+
+
+def test_a_policy_read_error_carries_its_code_but_never_its_message() -> None:
+    scenario = Scenario()
+    scenario.table_policies["accounts"] = None
+    scenario.policy_error_message = f"{_PLANTED_ARN} is not authorized"
+    rows = scenario.run()
+    failed = [r for r in rows if r.status == "fail" and "PolicyNotFoundException" in r.detail]
+    assert failed, rows
+    _assert_no_planted_arn(rows)

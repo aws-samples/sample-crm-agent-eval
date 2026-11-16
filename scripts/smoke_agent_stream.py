@@ -767,7 +767,7 @@ def _event_kind(event: SseEvent) -> str:
     """Return the `kind` field of one SSE record's JSON payload, or `""` if it has none."""
     try:
         decoded = json.loads(event.data)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return ""
     return str(decoded.get("kind", "")) if isinstance(decoded, dict) else ""
 
@@ -862,7 +862,7 @@ def _dispatched_tool_name(measurement: ArrivalMeasurement) -> str:
             continue
         try:
             decoded = json.loads(event.data)
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return ""
         if isinstance(decoded, dict):
             return str(decoded.get("tool_name") or "")
@@ -1059,7 +1059,7 @@ def _event_payloads(events: Sequence[SseEvent]) -> list[dict[str, Any]]:
     for event in events:
         try:
             decoded = json.loads(event.data)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if isinstance(decoded, dict):
             payloads.append(decoded)

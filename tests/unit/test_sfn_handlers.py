@@ -779,14 +779,14 @@ def test_a_full_shape_schema_1_body_fails_on_the_named_schema_mismatch(sweep: Sw
         response = sweep.runtime.client.post("/invocations", json=request)
         assert response.status_code == 200
         body = response.json()
-        assert body["schema"] == 2
+        assert body["schema"] == 3
         body["schema"] = 1
         return {"response": io.BytesIO(json.dumps(body).encode()), "statusCode": 200}
 
     sweep.runtime.fail_with = _schema_1_body
     with pytest.raises(CrmError, match="did not complete") as raised:
         sweep.task(0, refs[0]["task_id"])
-    assert raised.value.detail == "malformed turn: turn.schema must be 2, got 1"
+    assert raised.value.detail == "malformed turn: turn.schema must be 3, got 1"
 
 
 def test_classification_by_status_when_no_code_is_named() -> None:
@@ -1607,3 +1607,63 @@ def test_an_unreadable_ownership_keeps_a_malformed_finalize_events_own_error(
     assert "sweep_finalize_lock_retained" in caplog.text
     lock = read_lock(sweep.store)
     assert lock is not None and lock.holder_run_id == sweep.run_id
+
+
+def _stored_task_score(**overrides: object) -> dict[str, object]:
+    fields: dict[str, object] = {
+        "task_id": "gt-x",
+        "scoring_mode": "machine",
+        "correctness": 1.0,
+        "unscored_reason": None,
+        "bad_write": False,
+        "tool_call_correct": True,
+        "truncated": False,
+        "budget_exhausted": True,
+        "budget_exhausted_tier": "subagent",
+        "repeat_index": 2,
+        "assertion_results": [],
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_a_stored_task_score_keeps_its_exhaustion_tier_and_repeat() -> None:
+    stored = _stored_task_score()
+    score = task_score_from_fields(stored)
+    assert (score.budget_exhausted_tier, score.repeat_index) == ("subagent", 2)
+    assert score.to_report_fields() == stored
+
+
+def test_a_completed_stored_task_score_reads_a_null_tier() -> None:
+    score = task_score_from_fields(
+        _stored_task_score(budget_exhausted=False, budget_exhausted_tier=None, repeat_index=0)
+    )
+    assert score.budget_exhausted_tier is None
+
+
+@pytest.mark.parametrize("key", ["budget_exhausted_tier", "repeat_index"])
+def test_a_stored_task_score_missing_a_per_run_key_is_refused(key: str) -> None:
+    stored = _stored_task_score()
+    del stored[key]
+    with pytest.raises(ValidationFailed) as raised:
+        task_score_from_fields(stored)
+    assert raised.value.source == f"task_score.{key}"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "source"),
+    [
+        ({"budget_exhausted_tier": "planner"}, "task_score.budget_exhausted_tier"),
+        ({"budget_exhausted_tier": None}, "task_score.budget_exhausted_tier"),
+        ({"budget_exhausted": False}, "task_score.budget_exhausted_tier"),
+        ({"repeat_index": -1}, "task_score.repeat_index"),
+        ({"repeat_index": True}, "task_score.repeat_index"),
+        ({"repeat_index": "2"}, "task_score.repeat_index"),
+    ],
+)
+def test_a_stored_task_score_with_a_bad_per_run_key_is_refused(
+    overrides: dict[str, object], source: str
+) -> None:
+    with pytest.raises(ValidationFailed) as raised:
+        task_score_from_fields(_stored_task_score(**overrides))
+    assert raised.value.source == source

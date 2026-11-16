@@ -1992,3 +1992,24 @@ def test_the_audience_probe_runs_inside_the_seeded_tenant_lifecycle() -> None:
         "audience_refusal_logged_with_reason",
     ]
     assert {r.check for r in rows} >= {"allowlist_parameter_value_is_spa_client"}
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def test_a_teardown_aws_failure_names_the_code_never_the_message() -> None:
+    from botocore.exceptions import ClientError
+
+    from eval.tenancy import TenantTeardownError
+
+    def _teardown(tenant: str) -> dict[str, int]:
+        cause = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}},
+            "BatchWriteItem",
+        )
+        raise TenantTeardownError(tenant, deleted=None, cause=cause) from cause
+
+    [row] = list(api_routes._teardown_check("eval-x", _teardown))
+    assert row.status == "fail"
+    assert "BatchWriteItem failed (AccessDeniedException)" in row.detail
+    assert _PLANTED_ARN not in row.detail

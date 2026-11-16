@@ -8,6 +8,8 @@ append each call to one log, so call order is observable.
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,6 +107,7 @@ def _teardown(
     sandbox = tmp_path / "sandbox"
     scripts_dir = sandbox / "scripts"
     scripts_dir.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
     (sandbox / "infra").mkdir()
     script = scripts_dir / "teardown.sh"
     script.write_text(TEARDOWN_SH.read_text(encoding="utf-8"), encoding="utf-8")
@@ -117,6 +120,7 @@ def _teardown(
     for name, body in (("aws", _FAKE_AWS), ("terraform", _FAKE_TERRAFORM)):
         (bin_dir / name).write_text(body, encoding="utf-8")
         (bin_dir / name).chmod(0o755)
+    (bin_dir / "python3").symlink_to(sys.executable)
 
     call_log = tmp_path / "calls.log"
     call_log.touch()

@@ -14,6 +14,14 @@ Coverage:
 * `crm-agent-eval-identity-interceptor` and `crm-agent-eval-pre-token-generation`, the two non-tool
   Lambda functions `infra/main.tf` declares.
 
+Runtime (inventory path only): every deployed function named `crm-agent-eval-*`, discovered with
+`lambda:ListFunctions` and excluding the run-scoped ENI probe functions, gets one `lambda_runtime`
+row. A Python function must report `python<major>.<minor>` from
+`scripts.check_lambda_zip_imports.TARGET_PYTHON_VERSION`; the relay (`RELAY_FUNCTION`) must report
+the `nodejs<major>.x` default of `infra/modules/agent_relay/variables.tf`.
+`lambda_runtime_coverage` requires every parity target and the relay among the discovered
+functions.
+
 Every target gets a pass/fail verdict; nothing here defers. A missing build directory, a missing or
 unreadable zip, a function that does not exist, or a response carrying no `CodeSha256` is a `fail`.
 Two coverage checks compare the resource names that reached a verdict against independently obtained
@@ -24,8 +32,8 @@ Two entry points, one comparison implementation:
 * `python3 -m scripts.smoke.deployed_parity --json` -- the Layer 4 inventory path
   (`scripts/verify_deployment.sh`), emitting the pinned per-check record shape with provenance.
 * `python3 -m scripts.smoke.deployed_parity --deploy-gate` -- the post-apply gate
-  `scripts/deploy.sh` runs. Same comparison over the same targets, but it needs no Terraform
-  outputs file (it reads nothing but the zips and the Lambda API).
+  `scripts/deploy.sh` runs. Same code comparison over the same targets, but it needs no Terraform
+  outputs file (it reads nothing but the zips and the Lambda API) and emits no runtime rows.
 
 No AWS account id is written to the output: function names, digests, sizes and timestamps only.
 """
@@ -36,23 +44,27 @@ import argparse
 import base64
 import hashlib
 import os
+import re
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
+from scripts.check_lambda_zip_imports import TARGET_PYTHON_VERSION
+from scripts.smoke.eni_function_code_deny import PROBE_PREFIX
 from scripts.smoke.harness import (
     CheckResult,
     SmokeContext,
+    aws_error_code,
     resolve_profile,
     resolve_region,
     run_main,
     smoke_client_config,
 )
-from scripts.smoke.lambda_actions import function_name_for
+from scripts.smoke.lambda_actions import FUNCTION_NAME_PREFIX, function_name_for
 
 from crm.toolspec.definitions import ALL_TOOLS
 
@@ -78,6 +90,23 @@ DEPLOY_GATE_FLAG: Final[str] = "--deploy-gate"
 NON_TOOL_FUNCTIONS: Final[tuple[tuple[str, str], ...]] = (
     ("crm-agent-eval-identity-interceptor", "identity_interceptor.zip"),
     ("crm-agent-eval-pre-token-generation", "pre_token_generation.zip"),
+)
+
+
+#: The check name every per-function runtime verdict publishes.
+RUNTIME_CHECK: Final[str] = "lambda_runtime"
+
+#: The check name of the runtime coverage verdict.
+RUNTIME_COVERAGE_CHECK: Final[str] = "lambda_runtime_coverage"
+
+#: The streaming relay's function name, as `infra/main.tf` declares it; its runtime is Node.js.
+RELAY_FUNCTION: Final[str] = f"{FUNCTION_NAME_PREFIX}agent-relay"
+
+#: The Terraform file whose `variable "runtime"` default is the relay's expected runtime.
+RELAY_VARIABLES_TF: Final[Path] = REPO_ROOT / "infra" / "modules" / "agent_relay" / "variables.tf"
+
+_RELAY_RUNTIME_DEFAULT: Final[re.Pattern[str]] = re.compile(
+    r'(?ms)^variable\s+"runtime"\s*\{.*?default\s*=\s*"(nodejs\d+\.x)"'
 )
 
 
@@ -155,8 +184,7 @@ def deployed_code(client: Any, function_name: str) -> DeployedCode:
     try:
         configuration = client.get_function_configuration(FunctionName=function_name)
     except ClientError as exc:
-        code = str(exc.response.get("Error", {}).get("Code", ""))
-        if code == "ResourceNotFoundException":
+        if aws_error_code(exc) == "ResourceNotFoundException":
             raise LookupError(
                 f"function {function_name!r} does not exist in this account/region — parity cannot "
                 "be established (never read as a pass)"
@@ -165,8 +193,8 @@ def deployed_code(client: Any, function_name: str) -> DeployedCode:
     sha = str(configuration.get("CodeSha256") or "")
     if not sha:
         raise LookupError(
-            f"Lambda reported no CodeSha256 for {function_name!r}: {configuration!r} — parity "
-            "cannot be established (never read as a pass)"
+            f"Lambda reported no CodeSha256 for {function_name!r} (response keys: "
+            f"{sorted(configuration)}) — parity cannot be established (never read as a pass)"
         )
     return DeployedCode(
         code_sha256=sha,
@@ -203,7 +231,7 @@ def _compare(client: Any, target: ParityTarget) -> tuple[bool | None, str]:
     except (ClientError, BotoCoreError) as exc:
         return None, (
             f"lambda:GetFunctionConfiguration for {target.function_name!r} failed "
-            f"({type(exc).__name__}: {exc}) — parity cannot be established"
+            f"({aws_error_code(exc)}) — parity cannot be established"
         )
 
     local_size = _local_size(target.zip_path)
@@ -350,20 +378,152 @@ def _non_tool_verdict_resources(results: Iterable[CheckResult]) -> tuple[str, ..
 
 
 def checks(ctx: SmokeContext, *, directory: Path | None = None) -> Iterable[CheckResult]:
-    """Yield the build-directory check, one verdict per function, and both coverage checks.
+    """Yield the build-directory check, one parity verdict per function, both parity coverage
+    checks, then one runtime verdict per discovered function and the runtime coverage check.
 
     Every target is evaluated even when an earlier one failed, so the inventory stays complete.
     """
     resolved = build_dir(directory)
     yield check_build_dir(resolved)
     client = ctx.client("lambda")
+    targets = parity_targets(resolved)
     emitted: list[CheckResult] = []
-    for target in parity_targets(resolved):
+    for target in targets:
         result = check_parity_target(client, target)
         emitted.append(result)
         yield result
     yield check_coverage(_action_verdict_resources(emitted))
     yield check_non_tool_coverage(_non_tool_verdict_resources(emitted))
+    yield from runtime_checks(client, targets)
+
+
+def expected_python_runtime() -> str:
+    """Return the Lambda runtime every Python function must report, e.g. `python3.14`."""
+    major, minor = TARGET_PYTHON_VERSION
+    return f"python{major}.{minor}"
+
+
+def expected_relay_runtime(variables_tf: Path | None = None) -> str:
+    """Return the relay's `nodejs<major>.x` runtime from its Terraform `variable "runtime"` default.
+
+    `variables_tf` defaults to `RELAY_VARIABLES_TF`. Raises `LookupError` when the file is
+    unreadable or declares no such default.
+    """
+    if variables_tf is None:
+        variables_tf = RELAY_VARIABLES_TF
+    try:
+        text = variables_tf.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise LookupError(f"cannot read {variables_tf} ({type(exc).__name__}: {exc})") from exc
+    match = _RELAY_RUNTIME_DEFAULT.search(text)
+    if match is None:
+        raise LookupError(
+            f'no `variable "runtime"` with a `default = "nodejs<major>.x"` in {variables_tf}'
+        )
+    return match.group(1)
+
+
+def discovered_functions(client: Any) -> dict[str, str]:
+    """Return `{function name: Runtime}` for every `crm-agent-eval-*` function, probes excluded.
+
+    Pages `lambda:ListFunctions` to the end. A function reporting no `Runtime` maps to `""`.
+    Lets `ClientError`/`BotoCoreError` propagate.
+    """
+    functions: dict[str, str] = {}
+    marker: str | None = None
+    while True:
+        page = client.list_functions(**({"Marker": marker} if marker else {}))
+        for function in page.get("Functions", []):
+            name = str(function.get("FunctionName", ""))
+            if name.startswith(FUNCTION_NAME_PREFIX) and not name.startswith(PROBE_PREFIX):
+                functions[name] = str(function.get("Runtime") or "")
+        marker = page.get("NextMarker")
+        if not marker:
+            return functions
+
+
+def check_runtime(function_name: str, runtime: str, expected: str) -> CheckResult:
+    """Return the pass/fail verdict for one function's deployed runtime against `expected`."""
+    if runtime == expected:
+        return CheckResult(
+            resource=function_name,
+            check=RUNTIME_CHECK,
+            status="pass",
+            detail=f"{function_name}: deployed Runtime {runtime} == expected {expected}",
+        )
+    return CheckResult(
+        resource=function_name,
+        check=RUNTIME_CHECK,
+        status="fail",
+        detail=(
+            f"{function_name}: deployed Runtime {runtime or '<none>'} != expected {expected} — "
+            "the function runs on a runtime this source tree does not target; apply the current IaC"
+        ),
+    )
+
+
+def check_runtime_coverage(discovered: Iterable[str], required: Iterable[str]) -> CheckResult:
+    """Assert every `required` function name is among the `discovered` ones."""
+    found = set(discovered)
+    wanted = sorted(set(required))
+    missing = sorted(set(wanted) - found)
+    if wanted and not missing:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=RUNTIME_COVERAGE_CHECK,
+            status="pass",
+            detail=(
+                f"all {len(wanted)} parity target(s) and the relay are among the {len(found)} "
+                f"discovered {FUNCTION_NAME_PREFIX}* function(s)"
+            ),
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=RUNTIME_COVERAGE_CHECK,
+        status="fail",
+        detail=(
+            f"{len(missing)} of {len(wanted)} required function(s) not discovered by "
+            f"lambda:ListFunctions — a runtime that was never read is never a pass "
+            f"(missing={missing})"
+        ),
+    )
+
+
+def runtime_checks(client: Any, targets: Iterable[ParityTarget]) -> Iterator[CheckResult]:
+    """Yield one `lambda_runtime` verdict per discovered function, then the coverage verdict."""
+    required = [*(t.function_name for t in targets), RELAY_FUNCTION]
+    try:
+        functions = discovered_functions(client)
+    except (ClientError, BotoCoreError) as exc:
+        yield CheckResult(
+            resource=RESOURCE_CLASS,
+            check=RUNTIME_COVERAGE_CHECK,
+            status="fail",
+            detail=(
+                f"lambda:ListFunctions failed ({aws_error_code(exc)}) — no function's "
+                "runtime could be read"
+            ),
+        )
+        return
+    python_runtime = expected_python_runtime()
+    try:
+        relay_runtime: str | None = expected_relay_runtime()
+        relay_error = ""
+    except LookupError as exc:
+        relay_runtime, relay_error = None, str(exc)
+    for name in sorted(functions):
+        if name != RELAY_FUNCTION:
+            yield check_runtime(name, functions[name], python_runtime)
+        elif relay_runtime is not None:
+            yield check_runtime(name, functions[name], relay_runtime)
+        else:
+            yield CheckResult(
+                resource=name,
+                check=RUNTIME_CHECK,
+                status="fail",
+                detail=f"the relay's expected runtime is unknown: {relay_error}",
+            )
+    yield check_runtime_coverage(functions, required)
 
 
 def deploy_gate(

@@ -2196,3 +2196,170 @@ def test_is_timeout_does_not_follow_a_context_only_chain() -> None:
     assert raised.value.__cause__ is None
     assert isinstance(raised.value.__context__, EndpointConnectionError)
     assert harness.is_timeout(raised.value) is False
+
+
+# ---------------------------------------------------------------------------
+# aws_error_code / aws_error_detail: AWS failures are reported by code, never by message.
+# ---------------------------------------------------------------------------
+
+_PLANTED_ARN = f"arn:aws:sts::{_PLACEHOLDER_ACCOUNT}:assumed-role/planted-role/planted-session"
+
+
+def _planted_client_error(operation: str = "GetCallerIdentity") -> ClientError:
+    """A `ClientError` whose message names a caller ARN, as a real AccessDenied does."""
+    exc = ClientError(
+        {
+            "Error": {
+                "Code": "AccessDenied",
+                "Message": f"User: {_PLANTED_ARN} is not authorized to perform: sts:{operation}",
+            }
+        },
+        operation,
+    )
+    assert _PLANTED_ARN in str(exc), (
+        "the fixture must carry the ARN for its absence to mean anything"
+    )
+    return exc
+
+
+class TestAwsErrorCode:
+    def test_a_client_error_yields_its_code(self) -> None:
+        assert harness.aws_error_code(_planted_client_error()) == "AccessDenied"
+
+    def test_a_client_error_without_a_code_yields_the_class_name(self) -> None:
+        assert harness.aws_error_code(ClientError({}, "ListFunctions")) == "ClientError"
+
+    def test_a_botocore_error_yields_its_class_name(self) -> None:
+        from botocore.exceptions import EndpointConnectionError
+
+        exc = EndpointConnectionError(endpoint_url="https://x.invalid")
+        assert harness.aws_error_code(exc) == "EndpointConnectionError"
+
+    def test_the_detail_names_the_operation_and_code_but_not_the_message(self) -> None:
+        detail = harness.aws_error_detail("sts:GetCallerIdentity", _planted_client_error())
+        assert detail == "sts:GetCallerIdentity failed (AccessDenied)"
+        assert _PLACEHOLDER_ACCOUNT not in detail
+
+
+class TestHarnessSitesOmitTheAwsErrorMessage:
+    def test_the_account_check_warning_names_the_operation_and_code_only(self) -> None:
+        """A failed `sts:GetCallerIdentity` warns with its code; the caller ARN is absent."""
+
+        class _DeniedSts:
+            def get_caller_identity(self) -> Any:
+                raise _planted_client_error()
+
+        ctx = context_for_test(
+            outputs=dict(_outputs_with_arn("us-east-1").values),
+            clients={"sts": _DeniedSts()},
+            region="us-east-1",
+        )
+        warnings = harness.assert_target_matches_outputs(ctx)
+
+        joined = "\n".join(warnings)
+        assert "sts:GetCallerIdentity failed (AccessDenied)" in joined, joined
+        assert _PLACEHOLDER_ACCOUNT not in joined and "planted-role" not in joined, joined
+
+    def test_a_raising_deriver_reports_the_code_only(self) -> None:
+        """A deriver failing on an AWS call yields an underivable count with no message."""
+
+        def _deriver(_ctx: Any) -> Any:
+            raise _planted_client_error("ListFunctions")
+
+        expectation = harness._resolve_expectation(context_for_test(), _deriver)
+
+        assert isinstance(expectation, harness.UnderivableCheckCount)
+        assert "ListFunctions failed (AccessDenied)" in expectation.reason, expectation.reason
+        assert _PLACEHOLDER_ACCOUNT not in expectation.reason, expectation.reason
+
+    def test_a_check_raising_a_client_error_reports_the_code_only(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        outputs_file = _write_outputs(tmp_path, {"api_endpoint": "https://example.test"})
+
+        def checks(_ctx: Any) -> list[CheckResult]:
+            raise _planted_client_error("DescribeTable")
+
+        run_main(
+            ["--outputs", str(outputs_file), "--json"],
+            layer=4,
+            resource_class="fake",
+            description="test",
+            checks=checks,
+        )
+        output = capsys.readouterr().out
+        detail = json.loads(output)["checks"][0]["detail"]
+        assert detail == "ClientError: DescribeTable failed (AccessDenied)", detail
+        assert _PLACEHOLDER_ACCOUNT not in output
+
+    def test_a_wrapped_client_error_is_reported_by_code_not_by_the_wrapper_text(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A local error raised while handling an AWS error does not carry its message out."""
+        outputs_file = _write_outputs(tmp_path, {"api_endpoint": "https://example.test"})
+
+        def checks(_ctx: Any) -> list[CheckResult]:
+            try:
+                raise _planted_client_error("GetFunction")
+            except ClientError as exc:
+                raise RuntimeError(f"lookup failed: {exc}") from exc
+
+        run_main(
+            ["--outputs", str(outputs_file), "--json"],
+            layer=4,
+            resource_class="fake",
+            description="test",
+            checks=checks,
+        )
+        output = capsys.readouterr().out
+        assert "RuntimeError: GetFunction failed (AccessDenied)" in output, output
+        assert _PLACEHOLDER_ACCOUNT not in output
+
+    def test_a_non_aws_check_failure_keeps_its_text(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Control: an exception with no AWS error in its chain is reported with its message."""
+        outputs_file = _write_outputs(tmp_path, {"api_endpoint": "https://example.test"})
+
+        def checks(_ctx: Any) -> list[CheckResult]:
+            raise ValueError("bad local fixture value")
+
+        run_main(
+            ["--outputs", str(outputs_file), "--json"],
+            layer=4,
+            resource_class="fake",
+            description="test",
+            checks=checks,
+        )
+        detail = json.loads(capsys.readouterr().out)["checks"][0]["detail"]
+        assert detail == "ValueError: bad local fixture value", detail
+
+
+class TestExceptionDetail:
+    def test_a_local_error_keeps_its_text(self) -> None:
+        assert harness.exception_detail(ValueError("bad row")) == "ValueError: bad row"
+
+    def test_a_client_error_yields_its_own_operation_and_code(self) -> None:
+        detail = harness.exception_detail(_planted_client_error("ListRoles"))
+        assert detail == "ClientError: ListRoles failed (AccessDenied)"
+
+    def test_a_named_operation_replaces_the_client_errors_own(self) -> None:
+        detail = harness.exception_detail(_planted_client_error(), "sts:GetCallerIdentity")
+        assert detail == "ClientError: sts:GetCallerIdentity failed (AccessDenied)"
+
+    def test_an_aws_error_in_the_context_chain_is_reported_by_code(self) -> None:
+        try:
+            try:
+                raise _planted_client_error()
+            except ClientError as inner:
+                raise RuntimeError(f"wrapped: {inner}")  # noqa: B904
+        except RuntimeError as outer:
+            detail = harness.exception_detail(outer)
+        assert detail == "RuntimeError: GetCallerIdentity failed (AccessDenied)"
+        assert _PLACEHOLDER_ACCOUNT not in detail
+
+    def test_a_botocore_error_without_an_operation_names_an_aws_call(self) -> None:
+        from botocore.exceptions import NoCredentialsError
+
+        detail = harness.exception_detail(NoCredentialsError())
+        assert detail == "NoCredentialsError: an AWS call failed (NoCredentialsError)"

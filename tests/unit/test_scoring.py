@@ -29,6 +29,7 @@ from eval.scoring import (
     aggregate_scores,
     score_task,
 )
+from providers.capabilities import Tier
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -1316,3 +1317,83 @@ def test_positive_prefixes_do_not_capture_a_negative_guard_name(store: Store) ->
     assert guard_names, "the real corpus emits no negative guard; the check would be vacuous"
     for name in guard_names:
         assert not name.startswith(POSITIVE_ASSERTION_NAME_PREFIXES), name
+
+
+@pytest.mark.parametrize("tier", ["supervisor", "subagent", "tool"])
+def test_an_exhausted_outcome_carries_its_tier(tier: Tier) -> None:
+    outcome = TurnOutcome(tenant="eval-x", budget_exhausted=True, budget_exhausted_tier=tier)
+    assert outcome.budget_exhausted_tier == tier
+
+
+def test_a_completed_outcome_has_no_exhaustion_tier() -> None:
+    assert TurnOutcome(tenant="eval-x").budget_exhausted_tier is None
+
+
+def test_an_exhausted_outcome_without_a_tier_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        TurnOutcome(tenant="eval-x", budget_exhausted=True)
+
+
+def test_a_tier_on_a_completed_outcome_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        TurnOutcome(tenant="eval-x", budget_exhausted=False, budget_exhausted_tier="supervisor")
+
+
+def _one_real_task() -> dict[str, object]:
+    return _real_golden_tasks()[0]
+
+
+@pytest.mark.parametrize("tier", ["supervisor", "subagent", "tool"])
+def test_a_task_score_carries_the_outcomes_exhaustion_tier(store: Store, tier: Tier) -> None:
+    outcome = TurnOutcome(tenant=_TENANT, budget_exhausted=True, budget_exhausted_tier=tier)
+    score = score_task(store, task=_one_real_task(), outcome=outcome)
+    assert score.budget_exhausted_tier == tier
+    assert score.to_report_fields()["budget_exhausted_tier"] == tier
+
+
+def test_a_completed_task_score_reports_a_null_exhaustion_tier(store: Store) -> None:
+    score = score_task(store, task=_one_real_task(), outcome=TurnOutcome(tenant=_TENANT))
+    fields = score.to_report_fields()
+    assert "budget_exhausted_tier" in fields
+    assert fields["budget_exhausted_tier"] is None
+
+
+@pytest.mark.parametrize("repeat_index", [0, 3])
+def test_a_task_score_carries_its_repeat_index(store: Store, repeat_index: int) -> None:
+    score = score_task(
+        store,
+        task=_one_real_task(),
+        outcome=TurnOutcome(tenant=_TENANT),
+        repeat_index=repeat_index,
+    )
+    assert score.repeat_index == repeat_index
+    assert score.to_report_fields()["repeat_index"] == repeat_index
+
+
+def _bare_score(**overrides: object) -> TaskScore:
+    kwargs: dict[str, object] = {
+        "task_id": "gt-x",
+        "scoring_mode": "machine",
+        "correctness": 1.0,
+        "unscored_reason": None,
+        "bad_write": False,
+        "tool_call_correct": True,
+    }
+    kwargs.update(overrides)
+    return TaskScore(**kwargs)  # type: ignore[arg-type]
+
+
+def test_an_exhausted_task_score_without_a_tier_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        _bare_score(budget_exhausted=True)
+
+
+def test_a_tier_on_a_completed_task_score_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        _bare_score(budget_exhausted_tier="tool")
+
+
+@pytest.mark.parametrize("repeat_index", [-1, True])
+def test_a_task_score_with_an_invalid_repeat_index_is_refused(repeat_index: object) -> None:
+    with pytest.raises(ValueError, match="repeat_index"):
+        _bare_score(repeat_index=repeat_index)

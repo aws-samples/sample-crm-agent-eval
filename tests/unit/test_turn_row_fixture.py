@@ -2,7 +2,9 @@
 """`eval.sfn_handlers.turn_from_row` on a frozen schema-1 `eval_results` row.
 
 `tests/fixtures/eval/turn_row_schema1.json` is a row stored while `SERIALISED_TURN_SCHEMA` was 1.
-It must stay readable, and losslessly so, under every later schema.
+Its outcome carries no `budget_exhausted_tier`, which the current schema requires, so the row is
+refused loudly rather than read with an invented tier. With that one key supplied it rebuilds
+losslessly, which pins that nothing else about the stored shape has drifted.
 """
 
 from __future__ import annotations
@@ -11,6 +13,9 @@ import json
 from pathlib import Path
 from typing import Any, Final
 
+import pytest
+
+from crm.errors import ValidationFailed
 from eval.sfn_handlers import turn_from_row
 from eval.turn_observation import SERIALISED_TURN_SCHEMA, serialise_turn
 
@@ -25,17 +30,37 @@ def _row() -> dict[str, Any]:
     return row
 
 
+def _row_with_tier() -> dict[str, Any]:
+    row = _row()
+    outcome = json.loads(row["outcome"])
+    outcome["budget_exhausted_tier"] = None
+    row["outcome"] = json.dumps(outcome)
+    return row
+
+
 def test_the_frozen_row_stores_no_schema_attribute() -> None:
     assert "schema" not in _row()
 
 
-def test_the_schema_1_row_rebuilds_under_the_current_schema() -> None:
-    turn = serialise_turn(turn_from_row(_row()))
+def test_the_frozen_row_stores_no_exhaustion_tier() -> None:
+    outcome = json.loads(_row()["outcome"])
+    assert outcome["budget_exhausted"] is False
+    assert "budget_exhausted_tier" not in outcome
+
+
+def test_the_schema_1_row_is_refused_naming_the_missing_tier() -> None:
+    with pytest.raises(ValidationFailed) as refused:
+        turn_from_row(_row())
+    assert "budget_exhausted_tier" in str(refused.value.detail)
+
+
+def test_the_row_with_the_tier_supplied_rebuilds_under_the_current_schema() -> None:
+    turn = serialise_turn(turn_from_row(_row_with_tier()))
     assert turn["schema"] == SERIALISED_TURN_SCHEMA
 
 
-def test_the_schema_1_row_rebuilds_losslessly() -> None:
-    row = _row()
+def test_the_row_with_the_tier_supplied_rebuilds_losslessly() -> None:
+    row = _row_with_tier()
     turn = serialise_turn(turn_from_row(row))
     assert turn["outcome"] == json.loads(row["outcome"])
     assert turn["tool_arguments"] == json.loads(row["tool_arguments"])

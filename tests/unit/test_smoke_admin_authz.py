@@ -11,6 +11,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke import admin_authz as mod
 from scripts.smoke.cognito_claims import ProvisionedSmokeUser
 from scripts.smoke.harness import CheckResult, context_for_test
@@ -565,3 +566,63 @@ def test_a_wrong_decision_still_fails_when_only_ignored_keys_are_missing() -> No
             }
 
     assert mod.simulation_result(Allowing("allowed"), row, resource="r").status == "fail"
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} denied"}}, operation
+    )
+
+
+class _DeniedIam:
+    def simulate_principal_policy(self, **_: Any) -> dict[str, Any]:
+        raise _planted("SimulatePrincipalPolicy")
+
+
+class _DeniedIdp:
+    def get_group(self, **_: Any) -> dict[str, Any]:
+        raise _planted("GetGroup")
+
+
+class _DeniedProvisioner:
+    def provision(self) -> ProvisionedSmokeUser:
+        raise _planted("AdminCreateUser")
+
+    def cleanup(self) -> Iterator[CheckResult]:
+        return iter(())
+
+
+class TestNoAwsErrorMessageInDetails:
+    """Each AWS failure row names the operation and the code, never the error message."""
+
+    def test_a_failed_simulation(self) -> None:
+        row = mod.simulation_result(
+            _DeniedIam(),
+            mod.SimulationRow(
+                check="c",
+                role_arn="arn:aws:iam::123456789012:role/r",
+                action="dynamodb:Query",
+                resource_arn="arn:aws:dynamodb:us-east-1:123456789012:table/t",
+                allowed=True,
+            ),
+            resource="r",
+        )
+        assert row.status == "fail"
+        assert "iam:SimulatePrincipalPolicy failed (AccessDenied)" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_group_read(self) -> None:
+        row = mod.check_admin_group_exists(_DeniedIdp(), user_pool_id="us-east-1_x")
+        assert row.status == "fail"
+        assert "cognito-idp:GetGroup failed (AccessDenied)" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_provisioning(self) -> None:
+        user, row = mod.provision_or_fail(_DeniedProvisioner(), resource="r", check="c")
+        assert user is None
+        assert row.status == "fail"
+        assert "provision failed (AccessDenied)" in row.detail
+        assert _PLANTED_ARN not in row.detail

@@ -83,6 +83,8 @@ export AWS_DEFAULT_REGION="$RESOLVED_REGION"
 command -v aws >/dev/null 2>&1 || die "aws CLI not found on PATH"
 command -v terraform >/dev/null 2>&1 || die "terraform not found on PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 not found on PATH"
+REPO_PYTHON="$("${SCRIPT_DIR}/repo_python.sh" --print)" \
+    || die "no interpreter for the repository's Python scripts (see above); nothing was destroyed."
 
 info "Resolved profile=${RESOLVED_PROFILE} region=${RESOLVED_REGION}"
 
@@ -105,7 +107,7 @@ restore_template() {
     RESTORED=true
     if [[ -f "$BACKUP_PATH" ]]; then
         info "Restoring account-agnostic AgentCore config template"
-        python3 "$RENDER_SCRIPT" restore --template "$TEMPLATE_PATH" --backup "$BACKUP_PATH" \
+        "$REPO_PYTHON" "$RENDER_SCRIPT" restore --template "$TEMPLATE_PATH" --backup "$BACKUP_PATH" \
             || warn "Restore of ${TEMPLATE_PATH} from ${BACKUP_PATH} failed — manual restore required"
     fi
 }
@@ -117,12 +119,12 @@ if [[ ! -f "$TEMPLATE_PATH" ]]; then
     warn "AgentCore config template not found at ${TEMPLATE_PATH} — skipping render step"
 else
     if [[ -f "$BACKUP_PATH" ]]; then
-        die "A pre-render backup already exists at ${BACKUP_PATH}: a previous run did not restore ${TEMPLATE_PATH}, so it may still hold rendered account-specific values. Restore it first (python3 ${RENDER_SCRIPT} restore --template ${TEMPLATE_PATH} --backup ${BACKUP_PATH}), then re-run."
+        die "A pre-render backup already exists at ${BACKUP_PATH}: a previous run did not restore ${TEMPLATE_PATH}, so it may still hold rendered account-specific values. Restore it first (${REPO_PYTHON} ${RENDER_SCRIPT} restore --template ${TEMPLATE_PATH} --backup ${BACKUP_PATH}), then re-run."
     fi
     info "Rendering account-specific AgentCore config (destroy needs the same values apply used)"
     VALUES_JSON="$(python3 -c "import json,sys; print(json.dumps({'ACCOUNT_ID': sys.argv[1], 'AWS_REGION': sys.argv[2], 'AWS_PROFILE': sys.argv[3]}))" \
         "$ACCOUNT_ID" "$RESOLVED_REGION" "$RESOLVED_PROFILE")"
-    python3 "$RENDER_SCRIPT" render \
+    "$REPO_PYTHON" "$RENDER_SCRIPT" render \
         --template "$TEMPLATE_PATH" \
         --backup "$BACKUP_PATH" \
         --values-json "$VALUES_JSON" \

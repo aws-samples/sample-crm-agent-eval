@@ -34,8 +34,11 @@ from typing import Any, Final
 from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
+    MissingTerraformOutputError,
     SmokeContext,
     Status,
+    aws_error_detail,
+    exception_detail,
     run_main,
 )
 
@@ -380,7 +383,7 @@ def _inverse_matrix_results(
                 f"role {role_name} does not exist (NoSuchEntity). The enumeration names a role the "
                 "deployment does not have; check the matrix key renders the deployed function name"
                 if _is_no_such_entity(exc)
-                else f"simulate_principal_policy raised {type(exc).__name__}: {exc}"
+                else aws_error_detail("iam:SimulatePrincipalPolicy", exc)
             )
             yield CheckResult(
                 resource=role_arn,
@@ -423,7 +426,7 @@ def _paired_deny_results(
         try:
             positive_decision = _simulate_custom_allow(ctx, row.action, row.resource)
         except Exception as exc:  # noqa: BLE001 - a failing control, never a skip
-            positive_decision = f"error ({type(exc).__name__}: {exc})"
+            positive_decision = f"error ({aws_error_detail('iam:SimulateCustomPolicy', exc)})"
     elif row.positive_role_arn is None:
         raise ValueError(f"{row.row_id} has no positive control; use an expressibility assertion")
     else:
@@ -601,7 +604,7 @@ def _allow_result(
     )
 
 
-def _missing_output(name: str, remediation: str, exc: Exception) -> CheckResult:
+def _missing_output(name: str, remediation: str, exc: MissingTerraformOutputError) -> CheckResult:
     return CheckResult(
         resource=name,
         check="terraform_output_present",
@@ -625,7 +628,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
         relay_role_arn = ctx.outputs.require_str("agent_relay_role_arn")
         runtime_arn = ctx.outputs.require_str("agentcore_runtime_arn")
         relay_function_name = ctx.outputs.require_str("agent_relay_function_name")
-    except Exception as exc:  # noqa: BLE001 - reported as a failing check, not a crash
+    except MissingTerraformOutputError as exc:
         yield _missing_output(
             "agent_relay_role_arn|agentcore_runtime_arn|agent_relay_function_name",
             "These three are the matrix's own subject; without them no row can be simulated.",
@@ -675,7 +678,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
 
     try:
         log_group_name = ctx.outputs.require_str("agent_relay_log_group_name")
-    except Exception as exc:  # noqa: BLE001
+    except MissingTerraformOutputError as exc:
         log_group_name = ""
         yield _missing_output(
             "agent_relay_log_group_name",
@@ -827,7 +830,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
     runtime_statements: list[Mapping[str, Any]] = []
     try:
         runtime_role_arn = ctx.outputs.require_str("agentcore_runtime_role_arn")
-    except Exception as exc:  # noqa: BLE001
+    except MissingTerraformOutputError as exc:
         yield _missing_output(
             "agentcore_runtime_role_arn",
             "It is the positive control for D6 (lambda:InvokeFunction on the action Lambdas) "
@@ -904,7 +907,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
     # --- D7/D8: the relay never reads or writes CRM data directly. ---
     try:
         table_names: Mapping[str, Any] = ctx.outputs.require_mapping("dynamodb_table_names")
-    except Exception as exc:  # noqa: BLE001
+    except MissingTerraformOutputError as exc:
         table_names = {}
         yield _missing_output(
             "dynamodb_table_names",
@@ -1023,7 +1026,8 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
                 check="D12_target_role_resolves",
                 status="fail",
                 detail=(
-                    f"iam get-role failed for {runtime_role_name!r} ({exc}), so D12's target "
+                    f"{aws_error_detail(f'iam:GetRole for {runtime_role_name!r}', exc)}, so "
+                    "D12's target "
                     "ARN names nothing and its implicitDeny would read as a pass. This is the "
                     "one ARN in the matrix with no positive control available, which is why "
                     "resolution is asserted instead"
@@ -1157,7 +1161,8 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
             resource="local.runtime_invoker_role_arns",
             check=_INVOKERS_RESOLVED_CHECK,
             status="fail",
-            detail=f"the Runtime invoker list could not be read ({exc}), so no D15/D16 or I1/I2 "
+            detail=f"the Runtime invoker list could not be read ({exception_detail(exc)}), so no "
+            "D15/D16 or I1/I2 "
             "row ran and X1 has no role to simulate",
         )
 
@@ -1172,7 +1177,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one row 
                 check=_INVERSE_MATRIX_ENUMERATED_CHECK,
                 status="fail",
                 detail=f"the roles D15/D16 must assert denied could not be enumerated "
-                f"({type(exc).__name__}: {exc}), so no D15/D16 row ran",
+                f"({exception_detail(exc)}), so no D15/D16 row ran",
             )
         for role_name, role_arn in non_relay_roles.items():
             yield from _inverse_matrix_results(
@@ -1250,7 +1255,10 @@ def _invoker_allow_results(
                     resource=resource,
                     check=f"{row_id}[{role_name}]_allowed",
                     status="fail",
-                    detail=f"{row_id}: simulating {role_name} raised {type(exc).__name__}: {exc}",
+                    detail=f"{row_id}: "
+                    + aws_error_detail(
+                        f"simulating {role_name} (iam:SimulatePrincipalPolicy)", exc
+                    ),
                 )
 
 
@@ -1305,8 +1313,9 @@ def _chat_target_exclusion_result(
                     resource=runtime_arn,
                     check=_CHAT_TARGET_EXCLUSION_CHECK,
                     status="fail",
-                    detail=f"X1: simulating {role_name} for {action} on {resource} raised "
-                    f"{type(exc).__name__}: {exc}. Not a pass: no decision was observed",
+                    detail="X1: "
+                    + aws_error_detail(f"simulating {role_name} for {action} on {resource}", exc)
+                    + ". Not a pass: no decision was observed",
                 )
             all_explicit = all_explicit and decision in EXPLICIT_DENY_ONLY
             probes.append(_decision_detail(f"X1[{role_name}]", action, resource, decision))
@@ -1355,8 +1364,9 @@ def _function_url_auth_type_check(ctx: SmokeContext, function_name: str) -> Iter
             check="U1_function_url_auth_type",
             status="fail",
             detail=(
-                f"could not read the deployed Function URL configuration ({type(exc).__name__}: "
-                f"{exc}). The relay's only ingress is its Function URL, so this is a broken "
+                "could not read the deployed Function URL configuration "
+                f"({aws_error_detail('lambda:GetFunctionUrlConfig', exc)}). The relay's only "
+                "ingress is its Function URL, so this is a broken "
                 "deployment, not an inapplicable check"
             ),
         )

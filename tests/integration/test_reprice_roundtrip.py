@@ -2,7 +2,8 @@
 """A full stub sweep against DynamoDB Local, re-priced by `eval.reprice`, reproduces its matrix.
 
 Also pins the pre-aggregation contract between the harness writer and the re-price reader: the
-keys the writer adds to each archived call are exactly the keys the reader prices from.
+keys the writer adds to each archived call are exactly the keys the reader prices from, plus the
+owning unit's task id and repeat index.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from agents.tier_attribution import InvocationAttribution
 from crm.store.store import Store
 from eval.harness import DEFAULT_ARM_SPECS, run_sweep
 from eval.reprice import ARCHIVED_PRICING_KEYS, PRE_AGGREGATION_DIRNAME, main
+from eval.sweep_units import UNIT_REPEAT_INDEX_KEY, UNIT_TASK_ID_KEY
 
 _ISO_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+\+00:00")
 
@@ -89,4 +91,8 @@ def test_the_writer_adds_exactly_the_keys_the_reader_prices_from(
         entries = json.loads(path.read_text(encoding="utf-8"))["invocation_attributions"]
         assert entries, path
         for entry in entries:
-            assert set(entry) - attribution_keys == set(ARCHIVED_PRICING_KEYS)
+            assert set(entry) - attribution_keys == {
+                *ARCHIVED_PRICING_KEYS,
+                UNIT_TASK_ID_KEY,
+                UNIT_REPEAT_INDEX_KEY,
+            }

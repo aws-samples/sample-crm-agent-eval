@@ -1803,6 +1803,7 @@ _EXPECTED_REAL_SMOKE_MODULES: Final[frozenset[str]] = frozenset(
         "scripts.smoke.lambda_actions",
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_bedrock_iam",
+        "scripts.smoke.runtime_history_iam",
         "scripts.smoke.runtime_inbound_auth",
         "scripts.smoke.runtime_network_posture",
         "scripts.smoke.integration_teardown_privilege",
@@ -1996,6 +1997,7 @@ def test_reproduces_the_real_modules_that_reject_an_unconditional_token(
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_inbound_auth",
         "scripts.smoke.runtime_bedrock_iam",
+        "scripts.smoke.runtime_history_iam",
         "scripts.smoke.runtime_network_posture",
         "scripts.smoke.public_exposure",
         "scripts.smoke.agents",
@@ -2438,6 +2440,7 @@ def test_dry_run_preview_reproduces_the_pre_fix_regression_when_forced_unconditi
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_inbound_auth",
         "scripts.smoke.runtime_bedrock_iam",
+        "scripts.smoke.runtime_history_iam",
         "scripts.smoke.runtime_network_posture",
         "scripts.smoke.deployed_parity",
         "scripts.smoke.lambda_actions",
@@ -2463,7 +2466,31 @@ def test_dry_run_preview_reproduces_the_pre_fix_regression_when_forced_unconditi
 # ---------------------------------------------------------------------------
 
 
+def _stderr_logs(tmp_path: Path) -> list[Path]:
+    return sorted((tmp_path / "results").glob("verify_deployment_stderr.*"))
+
+
 def test_stderr_log_path_is_unique_per_run_not_a_fixed_tmp_path(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    script_path, env = stubbed
+    env = {**env, "STUB_MODE": "empty_output"}
+    result = _run(
+        script_path,
+        ["--i-understand-this-is-billable", "--outputs", str(outputs_file), "--layer", "4"],
+        env,
+        tmp_path,
+    )
+    assert result.returncode != 0
+    assert "/tmp/verify_deployment_stderr.log" not in result.stdout + result.stderr  # nosec B108  # asserts absence
+    inventory = tmp_path / "results" / "verification-inventory.partial.run.json"
+    named = re.findall(r"verify_deployment_stderr\.[A-Za-z0-9]+", inventory.read_text("utf-8"))
+    assert named, result.stdout + result.stderr
+    # BSD mktemp substitutes only a trailing `XXXXXX`; assert the path is not the literal template.
+    assert all(name != "verify_deployment_stderr.XXXXXX" for name in named), named
+
+
+def test_stderr_log_is_removed_after_a_passing_run(
     stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
 ) -> None:
     script_path, env = stubbed
@@ -2474,14 +2501,59 @@ def test_stderr_log_path_is_unique_per_run_not_a_fixed_tmp_path(
         tmp_path,
     )
     assert result.returncode == 0, result.stderr
-    results_dir = tmp_path / "results"
-    stderr_logs = list(results_dir.glob("verify_deployment_stderr.*"))
-    assert len(stderr_logs) == 1, f"expected exactly one stderr log, found {stderr_logs}"
-    assert "/tmp/verify_deployment_stderr.log" not in result.stdout + result.stderr  # nosec B108  # asserts absence
-    # BSD mktemp substitutes only a trailing `XXXXXX`; assert the path is not the literal template.
-    assert "XXXXXX" not in stderr_logs[0].name, (
-        f"mktemp template was not substituted -- path is still fixed: {stderr_logs[0]}"
+    assert _stderr_logs(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "stub_env",
+    [{"STUB_MODE": "empty_output"}, {"STUB_FAIL_MODULES": "lambda_actions"}],
+    ids=["module_without_output", "failing_module"],
+)
+def test_stderr_log_is_replayed_and_removed_after_a_failing_run(
+    stubbed: tuple[Path, dict[str, str]],
+    outputs_file: Path,
+    tmp_path: Path,
+    stub_env: dict[str, str],
+) -> None:
+    script_path, env = stubbed
+    result = _run(
+        script_path,
+        ["--i-understand-this-is-billable", "--outputs", str(outputs_file), "--layer", "4"],
+        {**env, **stub_env},
+        tmp_path,
     )
+    assert result.returncode != 0
+    assert _stderr_logs(tmp_path) == []
+    if stub_env.get("STUB_MODE") == "empty_output":
+        assert "module stderr from this run follows" in result.stderr
+        assert "stub: simulated uncaught traceback" in result.stderr
+
+
+def test_stderr_log_is_not_created_by_a_dry_run(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    script_path, env = stubbed
+    result = _run(script_path, ["--dry-run", "--outputs", str(outputs_file)], env, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert _stderr_logs(tmp_path) == []
+
+
+def test_only_this_runs_stderr_log_is_removed(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    """A log another run created is left alone."""
+    script_path, env = stubbed
+    (tmp_path / "results").mkdir(exist_ok=True)
+    other = tmp_path / "results" / "verify_deployment_stderr.otherrun"
+    other.write_text("another run\n", encoding="utf-8")
+    result = _run(
+        script_path,
+        ["--i-understand-this-is-billable", "--outputs", str(outputs_file), "--token", "jwt"],
+        env,
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _stderr_logs(tmp_path) == [other]
 
 
 def test_script_with_no_parseable_output_appears_in_inventory_as_a_failed_class(

@@ -187,6 +187,15 @@ class TestDeclaredMappingMatchesImplementation:
         assert derived["query_tenant_scan"] == frozenset({"dynamodb:Query"})
         assert derived["transact_write"] == _TRANSACT_WRITE_AUTHORIZED_ACTIONS
 
+    def test_put_conditional_is_mapped_to_put_item_only(
+        self, derived: dict[str, frozenset[str]]
+    ) -> None:
+        """`put_conditional` reaches `PutItem` alone and is declared so."""
+        assert derived["put_conditional"] == frozenset({"dynamodb:PutItem"})
+        assert gate.STORE_METHOD_ACTIONS["put_conditional"].actions == frozenset(
+            {"dynamodb:PutItem"}
+        )
+
     def test_physical_name_reaches_no_api_call_at_all(
         self, derived: dict[str, frozenset[str]]
     ) -> None:

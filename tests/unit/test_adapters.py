@@ -20,7 +20,7 @@ from typing import Any
 import anthropic
 import httpx2
 import pytest
-from anthropic.lib.bedrock import _auth
+from anthropic.lib.aws import _auth
 from botocore.credentials import Credentials
 
 from crm.errors import ValidationFailed
@@ -985,15 +985,152 @@ def _openai_body(
     return adapter._build_responses_body(_resolve(matrix, "openai", "supervisor"), messages, tools)
 
 
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+def _cache_point_count(request: dict[str, Any]) -> int:
+    return json.dumps(request).count('"cache_control"')
+
+
 def test_anthropic_caches_the_stable_system_block_and_leaves_the_briefing_after_it(
     matrix: Any,
 ) -> None:
     request = build_request(_resolve(matrix, "anthropic", "supervisor"), _cached_turn(), [])
     assert request["system"] == [
-        {"type": "text", "text": _LONG_STABLE, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": _LONG_STABLE, "cache_control": _EPHEMERAL},
         {"type": "text", "text": _BRIEFING},
     ]
     assert [m["role"] for m in request["messages"]] == ["user"]
+
+
+@pytest.mark.parametrize("tier", ANTHROPIC_TIERS)
+def test_anthropic_marks_the_latest_message_beside_the_system_point_on_every_tier(
+    matrix: Any, tier: str
+) -> None:
+    """String content of the latest message becomes one text block carrying ``cache_control``."""
+    request = build_request(_resolve(matrix, "anthropic", tier), _cached_turn(), [])
+    assert request["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "How many in Negotiation?", "cache_control": _EPHEMERAL}
+            ],
+        }
+    ]
+    assert request["system"][0]["cache_control"] == _EPHEMERAL
+    assert _cache_point_count(request) == 2
+
+
+def test_anthropic_marks_only_the_latest_message_of_a_multi_turn_conversation(
+    matrix: Any,
+) -> None:
+    messages: list[dict[str, object]] = [
+        *_cached_turn(),
+        {"role": "assistant", "content": "Three."},
+        {"role": "user", "content": "And in Proposal?"},
+    ]
+    request = build_request(_resolve(matrix, "anthropic", "supervisor"), messages, [])
+    assert request["messages"] == [
+        {"role": "user", "content": "How many in Negotiation?"},
+        {"role": "assistant", "content": "Three."},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "And in Proposal?", "cache_control": _EPHEMERAL}],
+        },
+    ]
+    assert _cache_point_count(request) == 2
+
+
+def test_anthropic_marks_the_last_tool_result_block_of_a_latest_tool_turn(matrix: Any) -> None:
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": _LONG_STABLE},
+        {"role": "user", "content": "find a-1 and a-2"},
+        {
+            "role": "assistant",
+            "content": "Looking.",
+            "tool_calls": [
+                {"id": "toolu_1", "name": "get_account", "input": {"a": 1}},
+                {"id": "toolu_2", "name": "get_account", "input": {"a": 2}},
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_results": [
+                {"id": "toolu_1", "output": '{"ok": 1}'},
+                {"id": "toolu_2", "output": '{"ok": 2}'},
+            ],
+        },
+    ]
+    request = build_request(_resolve(matrix, "anthropic", "supervisor"), messages, [])
+    assert request["messages"][1]["content"][-1] == {
+        "type": "tool_use",
+        "id": "toolu_2",
+        "name": "get_account",
+        "input": {"a": 2},
+    }
+    assert request["messages"][2] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": '{"ok": 1}'},
+            {
+                "type": "tool_result",
+                "tool_use_id": "toolu_2",
+                "content": '{"ok": 2}',
+                "cache_control": _EPHEMERAL,
+            },
+        ],
+    }
+    assert _cache_point_count(request) == 2
+
+
+def test_anthropic_cache_point_never_mutates_the_callers_messages(matrix: Any) -> None:
+    """The point is placed on copies, so a reused history never accumulates points."""
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": _LONG_STABLE},
+        {"role": "user", "content": blocks},
+    ]
+    before = json.dumps(messages)
+    invocation = _resolve(matrix, "anthropic", "supervisor")
+    first = build_request(invocation, messages, [])
+    second = build_request(invocation, messages, [])
+    assert json.dumps(messages) == before
+    assert first == second
+    assert first["messages"][0]["content"] == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b", "cache_control": _EPHEMERAL},
+    ]
+
+
+def test_anthropic_omits_the_system_point_but_keeps_the_latest_when_only_the_latest_reaches(
+    matrix: Any,
+) -> None:
+    long_question = "Which accounts are in Negotiation? " * 40
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "Short."},
+        {"role": "user", "content": long_question},
+    ]
+    request = build_request(_resolve(matrix, "anthropic", "supervisor"), messages, [])
+    assert request["system"] == "Short."
+    assert request["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": long_question, "cache_control": _EPHEMERAL}],
+        }
+    ]
+    assert _cache_point_count(request) == 1
+
+
+def test_anthropic_request_without_a_conversation_carries_only_the_system_point(
+    matrix: Any,
+) -> None:
+    messages: list[dict[str, object]] = [{"role": "system", "content": _LONG_STABLE}]
+    request = build_request(_resolve(matrix, "anthropic", "supervisor"), messages, [])
+    assert request["messages"] == []
+    assert request["system"] == [
+        {"type": "text", "text": _LONG_STABLE, "cache_control": _EPHEMERAL}
+    ]
+    assert prompt_caching.latest_message_index("anthropic.claude-opus-5-5", messages, []) is None
 
 
 def test_anthropic_sends_no_breakpoint_when_the_stable_prefix_is_under_the_minimum(
@@ -1004,7 +1141,10 @@ def test_anthropic_sends_no_breakpoint_when_the_stable_prefix_is_under_the_minim
     assert "cache_control" not in json.dumps(request)
 
 
-def test_anthropic_sends_no_breakpoint_without_a_stable_system_message(matrix: Any) -> None:
+def test_anthropic_places_only_the_latest_point_without_a_stable_system_message(
+    matrix: Any,
+) -> None:
+    """The tool definitions count toward the latest point's prefix; no system point exists."""
     tools: list[dict[str, object]] = [
         {"name": "t", "description": "d" * 4000, "input_schema": {"type": "object"}}
     ]
@@ -1012,7 +1152,10 @@ def test_anthropic_sends_no_breakpoint_without_a_stable_system_message(matrix: A
         _resolve(matrix, "anthropic", "subagent"), [{"role": "user", "content": "go"}], tools
     )
     assert "system" not in request
-    assert "cache_control" not in json.dumps(request)
+    assert request["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "go", "cache_control": _EPHEMERAL}]}
+    ]
+    assert _cache_point_count(request) == 1
 
 
 def test_the_cache_scope_marker_never_reaches_either_request(matrix: Any) -> None:
@@ -1050,6 +1193,62 @@ def test_the_breakpoint_needs_a_prefix_that_can_reach_the_model_minimum() -> Non
     assert prompt_caching.breakpoint_index("anthropic.claude-opus-5-5", at_floor, tools) == 0
     one_short = [{"role": "system", "content": "x" * (minimum * 2 - 3)}]
     assert prompt_caching.breakpoint_index("anthropic.claude-opus-5-5", one_short, tools) is None
+
+
+def test_the_latest_point_needs_a_cumulative_prefix_that_can_reach_the_model_minimum() -> None:
+    """System, conversation and tool-call characters all count toward the latest point's prefix."""
+    model_id = "anthropic.claude-opus-5-5"
+    minimum = prompt_caching.min_prefix_tokens(model_id)
+    assert minimum == 512
+    tools: list[dict[str, object]] = []
+    head: list[dict[str, object]] = [
+        {"role": "system", "content": "s" * 100},
+        {"role": "user", "content": "u" * 100},
+    ]
+    calls = [{"id": "c", "input": {}, "name": "n"}]
+    calls_characters = len(json.dumps(calls, sort_keys=True))
+    remaining = minimum * 2 - 2 - 200 - calls_characters
+
+    def turn(final: int) -> list[dict[str, object]]:
+        return [
+            *head,
+            {"role": "assistant", "content": "", "tool_calls": calls},
+            {"role": "user", "content": "x" * final},
+        ]
+
+    assert prompt_caching.latest_message_index(model_id, turn(remaining), tools) == 3
+    assert prompt_caching.latest_message_index(model_id, turn(remaining - 1), tools) is None
+
+
+def test_the_latest_point_skips_trailing_system_messages() -> None:
+    messages: list[dict[str, object]] = [
+        {"role": "user", "content": "x" * 2000},
+        {"role": "system", "content": "late briefing"},
+    ]
+    assert prompt_caching.latest_message_index("anthropic.claude-opus-5-5", messages, []) == 0
+
+
+def test_select_cache_points_keeps_at_most_the_limit_dropping_the_oldest_first() -> None:
+    six = (0, 1, 2, 3, 4, 5)
+    assert prompt_caching.ANTHROPIC_MAX_CACHE_POINTS == 4
+    assert prompt_caching.select_cache_points(six, latest=5, system=0) == (0, 3, 4, 5)
+    assert prompt_caching.select_cache_points(six, latest=None, system=None) == (2, 3, 4, 5)
+
+
+def test_select_cache_points_keeps_latest_then_system_then_the_most_recent() -> None:
+    six = (0, 1, 2, 3, 4, 5)
+    assert prompt_caching.select_cache_points(six, latest=5, system=0, limit=1) == (5,)
+    assert prompt_caching.select_cache_points(six, latest=5, system=0, limit=2) == (0, 5)
+    assert prompt_caching.select_cache_points(six, latest=5, system=0, limit=3) == (0, 4, 5)
+    assert prompt_caching.select_cache_points(six, latest=None, system=1, limit=2) == (1, 5)
+    assert prompt_caching.select_cache_points((), latest=7, system=None) == (7,)
+    assert prompt_caching.select_cache_points((3, 3), latest=3, system=3) == (3,)
+    assert prompt_caching.select_cache_points((), latest=None, system=None) == ()
+
+
+def test_select_cache_points_refuses_a_negative_limit() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        prompt_caching.select_cache_points((1,), latest=1, system=None, limit=-1)
 
 
 def test_a_volatile_message_ends_the_stable_run() -> None:

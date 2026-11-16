@@ -523,7 +523,7 @@ def test_a_get_rest_api_error_yields_a_fail_row_not_a_generator_abort() -> None:
     """A `get_rest_api` lookup failure emits a fail row rather than raising."""
     results = list(rest_api_private_vpce_only(_rest_ctx(error=_NotFoundError("no such REST API"))))
     assert [r.status for r in results] == ["fail"]
-    assert "get_rest_api" in results[0].detail
+    assert "apigateway:GetRestApi failed (ResourceNotFoundException)" in results[0].detail
 
 
 def test_an_absent_api_id_output_fails_rather_than_using_the_hostname() -> None:
@@ -882,3 +882,32 @@ def test_this_module_holds_no_second_copy_of_the_freshness_comparison() -> None:
         "scripts/outputs_provenance.py so the repository has one notion of it"
     )
     assert "assess_freshness" in source
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def test_a_credential_failure_reason_carries_the_code_never_the_message() -> None:
+    class ClientError(Exception):
+        def __init__(self) -> None:
+            super().__init__(f"token expired for {_PLANTED_ARN}")
+            self.response = {"Error": {"Code": "ExpiredToken", "Message": _PLANTED_ARN}}
+
+    class NoCredentialsError(Exception):
+        pass
+
+    assert credential_failure_reason(ClientError()) == "ExpiredToken"
+    assert credential_failure_reason(NoCredentialsError(_PLANTED_ARN)) == "NoCredentialsError"
+
+
+def test_a_rest_api_read_error_names_the_code_never_the_message() -> None:
+    from botocore.exceptions import ClientError
+
+    error = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}},
+        "GetRestApi",
+    )
+    [row] = list(rest_api_private_vpce_only(_rest_ctx(error=error)))
+    assert row.status == "fail"
+    assert "apigateway:GetRestApi failed (AccessDeniedException)" in row.detail
+    assert _PLANTED_ARN not in row.detail

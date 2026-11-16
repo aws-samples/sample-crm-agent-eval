@@ -292,3 +292,14 @@ export interface EvalTierComparisonTable {
   readonly sections: readonly EvalTierComparisonSection[];
   readonly notes: readonly string[];
 }
+
+/**
+ * The run payload's `record_format` marker: `"earlier"` when the run's stored matrix predates the
+ * current record shape. Such a payload carries no `matrix`, `tier_comparison_table` or `artifacts`.
+ */
+export type EvalRecordFormat = "earlier";
+
+/** True when the run was recorded in an earlier format, so its results are not shown. */
+export function isEarlierRecordFormat(run: { readonly record_format?: EvalRecordFormat }): boolean {
+  return run.record_format === "earlier";
+}

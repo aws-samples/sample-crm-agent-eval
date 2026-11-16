@@ -56,7 +56,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final, Protocol, cast, get_args
 
 from botocore.exceptions import BotoCoreError, ClientError, ReadTimeoutError
 
@@ -140,7 +140,7 @@ from eval.turn_observation import (
     deserialise_turn,
     serialise_turn,
 )
-from providers.capabilities import load_capability_matrix
+from providers.capabilities import Tier, load_capability_matrix
 from providers.tier_tuning import to_wire
 
 _logger = logging.getLogger(__name__)
@@ -598,6 +598,9 @@ def _require(condition: bool, field: str) -> None:
         raise ValidationFailed("A stored task result is unreadable.", source=field)
 
 
+_TASK_SCORE_TIERS: Final[frozenset[str]] = frozenset(get_args(Tier))
+
+
 def task_score_from_fields(fields: Mapping[str, Any]) -> TaskScore:
     """The inverse of :meth:`eval.scoring.TaskScore.to_report_fields`.
 
@@ -618,6 +621,20 @@ def task_score_from_fields(fields: Mapping[str, Any]) -> TaskScore:
     )
     for flag in ("bad_write", "truncated", "budget_exhausted"):
         _require(isinstance(fields.get(flag), bool), f"task_score.{flag}")
+    exhausted_tier = fields.get("budget_exhausted_tier")
+    _require(
+        exhausted_tier is None or exhausted_tier in _TASK_SCORE_TIERS,
+        "task_score.budget_exhausted_tier",
+    )
+    _require(
+        fields["budget_exhausted"] == (exhausted_tier is not None),
+        "task_score.budget_exhausted_tier",
+    )
+    repeat_index = fields.get("repeat_index")
+    _require(
+        isinstance(repeat_index, int) and not isinstance(repeat_index, bool) and repeat_index >= 0,
+        "task_score.repeat_index",
+    )
     _require(
         fields.get("tool_call_correct") is None
         or isinstance(fields.get("tool_call_correct"), bool),
@@ -649,6 +666,8 @@ def task_score_from_fields(fields: Mapping[str, Any]) -> TaskScore:
         tool_call_correct=fields.get("tool_call_correct"),
         truncated=bool(fields["truncated"]),
         budget_exhausted=bool(fields["budget_exhausted"]),
+        budget_exhausted_tier=cast(Tier | None, exhausted_tier),
+        repeat_index=cast(int, repeat_index),
         assertion_results=tuple(results),
     )
 
@@ -722,17 +741,23 @@ def turn_from_row(row: Mapping[str, object]) -> ObservedTurn:
 
 
 def unit_from_row(
-    row: Mapping[str, object], *, task: Mapping[str, object], arm_spec: ArmSpec
+    row: Mapping[str, object],
+    *,
+    task: Mapping[str, object],
+    arm_spec: ArmSpec,
+    repeat_index: int,
 ) -> TaskUnitResult:
     """Rebuild one ``done`` item's :class:`eval.sweep_units.TaskUnitResult` from its stored row.
 
-    Usage records are re-derived from the stored invocations, as :func:`run_task_unit` derives them.
+    ``repeat_index`` is the item's repeat, from its :class:`eval.sweep_units.TaskRef`. Usage
+    records are re-derived from the stored invocations, as :func:`run_task_unit` derives them.
     """
     turn = turn_from_row(row)
     task_score = task_score_from_fields(_json_field(row, "task_score"))
     task_id = task_score.task_id
     return TaskUnitResult(
         task_id=task_id,
+        repeat_index=repeat_index,
         task_score=task_score,
         tier_scores=tier_scores_from_fields(_json_field(row, "tier_scores")),
         turn=turn,
@@ -918,6 +943,7 @@ def _aggregate(
                 row,
                 task=_task_by_id(_unit_tasks(run_id, ref), ref.task_id),
                 arm_spec=DEFAULT_ARM_SPECS[ref.arm_index],
+                repeat_index=ref.repeat_index,
             )
         )
     if unrecorded:
@@ -1442,7 +1468,12 @@ def _sweep_task(
         return _invoke_eval_turn(runtime, config, request)
 
     unit = run_task_unit(
-        store=store, task=task, tenant=tenant, family=arm_spec.family, turn_runner=_turn_runner
+        store=store,
+        task=task,
+        tenant=tenant,
+        family=arm_spec.family,
+        turn_runner=_turn_runner,
+        repeat_index=ref.repeat_index,
     )
     digest = unit.turn.prompt_bundle_sha256
     if run_bundle.reference_found and digest != run_bundle.reference:

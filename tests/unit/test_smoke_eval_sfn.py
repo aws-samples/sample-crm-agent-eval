@@ -34,7 +34,7 @@ from crm.authz import DEMO_TENANT
 from crm.store.keys import SWEEP_LOCK_ROW_ID
 from crm.store.schema import TABLES
 from eval.harness import ArtifactAssertionError
-from eval.matrix import TIER_TASK_METRICS_KEY
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY, TIER_TASK_METRICS_KEY
 from eval.runs import EVAL_RUNS_TABLE
 from eval.sweep_units import DEFAULT_ARM_EFFORT
 from eval.tenancy import CANARY_TENANT, unit_tenants_for_run
@@ -70,24 +70,43 @@ def _configured(family: str, tier: str) -> str:
     return _CAPABILITIES.tiers[cast(Family, family)][cast(Tier, tier)].model_id
 
 
-def _matrix() -> dict[str, Any]:
+def _tier_task_entry(family: str, tier: str) -> dict[str, Any]:
+    truncation = None if tier == "subagent" else 0
     return {
+        "configured_model_id": _configured(family, tier),
+        "budget_exhausted_task_count": 0,
+        "truncated_tool_call_count": truncation,
+        "truncated_task_count": truncation,
+    }
+
+
+def _matrix() -> dict[str, Any]:
+    """A completed run's `matrix` in the current record shape, one arm per default-sweep family."""
+    return {
+        RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
         "arms": [
             {
+                RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
                 "provenance": {
                     "model_id": _configured(family, "supervisor"),
                     "effort": DEFAULT_ARM_EFFORT,
                     "prompt_bundle_sha256": prompt_bundle_sha256(),
+                    "prompt_caching": f"{family}: recorded caching method",
                 },
-                "tier_summary": {tier: {} for tier in TIERS},
-                TIER_TASK_METRICS_KEY: {
-                    "by_tier": {
-                        tier: {"configured_model_id": _configured(family, tier)} for tier in TIERS
+                "tier_summary": {
+                    tier: {
+                        "total_prompt_tokens": 4096,
+                        "cache_read_tokens": 1024,
+                        "cache_write_tokens": 512,
                     }
+                    for tier in TIERS
+                },
+                TIER_TASK_METRICS_KEY: {
+                    "by_tier": {tier: _tier_task_entry(family, tier) for tier in TIERS}
                 },
             }
             for family in _FAMILIES
-        ]
+        ],
     }
 
 
@@ -474,6 +493,7 @@ _STUB_FLOW_CHECKS = (
     "unit_tenants_recorded",
     "unit_tenants_seeded",
     "run_completed_all_tasks",
+    "matrix_is_record_shape_3",
     "run_records_repeats",
     *(f"arm_effort_is_default:{family}" for family in _FAMILIES),
     *(f"arm_models_are_configured:{family}" for family in _FAMILIES),
@@ -486,6 +506,7 @@ _STUB_FLOW_CHECKS = (
     "artefact_url_plain_http_denied",
     "artefact_url_tampered_key_denied",
     "status_carries_tier_comparison_table",
+    "subagent_table_has_no_delegation_outcome_rows",
     "matrix_md_download_is_attachment",
     "matrix_md_download_bytes_match_artefact",
     "rehearsal_tenant_empty",
@@ -1338,7 +1359,7 @@ def test_a_simulate_client_error_is_a_failing_row_never_a_skip() -> None:
     assert _failing(rows) == xray_rows
     for check in xray_rows:
         assert rows[check].status == "fail"
-        assert "ClientError" in rows[check].detail, rows[check].detail
+        assert "failed (InvalidInput)" in rows[check].detail, rows[check].detail
 
 
 def test_the_role_simulations_run_before_any_sweep_is_submitted() -> None:
@@ -2497,3 +2518,347 @@ def test_a_run_without_a_matrix_md_artefact_fails_both_download_rows() -> None:
 def test_get_artefact_refuses_a_non_https_url() -> None:
     with pytest.raises(ValueError, match="non-https"):
         mod.get_artefact("http://bucket.s3.amazonaws.com/k")
+
+
+# ---------------------------------------------------------------------------
+# AWS failures are reported by operation and code, never by message.
+# ---------------------------------------------------------------------------
+
+_PLANTED_ARN = "arn:aws:sts::" + "1234" + "5678" + "9012" + ":assumed-role/x/y"
+
+
+def _planted_client_error(operation: str) -> ClientError:
+    """An AccessDenied `ClientError` whose message names a caller ARN."""
+    exc = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} is not authorized"}},
+        operation,
+    )
+    assert _PLANTED_ARN in str(exc)
+    return exc
+
+
+def _assert_code_not_message(detail: str) -> None:
+    assert "(AccessDenied)" in detail, detail
+    assert _PLANTED_ARN not in detail and "assumed-role" not in detail, detail
+
+
+def test_an_unreadable_catalog_row_omits_the_aws_error_message() -> None:
+    api = FakeEvalApi()
+    store = FakeStore(api)
+    store.catalog_error = _planted_client_error("GetItem")
+    row = _run(api, store=store)["tenant_emptied_by_the_workers_own_role"]
+    assert row.status == "fail"
+    _assert_code_not_message(row.detail)
+
+
+def test_a_raising_explicit_deny_simulation_omits_the_aws_error_message() -> None:
+    class DeniedIam:
+        def simulate_principal_policy(self, **_kwargs: Any) -> dict[str, Any]:
+            raise _planted_client_error("SimulatePrincipalPolicy")
+
+    row = next(r for r in _sweep_rows() if isinstance(r, mod.ExplicitDenyRow))
+    result = mod.explicit_deny_result(DeniedIam(), row, resource="eval_sweep_roles")
+    assert result.status == "fail"
+    _assert_code_not_message(result.detail)
+
+
+def test_a_raising_reap_count_omits_the_aws_error_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    def denied(_store: Any, _tenant: str) -> dict[str, int]:
+        raise _planted_client_error("Query")
+
+    monkeypatch.setattr(mod, "tenant_row_counts", denied)
+    rows = list(mod._reap_tenant(object(), "eval-run0001"))
+    assert [r.check for r in rows] == ["leftover_tenant_counted"]
+    _assert_code_not_message(rows[0].detail)
+
+
+def test_a_failed_reap_teardown_omits_the_wrapped_aws_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from eval.tenancy import TenantTeardownError
+
+    def denied_teardown(_store: Any, *, tenant: str) -> dict[str, int]:
+        cause = _planted_client_error("BatchWriteItem")
+        raise TenantTeardownError(tenant, deleted=None, cause=cause) from cause
+
+    monkeypatch.setattr(mod, "tenant_row_counts", lambda _store, _tenant: {"accounts": 1})
+    monkeypatch.setattr(mod, "teardown_tenant", denied_teardown)
+    rows = list(mod._reap_tenant(object(), "eval-run0001"))
+    assert [r.check for r in rows] == ["leftover_tenant_reaped"] and rows[0].status == "fail"
+    _assert_code_not_message(rows[0].detail)
+
+
+# ---------------------------------------------------------------------------
+# A run record's `error` text is classified, never re-emitted.
+# ---------------------------------------------------------------------------
+
+_PLANTED_RUN_ERROR = (
+    f"step failed: ClientError: User: {_PLANTED_ARN} is not authorized to perform: s3:PutObject"
+)
+
+
+def _assert_run_error_withheld(detail: str) -> None:
+    assert "present (ClientError)" in detail, detail
+    assert _PLANTED_ARN not in detail and "assumed-role" not in detail, detail
+    assert "not authorized" not in detail and "s3:PutObject" not in detail, detail
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (_PLANTED_RUN_ERROR, "present (ClientError)"),
+        ("step failed: States.Timeout", "present (States.Timeout)"),
+        ("step failed: States.Timeout; 2 task(s) failed (anthropic=2)", "present (States.Timeout)"),
+        (f"step failed: {_PLANTED_ARN}: denied", "present"),
+        (f"User: {_PLANTED_ARN} is not authorized", "present (User)"),
+        ("teardown failed: TenantTeardownError: rows left", "present"),
+        ("2 task(s) failed (openai=2)", "present"),
+        ("An administrator (rep r-1) released the sweep lock.", "present"),
+        ({"Error": "ClientError", "Cause": _PLANTED_ARN}, "present"),
+    ],
+)
+def test_error_classification_keeps_only_an_identifier_shaped_leading_token(
+    error: object, expected: str | None
+) -> None:
+    assert mod.error_classification(error) == expected
+
+
+def test_a_completed_record_check_withholds_the_run_error_text() -> None:
+    run: dict[str, Any] = {
+        "status": "failed",
+        "tasks_total": _TOTAL,
+        "tasks_done": _TOTAL,
+        "tasks_failed": 0,
+        "teardown_status": "ok",
+        "matrix": _matrix(),
+        "error": _PLANTED_RUN_ERROR,
+    }
+    row = mod.check_completed_record(run, expected_total=_TOTAL, arm_count=2)
+    assert row.status == "fail"
+    assert "error='present (ClientError)'" in row.detail
+    _assert_run_error_withheld(row.detail)
+
+
+def test_a_completed_record_without_an_error_reports_none() -> None:
+    run: dict[str, Any] = {"status": "completed", "matrix": _matrix()}
+    row = mod.check_completed_record(run, expected_total=_TOTAL, arm_count=2)
+    assert "error=None" in row.detail
+
+
+def test_the_artefact_checks_withhold_the_run_error_text_of_a_record_without_artefacts() -> None:
+    api = mod.RunApi(FakeEvalApi(), "id-token")
+    run = {"run_id": "run0001", "status": "failed", "error": _PLANTED_RUN_ERROR}
+    url_rows = list(mod.check_artefact_url(api, run))
+    md_rows = list(mod.check_matrix_md_download(api, run))
+    assert [r.check for r in url_rows] == ["artefact_url_issued"]
+    assert [r.check for r in md_rows] == [
+        "matrix_md_download_is_attachment",
+        "matrix_md_download_bytes_match_artefact",
+    ]
+    for row in (*url_rows, *md_rows):
+        assert row.status == "fail"
+        _assert_run_error_withheld(row.detail)
+
+
+class _ErrorRecordingApi(FakeEvalApi):
+    """A :class:`FakeEvalApi` whose every status answer carries `error`; with `ignore_cancel` a
+    cancelled run stays non-terminal."""
+
+    def __init__(self, *, error: str, ignore_cancel: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.error = error
+        self.ignore_cancel = ignore_cancel
+
+    def _advance(self, run: dict[str, Any]) -> None:
+        run["error"] = self.error
+        if self.ignore_cancel and run["cancel_requested"]:
+            return
+        super()._advance(run)
+
+
+def test_a_rehearsal_that_never_finishes_withholds_the_run_error_text() -> None:
+    row = _run(_ErrorRecordingApi(error=_PLANTED_RUN_ERROR, stuck=True))[
+        "rehearsal_reached_terminal"
+    ]
+    assert row.status == "fail"
+    _assert_run_error_withheld(row.detail)
+
+
+def test_a_cancel_proof_without_progress_withholds_the_run_error_text() -> None:
+    row = _run(_ErrorRecordingApi(error=_PLANTED_RUN_ERROR, step=_REHEARSAL_TOTAL))[
+        "cancel_proof_reached_progress"
+    ]
+    assert row.status == "fail"
+    _assert_run_error_withheld(row.detail)
+
+
+def test_a_cancel_proof_that_never_terminates_withholds_the_run_error_text() -> None:
+    row = _run(_ErrorRecordingApi(error=_PLANTED_RUN_ERROR, ignore_cancel=True))[
+        "cancel_proof_reached_terminal"
+    ]
+    assert row.status == "fail"
+    _assert_run_error_withheld(row.detail)
+
+
+def test_a_live_sweep_that_never_finishes_withholds_the_run_error_text() -> None:
+    row = _live(_ErrorRecordingApi(error=_PLANTED_RUN_ERROR, stuck=True), _retention_ok)[
+        "live_sweep_reached_terminal"
+    ]
+    assert row.status == "fail"
+    _assert_run_error_withheld(row.detail)
+
+
+# --- record shape 3 on the completed rehearsal ---
+
+
+def _shape_row(matrix: Any) -> CheckResult:
+    return mod.check_record_shape({"matrix": matrix})
+
+
+def test_a_current_shape_matrix_passes_the_record_shape_row() -> None:
+    row = _shape_row(_matrix())
+    assert (row.check, row.status) == (f"matrix_is_record_shape_{RECORD_SHAPE_VERSION}", "pass")
+
+
+def _drop(path: tuple[Any, ...]) -> Callable[[dict[str, Any]], None]:
+    def mutate(matrix: dict[str, Any]) -> None:
+        node: Any = matrix
+        for key in path[:-1]:
+            node = node[key]
+        del node[path[-1]]
+
+    return mutate
+
+
+def _set(path: tuple[Any, ...], value: object) -> Callable[[dict[str, Any]], None]:
+    def mutate(matrix: dict[str, Any]) -> None:
+        node: Any = matrix
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return mutate
+
+
+_BY_TIER = (TIER_TASK_METRICS_KEY, "by_tier")
+_SHAPE_MUTATIONS: dict[str, Callable[[dict[str, Any]], None]] = {
+    "matrix_version_absent": _drop((RECORD_SHAPE_VERSION_KEY,)),
+    "matrix_version_1": _set((RECORD_SHAPE_VERSION_KEY,), 1),
+    "matrix_version_3": _set((RECORD_SHAPE_VERSION_KEY,), RECORD_SHAPE_VERSION + 1),
+    "arm_version_absent": _drop(("arms", 1, RECORD_SHAPE_VERSION_KEY)),
+    "prompt_caching_absent": _drop(("arms", 0, "provenance", "prompt_caching")),
+    "prompt_caching_empty": _set(("arms", 1, "provenance", "prompt_caching"), ""),
+    "prompt_caching_not_str": _set(("arms", 0, "provenance", "prompt_caching"), ["x"]),
+    **{
+        f"tier_summary_{tier}_{field}_absent": _drop(("arms", 0, "tier_summary", tier, field))
+        for tier in TIERS
+        for field in mod.RECORD_SHAPE_TIER_SUMMARY_FIELDS
+    },
+    "tier_summary_cache_read_null": _set(
+        ("arms", 1, "tier_summary", "tool", "cache_read_tokens"), None
+    ),
+    "tier_summary_total_prompt_bool": _set(
+        ("arms", 1, "tier_summary", "supervisor", "total_prompt_tokens"), True
+    ),
+    **{
+        f"by_tier_{tier}_{field}_absent": _drop(("arms", 0, *_BY_TIER, tier, field))
+        for tier in TIERS
+        for field in mod.RECORD_SHAPE_TIER_TASK_FIELDS
+    },
+    "by_tier_subagent_budget_null": _set(
+        ("arms", 1, *_BY_TIER, "subagent", "budget_exhausted_task_count"), None
+    ),
+    "by_tier_supervisor_truncated_calls_null": _set(
+        ("arms", 1, *_BY_TIER, "supervisor", "truncated_tool_call_count"), None
+    ),
+    "by_tier_tool_truncated_tasks_null": _set(
+        ("arms", 0, *_BY_TIER, "tool", "truncated_task_count"), None
+    ),
+    "by_tier_subagent_truncated_calls_int": _set(
+        ("arms", 0, *_BY_TIER, "subagent", "truncated_tool_call_count"), 0
+    ),
+    "by_tier_subagent_truncated_tasks_int": _set(
+        ("arms", 1, *_BY_TIER, "subagent", "truncated_task_count"), 0
+    ),
+    "by_tier_tool_entry_absent": _drop(("arms", 0, *_BY_TIER, "tool")),
+    "arms_empty": _set(("arms",), []),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_SHAPE_MUTATIONS))
+def test_each_missing_or_wrong_shape_field_fails_the_row_and_is_named(name: str) -> None:
+    matrix = _matrix()
+    _SHAPE_MUTATIONS[name](matrix)
+    row = _shape_row(matrix)
+    assert row.status == "fail"
+    assert row.detail
+
+
+def test_the_record_shape_row_names_the_failing_field() -> None:
+    matrix = _matrix()
+    del matrix["arms"][1]["tier_summary"]["subagent"]["cache_write_tokens"]
+    row = _shape_row(matrix)
+    assert row.detail == "arms[1].tier_summary.subagent.cache_write_tokens=None"
+
+
+@pytest.mark.parametrize("matrix", [_ABSENT, None, "matrix"], ids=["absent", "null", "string"])
+def test_a_run_without_a_matrix_fails_the_record_shape_row(matrix: object) -> None:
+    run: dict[str, Any] = {} if matrix is _ABSENT else {"matrix": matrix}
+    assert mod.check_record_shape(run).status == "fail"
+
+
+def test_a_live_sweep_record_in_an_earlier_shape_fails_its_record_shape_row() -> None:
+    class _EarlierShapeApi(FakeEvalApi):
+        def _finish(self, run: dict[str, Any], status: str) -> None:
+            super()._finish(run, status)
+            run["matrix"].pop(RECORD_SHAPE_VERSION_KEY)
+
+    by_check = _live(_EarlierShapeApi(step=_TOTAL), _retention_ok)
+    assert by_check["run_completed_all_tasks"].status == "pass"
+    assert by_check[f"matrix_is_record_shape_{RECORD_SHAPE_VERSION}"].status == "fail"
+
+
+def test_a_rehearsal_whose_table_keeps_delegation_rows_fails_only_that_row() -> None:
+    class _DelegationRowsApi(FakeEvalApi):
+        def _finish(self, run: dict[str, Any], status: str) -> None:
+            super()._finish(run, status)
+            run["tier_comparison_table"]["sections"][1]["rows"].append(
+                ["Delegation outcome: data", "1", "1"]
+            )
+
+    by_check = _run(_DelegationRowsApi())
+    failing = {c for c, r in by_check.items() if r.status != "pass"}
+    assert failing == {"subagent_table_has_no_delegation_outcome_rows"}
+
+
+# --- the Subagent section carries no delegation-outcome row ---
+
+
+def test_a_subagent_section_without_delegation_rows_passes() -> None:
+    row = mod.check_subagent_table_has_no_delegation_rows(
+        {"tier_comparison_table": _tier_table(len(_FAMILIES))}
+    )
+    assert (row.check, row.status) == ("subagent_table_has_no_delegation_outcome_rows", "pass")
+
+
+def _with_subagent_rows(rows: list[Any]) -> dict[str, Any]:
+    table = _tier_table(len(_FAMILIES))
+    table["sections"][1]["rows"] = rows
+    return {"tier_comparison_table": table}
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        _with_subagent_rows([["Model", "m", "m"], ["Delegation outcome: data", "1", "1"]]),
+        _with_subagent_rows([["Delegation outcome: none", "0", "0"]]),
+        _with_subagent_rows([]),
+        {"tier_comparison_table": {**_tier_table(len(_FAMILIES)), "sections": []}},
+        {},
+    ],
+    ids=["delegation_row", "only_delegation_row", "no_rows", "no_subagent_section", "no_table"],
+)
+def test_a_delegation_row_or_missing_subagent_section_fails(run: Mapping[str, Any]) -> None:
+    assert mod.check_subagent_table_has_no_delegation_rows(run).status == "fail"

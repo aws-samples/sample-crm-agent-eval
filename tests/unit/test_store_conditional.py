@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-"""`Store.update_item`, `Store.put_if_absent`, `query_gsi` ordering, and the key builders
-`user_settings_key`, `conversation_key`, `eval_result_id` and `SWEEP_LOCK_ROW_ID`.
+"""`Store.update_item`, `Store.put_if_absent`, `Store.put_conditional`, `query_gsi` ordering, and
+the key builders `user_settings_key`, `conversation_key`, `history_key`, `eval_result_id` and
+`SWEEP_LOCK_ROW_ID`.
 
 Runs against a `moto`-mocked DynamoDB client; AWS error translation uses a client raising a real
 `botocore` `ClientError`.
@@ -77,6 +78,18 @@ def test_conversation_key_rejects_an_empty_id() -> None:
         keys.conversation_key("")
 
 
+def test_history_key_has_the_documented_format() -> None:
+    """The conversation-history item key is `history#<tenant>#<session_id>`."""
+    assert keys.history_key("demo", "s-1") == "history#demo#s-1"
+
+
+@pytest.mark.parametrize(("tenant", "session_id"), [("", "s-1"), ("demo", "")])
+def test_history_key_rejects_an_empty_part(tenant: str, session_id: str) -> None:
+    """An empty tenant or session id cannot form a history key."""
+    with pytest.raises(ValueError, match="non-empty"):
+        keys.history_key(tenant, session_id)
+
+
 def test_sweep_lock_row_id_is_the_fixed_lock_key() -> None:
     """The single-flight lock row is `lock#sweep`."""
     assert keys.SWEEP_LOCK_ROW_ID == "lock#sweep"
@@ -135,6 +148,74 @@ def test_put_if_absent_wraps_a_non_conditional_aws_error() -> None:
     with pytest.raises(CrmError) as excinfo:
         store.put_if_absent("eval_runs", {"run_id": "x"})
     assert isinstance(excinfo.value.__cause__, ClientError)
+
+
+# -- put_conditional -------------------------------------------------------------------------------
+
+
+def _versioned(version: int, holder: str) -> dict[str, object]:
+    return {"rep_id": "history#demo#s-1", "version": version, "holder": holder}
+
+
+def _held(store: Store) -> dict[str, object] | None:
+    return store.get_item("reps", {"rep_id": "history#demo#s-1"})
+
+
+def test_put_conditional_without_a_version_creates_a_missing_item(store: Store) -> None:
+    """`expected_version=None` writes when no item exists and reports `True`."""
+    assert store.put_conditional("reps", _versioned(1, "a"), expected_version=None)
+    assert _held(store) == _versioned(1, "a")
+
+
+def test_put_conditional_without_a_version_refuses_an_existing_item(store: Store) -> None:
+    """`expected_version=None` on an existing item reports `False` and leaves it unchanged."""
+    store.put_conditional("reps", _versioned(1, "a"), expected_version=None)
+    assert not store.put_conditional("reps", _versioned(1, "b"), expected_version=None)
+    assert _held(store) == _versioned(1, "a")
+
+
+def test_put_conditional_replaces_an_item_at_the_expected_version(store: Store) -> None:
+    """A matching stored `version` lets the write replace the item."""
+    store.put_conditional("reps", _versioned(1, "a"), expected_version=None)
+    assert store.put_conditional("reps", _versioned(2, "b"), expected_version=1)
+    assert _held(store) == _versioned(2, "b")
+
+
+@pytest.mark.parametrize("stale", [0, 2])
+def test_put_conditional_refuses_a_stale_version(store: Store, stale: int) -> None:
+    """A stored `version` other than the expected one reports `False` and does not overwrite."""
+    store.put_conditional("reps", _versioned(1, "a"), expected_version=None)
+    assert not store.put_conditional("reps", _versioned(stale + 1, "b"), expected_version=stale)
+    assert _held(store) == _versioned(1, "a")
+
+
+def test_put_conditional_with_a_version_refuses_a_missing_item(store: Store) -> None:
+    """An expected version on an absent item is a lost race, not a create."""
+    assert not store.put_conditional("reps", _versioned(2, "a"), expected_version=1)
+    assert _held(store) is None
+
+
+def test_put_conditional_recomputes_derived_attributes(store: Store) -> None:
+    """A versioned put writes the derived index attributes like `put_item` does."""
+    item = {"run_id": "r1", "result_id": "00#t1", "task_id": "t1", "version": 1}
+    assert store.put_conditional("eval_results", item, expected_version=None)
+    stored = store.get_item("eval_results", {"run_id": "r1", "result_id": "00#t1"})
+    assert stored is not None and stored["run_id_task_id"] == "r1#t1"
+
+
+@pytest.mark.parametrize("expected_version", [None, 1])
+def test_put_conditional_wraps_a_non_conditional_aws_error(expected_version: int | None) -> None:
+    """Any AWS error other than a failed condition becomes a taxonomy error, not `False`."""
+    store = Store(client=_RaisingClient("InternalServerError"))
+    with pytest.raises(CrmError) as excinfo:
+        store.put_conditional("reps", _versioned(1, "a"), expected_version=expected_version)
+    assert isinstance(excinfo.value.__cause__, ClientError)
+
+
+def test_put_conditional_maps_conditional_check_failed_to_false() -> None:
+    """The engine's failed-condition code is the only one reported as `False`."""
+    store = Store(client=_RaisingClient("ConditionalCheckFailedException"))
+    assert store.put_conditional("reps", _versioned(1, "a"), expected_version=1) is False
 
 
 # -- update_item -----------------------------------------------------------------------------------

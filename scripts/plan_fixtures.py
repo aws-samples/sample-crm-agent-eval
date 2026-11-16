@@ -41,7 +41,7 @@ BASE_PATH: Final[Path] = REPO_ROOT / "tests" / "fixtures" / "plans" / "compliant
 DEFAULT_OUT_DIR: Final[Path] = REPO_ROOT / "results" / "plan-fixtures"
 
 #: Top-level fields kept out of the base so no scanner reads it as a plan; restored by `build`.
-TERRAFORM_VERSION: Final[str] = "1.17.0"
+TERRAFORM_VERSION: Final[str] = "1.17.2"
 TIMESTAMP: Final[str] = "2026-11-07T02:10:46Z"
 
 HEADER_KEYS: Final[frozenset[str]] = frozenset(

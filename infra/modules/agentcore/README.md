@@ -67,7 +67,7 @@ build reads the agent-source object from that bucket).
 `runtime.tf` sets no `capacity_provider_configuration`. That argument is what opts a runtime into the
 **Instances** compute type, which bills continuously; without it the runtime uses the default
 microVM/consumption compute type, billed per second while active and nothing at idle. The pinned
-`hashicorp/aws` 6.71.0 schema for `aws_bedrockagentcore_agent_runtime` has no
+`hashicorp/aws` 6.72.0 schema for `aws_bedrockagentcore_agent_runtime` has no
 `capacity_provider_configuration` argument, so the omission is structural.
 
 To check any `aws_bedrockagentcore_*` argument against the provider schema:

@@ -185,6 +185,8 @@ fi
 command -v aws >/dev/null 2>&1 || die "aws CLI not found on PATH"
 command -v terraform >/dev/null 2>&1 || die "terraform not found on PATH"
 command -v python3 >/dev/null 2>&1 || die "python3 not found on PATH"
+REPO_PYTHON="$("${SCRIPT_DIR}/repo_python.sh" --print)" \
+    || die "no interpreter for the repository's Python scripts (see above); nothing was applied."
 
 info "Resolved profile=${RESOLVED_PROFILE} region=${RESOLVED_REGION}"
 
@@ -245,7 +247,7 @@ restore_template() {
     RESTORED=true
     if [[ -f "$BACKUP_PATH" ]]; then
         info "Restoring account-agnostic AgentCore config template"
-        python3 "$RENDER_SCRIPT" restore --template "$TEMPLATE_PATH" --backup "$BACKUP_PATH" \
+        "$REPO_PYTHON" "$RENDER_SCRIPT" restore --template "$TEMPLATE_PATH" --backup "$BACKUP_PATH" \
             || warn "Restore of ${TEMPLATE_PATH} from ${BACKUP_PATH} failed — manual restore required"
     fi
 }
@@ -257,12 +259,12 @@ if [[ ! -f "$TEMPLATE_PATH" ]]; then
     warn "AgentCore config template not found at ${TEMPLATE_PATH} — skipping render step"
 else
     if [[ -f "$BACKUP_PATH" ]]; then
-        die "A pre-render backup already exists at ${BACKUP_PATH}: a previous run did not restore ${TEMPLATE_PATH}, so it may still hold rendered account-specific values. Restore it first (python3 ${RENDER_SCRIPT} restore --template ${TEMPLATE_PATH} --backup ${BACKUP_PATH}), then re-run."
+        die "A pre-render backup already exists at ${BACKUP_PATH}: a previous run did not restore ${TEMPLATE_PATH}, so it may still hold rendered account-specific values. Restore it first (${REPO_PYTHON} ${RENDER_SCRIPT} restore --template ${TEMPLATE_PATH} --backup ${BACKUP_PATH}), then re-run."
     fi
     info "Rendering account-specific AgentCore config"
     VALUES_JSON="$(python3 -c "import json,sys; print(json.dumps({'ACCOUNT_ID': sys.argv[1], 'AWS_REGION': sys.argv[2], 'AWS_PROFILE': sys.argv[3]}))" \
         "$ACCOUNT_ID" "$RESOLVED_REGION" "$RESOLVED_PROFILE")"
-    python3 "$RENDER_SCRIPT" render \
+    "$REPO_PYTHON" "$RENDER_SCRIPT" render \
         --template "$TEMPLATE_PATH" \
         --backup "$BACKUP_PATH" \
         --values-json "$VALUES_JSON" \
@@ -284,7 +286,7 @@ fi
 # Runs first, before the zip checks. Exit 3 (the gate verified nothing) is fatal here.
 info "Verifying no resource is internet-facing (scripts/check_no_public_exposure.py)"
 EXPOSURE_CHECK_PYTHON="${REPO_ROOT}/.venv/bin/python3"
-[[ -x "$EXPOSURE_CHECK_PYTHON" ]] || EXPOSURE_CHECK_PYTHON="python3"
+[[ -x "$EXPOSURE_CHECK_PYTHON" ]] || EXPOSURE_CHECK_PYTHON="$REPO_PYTHON"
 set +e
 (cd "$REPO_ROOT" && "$EXPOSURE_CHECK_PYTHON" scripts/check_no_public_exposure.py)
 exposure_status=$?
@@ -324,7 +326,7 @@ PYEOF
 }
 
 TFVARS_PYTHON="${REPO_ROOT}/.venv/bin/python3"
-[[ -x "$TFVARS_PYTHON" ]] || TFVARS_PYTHON="python3"
+[[ -x "$TFVARS_PYTHON" ]] || TFVARS_PYTHON="$REPO_PYTHON"
 
 PF_VPC_ID="$(tfvars_value vpc_id)"
 PF_SUBNETS="$(tfvars_value vpc_private_subnet_ids)"
@@ -369,13 +371,13 @@ info "Verifying the adopted VPC is safe to apply into (scripts/preflight_adopted
 info "Verifying every Lambda zip matches the current source tree (scripts/check_lambda_zip_imports.py)"
 ZIP_CHECK_PYTHON="${REPO_ROOT}/.venv/bin/python3"
 if [[ ! -x "$ZIP_CHECK_PYTHON" ]]; then
-    warn "No ${REPO_ROOT}/.venv/bin/python3; falling back to the ambient python3 for the zip and parity gates"
-    ZIP_CHECK_PYTHON="python3"
+    warn "No ${REPO_ROOT}/.venv/bin/python3; falling back to ${REPO_PYTHON} for the zip and parity gates"
+    ZIP_CHECK_PYTHON="$REPO_PYTHON"
 fi
 
 # The post-apply parity gate imports boto3, so its absence is reported here, before the apply.
 if ! "$ZIP_CHECK_PYTHON" -c 'import boto3' >/dev/null 2>&1; then
-    die "the interpreter running the deploy-time gates ('${ZIP_CHECK_PYTHON}') cannot import boto3, which the post-apply deployed<->zip parity gate needs. Create the project virtualenv and install the pinned dependencies, then re-run this deploy: python3 -m venv ${REPO_ROOT}/.venv && ${REPO_ROOT}/.venv/bin/pip install -r ${REPO_ROOT}/requirements.txt — nothing was applied."
+    die "the interpreter running the deploy-time gates ('${ZIP_CHECK_PYTHON}') cannot import boto3, which the post-apply deployed<->zip parity gate needs. Create the project virtualenv and install the pinned dependencies, then re-run this deploy: python$(cut -d. -f1,2 "${REPO_ROOT}/.python-version") -m venv ${REPO_ROOT}/.venv && ${REPO_ROOT}/.venv/bin/pip install -r ${REPO_ROOT}/requirements.txt — nothing was applied."
 fi
 (cd "$REPO_ROOT" && "$ZIP_CHECK_PYTHON" scripts/check_lambda_zip_imports.py --require-zips) \
     || die "Lambda zips are stale, incomplete or missing relative to src/. Run scripts/package_lambdas.sh and re-run this deploy; nothing was applied."
@@ -478,7 +480,7 @@ check_drift_bound() {
             warn "terraform show -json over the saved post-apply plan failed; the classifier will run without attribute-level detail and will refuse to absorb a deferred policy-document re-render. See ${LOG_FILE}"
         fi
         set +e
-        DRIFT_SUMMARY="$(python3 "${SCRIPT_DIR}/classify_post_apply_drift.py" "${CLASSIFY_ARGS[@]}")"
+        DRIFT_SUMMARY="$("$REPO_PYTHON" "${SCRIPT_DIR}/classify_post_apply_drift.py" "${CLASSIFY_ARGS[@]}")"
         CLASSIFY_RC=$?
         set -e
         # `${DRIFT_SUMMARY}` carries the classifier's attribution of which allowance applied.
@@ -638,7 +640,7 @@ python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isins
     "${OUTPUTS_SNAPSHOT}.partial" 2>>"$LOG_FILE" \
     || outputs_write_failed "the recorded document is not a non-empty JSON object"
 # Stamped before the atomic install, so no reader sees the snapshot without its provenance.
-python3 "${SCRIPT_DIR}/outputs_provenance.py" --stamp "${OUTPUTS_SNAPSHOT}.partial" 2>>"$LOG_FILE" \
+"$REPO_PYTHON" "${SCRIPT_DIR}/outputs_provenance.py" --stamp "${OUTPUTS_SNAPSHOT}.partial" 2>>"$LOG_FILE" \
     || outputs_write_failed "recording the snapshot's provenance commit failed"
 mv "${OUTPUTS_SNAPSHOT}.partial" "$OUTPUTS_SNAPSHOT" \
     || outputs_write_failed "the atomic install (mv) failed"

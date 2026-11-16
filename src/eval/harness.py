@@ -231,7 +231,7 @@ def _git_revision() -> str:
             timeout=5,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return "unknown"
     revision = completed.stdout.strip()
     return revision if completed.returncode == 0 and revision else "unknown"
@@ -721,7 +721,7 @@ def _run_arm(
     else:
         raise ValueError("_run_arm needs a tenant or unit_tenants")
     units: list[TaskUnitResult] = []
-    for unit_tenant, localized in unit_tasks:
+    for repeat_index, (unit_tenant, localized) in enumerate(unit_tasks):
         if cost_guard is not None:
             cost_guard.before_unit()
         repeat_units = [
@@ -731,6 +731,7 @@ def _run_arm(
                 tenant=unit_tenant,
                 family=arm_spec.family,
                 turn_runner=_turn_runner,
+                repeat_index=repeat_index,
             )
             for task in localized
         ]

@@ -161,8 +161,40 @@ A deployed sweep (the `eval_sweep` state machine, see `docs/runbook.md`) runs ea
 calls, 1,000,000 tokens and a 120-second wall clock. The 120-second cap is soft. When it is reached,
 every pending model wait ends, the turn stops with `error_kind` `budget_exhausted`, and the partial
 turn is scored against committed state like any other, with `budget_exhausted: true` on its result.
+Each task score also records `budget_exhausted_tier`, the tier whose budget ran out (`null` when it
+did not), and `repeat_index`, the repeat the run belonged to (from 0), so a raw archive keeps both
+per run rather than only as per-arm counts.
 At 150 seconds (30 seconds past the soft cap) the Runtime cancels the turn at its next await and
 answers 504, so a turn that cannot unwind in time fails rather than hanging the sweep.
+
+**Leaf calls are charged as they are dispatched.** Every leaf tool call inside a delegation is
+charged against the turn's 25-call cap before it runs. At the cap the leaf is refused rather than
+run, the refusal is logged as `tool_call_refused`, and ToolCall is recorded as the exhaustion tier.
+The delegation stops there and returns what it had gathered, so a turn can no longer overrun the
+cap inside a delegation and be charged only after it returns. The supervisor's direct calls count
+against the same cap as they complete, and its loop stops the turn when the cap is reached.
+
+### The tool-output bound
+
+Every tool result is bounded before a model sees it, on every path: the supervisor's direct calls,
+leaf calls inside a delegation, and provider-reported tool events. Size is measured as the UTF-8
+length of the result's Python `repr`, not its JSON. A result over 32,768 bytes
+(`TOOL_RESULT_BYTE_CEILING` in `src/agents/events.py`) keeps as many whole records of
+its record list as fit, gains a truncation marker record, and carries `truncated: true`. A result
+under the ceiling is passed unchanged. The model receives the bounded copy, and the tool call's
+attribution records the same flag, so the truncation rows of the tier comparison count what the
+model was actually given. A delegation one of whose leaves was bounded reports itself truncated.
+
+The dataset makes the bound reachable. Planted defect PD-08 adds 55 activities to `opp-0000`, so even
+that opportunity's 50 smallest activities together exceed the ceiling. `gt-05`
+asks for every activity on `opp-0000` and so exercises truncation: its listing reaches the model
+truncated and disclosed, and a summary that hides the truncation is scored as `silent_truncation`.
+`gt-01` and `gt-17`, which also read `opp-0000`, keep the fields they score after the bound.
+
+**`gt-04` fits the budget.** `gt-04` is scoped to rep-ashford's opportunities on `acct-0000` and
+expects reads of all four whose primary contact (`cont-0000`) has departed (`opp-0000`, `opp-0040`,
+`opp-0080` and `opp-0200`). It completes within 20 tool calls whether the work is done directly or
+in two research delegations, so it measures a multi-record investigation inside the 25-call cap.
 
 A model call or round that the deadline cut off, or that the turn stopped, before it reported usage
 leaves its tokens uncounted, so that turn's usage and cost are a **lower bound**. A call cut off after
@@ -254,22 +286,52 @@ Every table has these rows, in this order:
 | Task completion over repeats | `rate (completed/applicable, majority of N)`. A task counts as completed at the tier when it passed in a strict majority of the repeats in which the tier was applicable (`passes × 2 > applicable repeats`), and as applicable when the tier applied in any repeat. With one repeat it equals the task completion rate. `n/a` when an archive has no tier scores. |
 | Task accuracy | Supervisor: the arm's `mean_correctness`. Subagent and ToolCall: the completion rate. |
 | Cost per completed task | The tier's total cost divided by its completed-task count, including spend on tasks that did not complete; `—` at zero completions. |
-| P95 latency per completed task (ms) | Per task completed at the tier, the sum of that tier's measured call latencies in the task; nearest-rank P95 over those tasks, shown with n. |
-| P50 latency per completed task (ms) | As above, at P50. |
+| P50 latency per completed task (ms) | Per task completed at the tier, the sum of that tier's measured call latencies in the task; nearest-rank P50 over those tasks, shown with n. |
+| P95 latency per completed task (ms) | As above, at P95. |
 | Model invocations | Included invocations at the tier. |
-| Long-context invocations | The tier's included invocations priced at the invoked model's long-context rates (see Usage and cost); `—` for a run recorded before the count existed. |
-| Input tokens | The tier's input tokens, in each family's own accounting. |
-| Output tokens | The tier's output tokens. |
-| Cost per task, all tasks | The tier's total cost divided by the number of tasks the arm ran. |
+| Long-context invocations | The tier's included invocations priced at the invoked model's long-context rates (see Usage and cost). |
+| Total input tokens | The tier's whole prompt, summed per call: reported input plus cache read plus cache write for Anthropic, and reported input for OpenAI, or that call's cache read plus cache write where they exceed it (see Usage and cost). Counted the same way for every family. |
+| Cache read tokens | The tier's prompt tokens read from the prompt cache. |
+| Cache write tokens | The tier's prompt tokens written to the prompt cache. |
+| Uncached input tokens | Total input tokens minus Cache read tokens minus Cache write tokens: the prompt tokens neither read from nor written to the cache. Total input tokens = Cache read + Cache write + Uncached input, exactly, in every column. |
+| Total output tokens | The tier's output tokens, reasoning tokens included. |
+| Cost per applicable task | The tier's total cost divided by the number of task runs applicable at the tier (the denominator of the task completion rate); `—` when no task run is applicable. At 100% completion it equals Cost per completed task. |
 | Self-corrected retries | The tier's tool calls whose `tool_failure` result was self-corrected (see the retry rule below). `not applicable` at ToolCall, which makes one call per invocation. |
 
-Each table then has its own rows:
+Every table then ends with three more rows:
 
-- Supervisor: **Budget-exhausted tasks**, the arm's tasks with `budget_exhausted: true`.
-- Subagent: five rows, `Delegation outcome: data`, `: no_match`, `: denied`, `: tool_failure` and
-  `: none`, counted over every task the arm ran. `none` counts turns that reported no recognised outcome, so
-  the five rows sum to the arm's task count.
-- ToolCall: **Truncated tasks**, the arm's tasks with `truncated: true`.
+| Row | Definition, per arm, at the tier |
+|---|---|
+| Budget-exhausted tasks | The arm's task runs whose turn ran out of budget at this tier. |
+| Truncated tool calls | The tool calls issued at this tier whose result reported truncation. `not applicable` at Subagent. |
+| Truncated tasks | The arm's task runs with at least one truncated tool call at this tier. `not applicable` at Subagent. |
+
+A turn that runs out of budget is counted at exactly one tier, the tier where the exhaustion was
+first detected; a later detection in the same turn does not move it.
+
+- A model request refused because its estimated prompt is above the per-request limit counts at the
+  tier of the refused request.
+- A model call cut off by the turn's wall-clock deadline counts at that call's tier.
+- A subagent that stops at a round boundary because the deadline passed counts at Subagent.
+- A leaf call inside a delegation refused at the tool-call cap counts at ToolCall.
+- Running out of the turn's tool-call allowance in the supervisor's own loop, or of its token
+  allowance, counts at Supervisor, as does any other exhaustion the supervisor's loop detects first.
+
+A truncated tool call is counted at the tier that issued it. The supervisor's direct tool calls
+count at Supervisor, and every call made inside a delegation, whichever role made it, counts at
+ToolCall, so both truncation rows read `not applicable` at Subagent. Every call records the
+truncation flag of the bounded result its model received (see The tool-output bound).
+
+In `matrix.json` the three rows are the tier entry's `budget_exhausted_task_count`,
+`truncated_tool_call_count` and `truncated_task_count` (`null` at Subagent for both truncation
+counts). In `matrix.csv` they are `summary_<tier>_budget_exhausted_task_count`,
+`summary_<tier>_truncated_tool_call_count` and `summary_<tier>_truncated_task_count`, with the
+Subagent truncation cells empty.
+
+Delegation outcome counts (`data`, `no_match`, `denied`, `tool_failure` and `none`, over every task
+the arm ran) are not a table row. They are in `matrix.json`, as the subagent entry's
+`delegation_outcomes`, and in `matrix.csv`, as the `summary_subagent_delegation_*` columns. `none`
+counts turns that reported no recognised outcome, so the counts sum to the arm's task count.
 
 Reading rules:
 
@@ -295,8 +357,14 @@ Reading rules:
   that input tokens are not like-for-like (`token_accounting_disclosure` in `src/eval/matrix.py`).
   Further notes appear when they apply: stub columns, withheld cost, errored items, and arms whose
   usage is a lower bound.
-- **Older archives.** An arm record archived before the summary existed still re-renders; rows that
-  need the missing per-task block read `—`.
+- **Older records are refused.** Every arm record, `matrix.json` and its `tier_comparison` block
+  carries `record_shape_version` as its first key, currently 3 (3 added the per-run
+  `budget_exhausted_tier` and `repeat_index` to each task score). A record without it, with any other
+  value, or missing a required field (such as a tier's `total_prompt_tokens`, `cache_read_tokens` or
+  `cache_write_tokens`) is refused with `RecordShapeRefused`, naming the version found and the one
+  required. Nothing is rendered from it: `python -m eval.matrix` and `eval.reprice` exit 2 and write
+  no file, and `tier_comparison_table` raises. Records from earlier sweeps are not upgraded or
+  partly rendered.
 
 ## Correctness figures
 
@@ -411,8 +479,36 @@ are omitted (not zeroed), `cost_withheld_provisional` becomes `true`, and
 artifact.
 
 Each family reports cached prompt reads in a differently shaped usage object, so `input_tokens` is
-not established to be like-for-like across arms. `matrix.md` states the per-family accounting
+not like-for-like across arms: Anthropic reports input excluding cache read and cache write tokens,
+OpenAI reports input including them. `matrix.md` states the per-family accounting
 (`token_accounting` in `figure_semantics`, sourced from `src/crm/metering.py`).
+
+**Tier token totals.** Each tier of the tier comparison renders five token rows: Total input
+tokens (`total_prompt_tokens`), Cache read tokens (`cache_read_tokens`), Cache write tokens
+(`cache_write_tokens`), Uncached input tokens (`uncached_input_tokens`) and Total output tokens
+(`output_tokens`), summed over the tier's (tier, role, model) rows. A call's prompt size is
+`crm.metering.prompt_tokens`: input plus cache read plus cache write for Anthropic, and the reported
+input for OpenAI, which already contains the cache counts (raised to their sum if they exceed it).
+So each call's prompt is at least its cache read plus cache write, and the uncached figure is never
+negative. Uncached input is derived, not recorded: `eval.matrix.uncached_input_tokens` computes
+`total_prompt_tokens - cache_read_tokens - cache_write_tokens` when the summary is built and again
+when a stored summary is rendered, so a stored record-shape-3 run without the field renders the
+same row. Because the subtraction is linear, the tier figure equals the sum of the per-call figures,
+and Total input = Cache read + Cache write + Uncached input holds exactly in every column for both
+families. A given prompt yields the same Total, cache and uncached figures under either family.
+
+The tier tables carry no reported-input row. Each family's own `input_tokens` stays in the
+per-model Usage and Cost tables, in `matrix.json` (`tier_comparison.tiers.<tier>[].input_tokens`)
+and in `matrix.csv` (`summary_<tier>_input_tokens`). The JSON entry carries
+`uncached_input_tokens` beside `total_prompt_tokens`, and the CSV carries
+`summary_<tier>_uncached_input_tokens`.
+
+**Tier cost rows.** Both cost rows divide the tier's total cost, including spend on task runs that
+did not complete. Cost per completed task divides by the task runs completed at the tier; Cost per
+applicable task divides by the task runs applicable at the tier. They are equal when every
+applicable run completed. In `matrix.json` they are `cost_per_completed_task` and
+`cost_per_applicable_task`; in `matrix.csv`, `summary_<tier>_cost_per_completed_task` and
+`summary_<tier>_cost_per_applicable_task`.
 
 ## Latency (P50/P95)
 
@@ -501,16 +597,30 @@ Both family adapters apply one policy, defined in `src/providers/prompt_caching.
   adapter sends `prompt_cache_options {mode: implicit, ttl: 30m}` on every Responses request, the
   default mode, which adds an automatic breakpoint on the latest message and also honours explicit
   breakpoints.
-- **One breakpoint, at the end of the stable prefix.** The stable prefix is the tool definitions
+- **A breakpoint at the end of the stable prefix.** The stable prefix is the tool definitions
   plus the leading run of system messages, up to but not including the first message marked
   `cache_scope: volatile`. The supervisor's page briefing carries that marker, so it follows the
   breakpoint. The marker is never sent to either API. The Anthropic adapter puts
   `cache_control {type: ephemeral}` on that system block. The OpenAI adapter puts
   `prompt_cache_breakpoint {mode: explicit}` on that system message's `input_text` block. The tool
   tier sends no system message, so its requests carry no explicit breakpoint.
-- **No breakpoint below the minimum.** The adapter omits the breakpoint when the prefix is too short
-  to reach the model's `prompt_cache_min_checkpoint_tokens`. It estimates this at two characters
-  per token, so it omits a breakpoint only when the prefix cannot reach the minimum.
+- **A point on the latest message, matched across families.** The OpenAI platform's implicit
+  caching already places an automatic breakpoint on the latest message. The Anthropic adapter
+  matches it: it also puts `cache_control {type: ephemeral}` on the last content block of the
+  latest non-system message, so a later turn can read the conversation history cached by an earlier
+  one, not only the stable prefix. This applies at every tier, including the tool tier, which
+  carries no stable-prefix point.
+- **At most four points on an Anthropic request.** A Messages API request carries no more than four
+  `cache_control` points. When there are more candidates, the latest-message point is kept first,
+  then the stable-prefix point, then the most recent others; the oldest are dropped.
+- **No point below the minimum.** The adapter omits a point when the prefix up to and including it
+  is too short to reach the model's `prompt_cache_min_checkpoint_tokens`. For the latest-message
+  point that prefix is the tool definitions plus every message through the latest, including tool
+  calls and results. It estimates size at two characters per token, so it omits a point only when
+  the prefix cannot reach the minimum.
+
+Each arm records its family's method as `provenance.prompt_caching`, the text of `CACHING` in
+`src/providers/prompt_caching.py`, so a result record states how its requests asked to be cached.
 
 The platform sets these per family. The last two differ between arms:
 
@@ -551,6 +661,11 @@ from it. Each family's caching mechanism is a member of the prompt bundle, so a 
 - **One dataset seed** per sweep.
 - **One prompt bundle per instrument.** Sweeps with different `prompt_bundle_sha256` values sent
   different prompts, tool descriptions or caching requests (see What the models are sent).
+- **Sweeps before record shape 3 are a different instrument.** Shape 3 coincides with four changes
+  that move figures: the 55 planted activities on `opp-0000`, the tool-output bound on every path,
+  leaf calls charged as they are dispatched (with refused leaves counted at ToolCall), and the
+  resized `gt-04`. Earlier sweeps' correctness, truncation, budget-exhaustion and cost figures are
+  not comparable with later ones figure for figure, and their records are refused rather than read.
 - **The CLI `--live` sweep does not exercise the deployed AgentCore Runtime**
   (`live-aws-lambda-dispatch`). A state-machine sweep runs each task on the Runtime
   (`agentcore-runtime-eval-turn`).

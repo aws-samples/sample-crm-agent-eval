@@ -1,9 +1,9 @@
 /**
  * `aws_bedrockagentcore_agent_runtime`, running the CodeBuild-built image. Arguments match the
- * pinned `hashicorp/aws` 6.71.0 provider schema. Inbound auth is IAM/SigV4; the relay is the only
+ * pinned `hashicorp/aws` 6.72.0 provider schema. Inbound auth is IAM/SigV4; the relay is the only
  * caller.
  *
- * No `capacity_provider_configuration` is set (the 6.71.0 schema has none), so the runtime uses
+ * No `capacity_provider_configuration` is set (the 6.72.0 schema has none), so the runtime uses
  * consumption-mode microVM billing.
  */
 

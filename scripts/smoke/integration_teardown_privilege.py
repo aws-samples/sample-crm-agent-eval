@@ -28,7 +28,13 @@ from collections.abc import Generator, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    exception_detail,
+    run_main,
+)
 from scripts.smoke.iam_roles import (
     _function_grants,
     _load_matrix,
@@ -287,7 +293,8 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:
             check="terraform_output_present",
             status="fail",
             detail=(
-                f"required Terraform output 'eval_state_machine_arn' is absent ({exc}); without the "
+                f"required Terraform output 'eval_state_machine_arn' is absent "
+                f"({exception_detail(exc)}); without the "
                 f"sweep state machine there is no {TEARDOWN_FUNCTION} role to simulate every "
                 "DeleteItem deny row against. A missing output is a failure, not a skipped check"
             ),

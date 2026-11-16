@@ -37,7 +37,7 @@ from agents.agent_prompts import load_agent_prompts
 from agents.answer_style import answer_style_system_message
 from agents.budget import RequestRefusedError, TurnBudget, TurnBudgetSpec, until_deadline
 from agents.cancellation import CancellationStore
-from agents.events import AgentEvent, ResolvedTierInfo, budget_exhausted_event
+from agents.events import AgentEvent, ResolvedTierInfo, bound_tool_output, budget_exhausted_event
 from agents.prompt_estimate import refuse_if_over_limit
 from agents.registry import RegisteredTool, tool_registry_for
 from agents.subagent_runner import SubagentRunResult, run_subagent_async
@@ -50,6 +50,7 @@ from agents.supervisor import (
     SubagentOutcome,
     TurnGuard,
     classify_tool_result,
+    describe_truncation,
     page_context_briefing,
     proposal_event_for,
     provider_event_to_agent_event,
@@ -103,6 +104,8 @@ class TurnRecords:
         calls_without_usage: Model calls of the turn that ended before reporting token usage
             (:attr:`agents.budget.TurnBudget.calls_without_usage`); when non-zero, ``invocations``
             under-count the turn's usage and cost.
+        budget_exhausted_tier: The tier where the turn's budget ran out
+            (:attr:`agents.budget.TurnBudget.exhausted_tier`), or ``None``.
     """
 
     invocations: list[InvocationAttribution] = field(default_factory=list)
@@ -113,6 +116,18 @@ class TurnRecords:
     def calls_without_usage(self) -> int:
         """Model calls of the turn that ended before reporting token usage; 0 before it starts."""
         return 0 if self._budget is None else self._budget.calls_without_usage
+
+    @property
+    def budget_exhausted_tier(self) -> Tier | None:
+        """The tier where the turn's budget ran out; ``None`` if it did not or before it starts."""
+        return None if self._budget is None else self._budget.exhausted_tier
+
+
+def _noting_supervisor_exhaustion(event: AgentEvent, budget: TurnBudget) -> AgentEvent:
+    """Return ``event``, first recording the supervisor tier when it reports budget exhaustion."""
+    if event.error_kind == "budget_exhausted":
+        budget.note_exhausted_at(SUPERVISOR_TIER)
+    return event
 
 
 def _direct_tool_schemas(tools: tuple[RegisteredTool, ...]) -> list[dict[str, object]]:
@@ -328,7 +343,7 @@ async def drive_turn(
 
     pre_flight = guard.terminal_event()
     if pre_flight is not None:
-        yield pre_flight
+        yield _noting_supervisor_exhaustion(pre_flight, turn_budget)
         return
 
     effective_max_rounds = max_rounds if max_rounds is not None else budget.max_tool_calls + 1
@@ -343,12 +358,15 @@ async def drive_turn(
                 if turn_budget.completed_actions
                 else "no tool calls completed"
             )
-            yield budget_exhausted_event(
-                partial_work=partial_work,
-                error_message=(
-                    f"Turn stopped after reaching the maximum of {effective_max_rounds} model "
-                    "round(s) without producing a final answer."
+            yield _noting_supervisor_exhaustion(
+                budget_exhausted_event(
+                    partial_work=partial_work,
+                    error_message=(
+                        f"Turn stopped after reaching the maximum of {effective_max_rounds} model "
+                        "round(s) without producing a final answer."
+                    ),
                 ),
+                turn_budget,
             )
             return
 
@@ -370,7 +388,7 @@ async def drive_turn(
             )
         except RequestRefusedError:
             guard.note_terminal()
-            yield turn_budget.exhausted_event()
+            yield _noting_supervisor_exhaustion(turn_budget.exhausted_event(), turn_budget)
             return
 
         provider_events: AsyncIterator[ProviderEvent] = until_deadline(
@@ -466,15 +484,13 @@ async def drive_turn(
                         budget=turn_budget,
                         dispatch_clock=dispatch_clock,
                     )
-                    # The turn budget is charged with the delegation's tokens and leaf calls.
+                    # Leaf calls were charged as they were dispatched; the tokens are charged here.
                     delegation_tokens = sum(
                         inv.tokens.input_tokens + inv.tokens.output_tokens
                         for inv in delegation.invocations
                     )
                     if delegation_tokens:
                         turn_budget.record_tokens(delegation_tokens)
-                    for leaf in delegation.tool_calls:
-                        turn_budget.record_tool_call(f"called {leaf.tool_name}")
                     guard.note_step(f"delegated to {name}")
                     for event in nested_events:
                         yield event
@@ -483,7 +499,7 @@ async def drive_turn(
                 elif name in direct_by_name:
                     tool = direct_by_name[name]
                     dispatch_start = dispatch_clock() if dispatch_clock is not None else None
-                    tool_output = dispatch(tool, tool_input)
+                    raw_output = dispatch(tool, tool_input)
                     dispatch_latency_ms = (
                         (dispatch_clock() - dispatch_start) * 1000.0
                         if dispatch_start is not None and dispatch_clock is not None
@@ -491,8 +507,11 @@ async def drive_turn(
                     )
                     turn_budget.record_tool_call(f"called {tool.name}")
                     guard.note_step(f"called {tool.name}")
-                    yield AgentEvent(kind="tool_result", tool_output=tool_output)
-                    proposal = _proposal_or_none(tool_output)
+                    tool_output, truncated = bound_tool_output(raw_output)
+                    yield AgentEvent(
+                        kind="tool_result", tool_output=tool_output, truncated=truncated
+                    )
+                    proposal = _proposal_or_none(raw_output)
                     if proposal is not None:
                         yield proposal
                     records.tool_calls.append(
@@ -501,7 +520,9 @@ async def drive_turn(
                             role=SUPERVISOR_ROLE,
                             latency_ms=dispatch_latency_ms,
                             outcome_kind=classify_tool_result(tool_output).kind,
-                            truncated=False,
+                            truncated=truncated
+                            or describe_truncation(tool_output, event_truncated=truncated)
+                            is not None,
                         )
                     )
                     round_tool_calls.append({"id": call_id, "name": tool.name, "input": tool_input})
@@ -519,13 +540,13 @@ async def drive_turn(
                     )
                     if terminal.error_kind == "budget_exhausted":
                         terminal = turn_budget.exhausted_event()
-                yield terminal
+                yield _noting_supervisor_exhaustion(terminal, turn_budget)
                 return
 
         if turn_budget.is_deadline_expired():
             terminal = guard.terminal_event()
             if terminal is not None:
-                yield terminal
+                yield _noting_supervisor_exhaustion(terminal, turn_budget)
                 return
 
         if not completed_this_round and not round_tool_calls:
@@ -539,7 +560,7 @@ async def drive_turn(
 
         terminal = guard.terminal_event()
         if terminal is not None:
-            yield terminal
+            yield _noting_supervisor_exhaustion(terminal, turn_budget)
             return
 
 

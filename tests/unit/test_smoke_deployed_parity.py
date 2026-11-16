@@ -11,13 +11,15 @@ import base64
 import hashlib
 import io
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Final
 
 from botocore.exceptions import ClientError, EndpointConnectionError
-from scripts import proc_run
-from scripts.smoke import deployed_parity
+from scripts import check_lambda_zip_imports, proc_run
+from scripts.smoke import deployed_parity, harness, lambda_actions
+from scripts.smoke.eni_function_code_deny import PROBE_PREFIX
 from scripts.smoke.harness import context_for_test
 from scripts.smoke.lambda_actions import function_name_for
 
@@ -27,17 +29,47 @@ REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent.parent
 
 
 class FakeLambdaClient:
-    """Minimal `lambda` client double returning canned configurations per function name."""
+    """Minimal `lambda` client double returning canned configurations per function name.
+
+    `list_functions` pages `functions` (two per page). When `functions` is omitted it lists every
+    configured function on the expected Python runtime plus the relay on its expected runtime.
+    """
 
     def __init__(
         self,
         configurations: dict[str, dict[str, Any]],
         *,
         raises: dict[str, Exception] | None = None,
+        functions: list[dict[str, Any]] | None = None,
+        list_raises: Exception | None = None,
     ) -> None:
         self._configurations = configurations
         self._raises = raises or {}
+        self._functions = (
+            functions
+            if functions is not None
+            else [
+                *(
+                    _listed(name, deployed_parity.expected_python_runtime())
+                    for name in configurations
+                ),
+                _listed(deployed_parity.RELAY_FUNCTION, deployed_parity.expected_relay_runtime()),
+            ]
+        )
+        self._list_raises = list_raises
         self.calls: list[str] = []
+        self.list_calls: list[str | None] = []
+
+    def list_functions(self, *, Marker: str | None = None) -> dict[str, Any]:  # noqa: N803
+        """Return one two-function page starting at `Marker`, with `NextMarker` when more remain."""
+        self.list_calls.append(Marker)
+        if self._list_raises is not None:
+            raise self._list_raises
+        start = int(Marker) if Marker else 0
+        page: dict[str, Any] = {"Functions": self._functions[start : start + 2]}
+        if start + 2 < len(self._functions):
+            page["NextMarker"] = str(start + 2)
+        return page
 
     def get_function_configuration(self, *, FunctionName: str) -> dict[str, Any]:  # noqa: N803
         """Return the canned configuration for `FunctionName`, or raise what the test declared."""
@@ -50,6 +82,21 @@ class FakeLambdaClient:
                 "GetFunctionConfiguration",
             )
         return self._configurations[FunctionName]
+
+
+#: An account-shaped id planted in listed ARNs; it must never reach any check's output.
+_PLANTED_ACCOUNT: Final[str] = "111122223333"
+
+
+def _listed(name: str, runtime: str | None) -> dict[str, Any]:
+    """A `ListFunctions` entry for `name`, its ARN carrying `_PLANTED_ACCOUNT`."""
+    entry: dict[str, Any] = {
+        "FunctionName": name,
+        "FunctionArn": f"arn:aws:lambda:us-east-1:{_PLANTED_ACCOUNT}:function:{name}",
+    }
+    if runtime is not None:
+        entry["Runtime"] = runtime
+    return entry
 
 
 def _b64_sha256(data: bytes) -> str:
@@ -423,6 +470,289 @@ def test_non_tool_coverage_is_a_separate_identity_check(tmp_path: Path) -> None:
         deployed_parity.check_non_tool_coverage(deployed_parity.expected_action_resources()).status
         == "fail"
     )
+
+
+# ---------------------------------------------------------------------------
+# Runtime: every discovered function's runtime, read from the account.
+# ---------------------------------------------------------------------------
+
+
+def _runtime_rows(results: list[Any]) -> dict[str, Any]:
+    return {r.resource: r for r in results if r.check == deployed_parity.RUNTIME_CHECK}
+
+
+def _runtime_coverage(results: list[Any]) -> Any:
+    return next(r for r in results if r.check == deployed_parity.RUNTIME_COVERAGE_CHECK)
+
+
+def _target_names(directory: Path) -> list[str]:
+    return [t.function_name for t in deployed_parity.parity_targets(directory)]
+
+
+def _all_listed(directory: Path, **overrides: str | None) -> list[dict[str, Any]]:
+    """Every parity target on the Python runtime plus the relay on Node, then `overrides`."""
+    runtimes: dict[str, str | None] = dict.fromkeys(
+        _target_names(directory), deployed_parity.expected_python_runtime()
+    )
+    runtimes[deployed_parity.RELAY_FUNCTION] = deployed_parity.expected_relay_runtime()
+    runtimes.update(overrides)
+    return [_listed(name, runtime) for name, runtime in runtimes.items()]
+
+
+def test_every_discovered_function_gets_a_passing_runtime_row(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    listed = _all_listed(tmp_path)
+    client = FakeLambdaClient(_configurations_matching(written), functions=listed)
+    results = _run_checks(client, tmp_path)
+
+    rows = _runtime_rows(results)
+    assert set(rows) == {entry["FunctionName"] for entry in listed}
+    assert all(r.status == "pass" for r in rows.values())
+    assert _runtime_coverage(results).status == "pass"
+    assert len(client.list_calls) > 1, "the fixture must page, so pagination is exercised"
+    assert [r for r in results if r.status == "fail"] == []
+
+
+def test_one_wrong_python_runtime_fails_and_names_the_function(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    wrong = function_name_for(ALL_TOOLS[0])
+    client = FakeLambdaClient(
+        _configurations_matching(written), functions=_all_listed(tmp_path, **{wrong: "python3.12"})
+    )
+    results = _run_checks(client, tmp_path)
+
+    failing = [r for r in results if r.status == "fail"]
+    assert [(r.resource, r.check) for r in failing] == [(wrong, deployed_parity.RUNTIME_CHECK)]
+    assert wrong in failing[0].detail and "python3.12" in failing[0].detail
+    assert deployed_parity.expected_python_runtime() in failing[0].detail
+
+
+def test_a_function_reporting_no_runtime_fails(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    blank = deployed_parity.NON_TOOL_FUNCTIONS[0][0]
+    client = FakeLambdaClient(
+        _configurations_matching(written), functions=_all_listed(tmp_path, **{blank: None})
+    )
+    row = _runtime_rows(_run_checks(client, tmp_path))[blank]
+    assert row.status == "fail"
+    assert "<none>" in row.detail
+
+
+def test_a_missing_parity_target_fails_runtime_coverage_naming_it(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    absent = function_name_for(ALL_TOOLS[-1])
+    listed = [e for e in _all_listed(tmp_path) if e["FunctionName"] != absent]
+    client = FakeLambdaClient(_configurations_matching(written), functions=listed)
+    results = _run_checks(client, tmp_path)
+
+    coverage = _runtime_coverage(results)
+    assert coverage.status == "fail"
+    assert absent in coverage.detail
+    assert absent not in _runtime_rows(results)
+
+
+def test_a_missing_relay_fails_runtime_coverage(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    listed = [
+        e for e in _all_listed(tmp_path) if e["FunctionName"] != deployed_parity.RELAY_FUNCTION
+    ]
+    client = FakeLambdaClient(_configurations_matching(written), functions=listed)
+    coverage = _runtime_coverage(_run_checks(client, tmp_path))
+    assert coverage.status == "fail"
+    assert deployed_parity.RELAY_FUNCTION in coverage.detail
+
+
+def test_a_probe_named_function_is_ignored_whatever_its_runtime(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    probe = f"{PROBE_PREFIX}run-1234"
+    unrelated = "another-stack-function"
+    listed = [*_all_listed(tmp_path), _listed(probe, "python3.9"), _listed(unrelated, "java21")]
+    client = FakeLambdaClient(_configurations_matching(written), functions=listed)
+    results = _run_checks(client, tmp_path)
+
+    rows = _runtime_rows(results)
+    assert probe.startswith(lambda_actions.FUNCTION_NAME_PREFIX), "control: the prefix matches"
+    assert probe not in rows and unrelated not in rows
+    assert [r for r in results if r.status == "fail"] == []
+
+
+def test_the_relay_is_checked_against_nodejs_not_python(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    relay = deployed_parity.RELAY_FUNCTION
+    client = FakeLambdaClient(
+        _configurations_matching(written),
+        functions=_all_listed(tmp_path, **{relay: deployed_parity.expected_python_runtime()}),
+    )
+    row = _runtime_rows(_run_checks(client, tmp_path))[relay]
+    assert row.status == "fail"
+    assert deployed_parity.expected_relay_runtime() in row.detail
+
+
+def test_a_relay_on_an_older_nodejs_fails(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    relay = deployed_parity.RELAY_FUNCTION
+    client = FakeLambdaClient(
+        _configurations_matching(written), functions=_all_listed(tmp_path, **{relay: "nodejs20.x"})
+    )
+    row = _runtime_rows(_run_checks(client, tmp_path))[relay]
+    assert row.status == "fail"
+    assert "nodejs20.x" in row.detail
+
+
+def test_an_unreadable_relay_default_fails_the_relay_row(tmp_path: Path, monkeypatch: Any) -> None:
+    written = _write_all_zips(tmp_path)
+    variables_tf = tmp_path / "variables.tf"
+    variables_tf.write_text('variable "runtime" {\n  default = "python3.14"\n}\n')
+    listed = _all_listed(tmp_path)
+    monkeypatch.setattr(deployed_parity, "RELAY_VARIABLES_TF", variables_tf)
+    client = FakeLambdaClient(_configurations_matching(written), functions=listed)
+    row = _runtime_rows(_run_checks(client, tmp_path))[deployed_parity.RELAY_FUNCTION]
+    assert row.status == "fail"
+    assert "expected runtime is unknown" in row.detail
+
+
+def test_a_list_functions_error_fails_runtime_coverage(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    denied = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "denied"}}, "ListFunctions"
+    )
+    client = FakeLambdaClient(_configurations_matching(written), list_raises=denied)
+    results = _run_checks(client, tmp_path)
+    assert _runtime_rows(results) == {}
+    coverage = _runtime_coverage(results)
+    assert coverage.status == "fail"
+    assert "AccessDeniedException" in coverage.detail
+
+
+def test_no_account_id_reaches_any_check_output(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    client = FakeLambdaClient(
+        _configurations_matching(written),
+        functions=_all_listed(tmp_path, **{function_name_for(ALL_TOOLS[0]): "python3.12"}),
+    )
+    results = _run_checks(client, tmp_path)
+    assert _runtime_rows(results), "control: runtime rows were emitted"
+    for result in results:
+        assert _PLANTED_ACCOUNT not in f"{result.resource} {result.detail}"
+
+
+def test_expected_python_runtime_is_target_python_version() -> None:
+    major, minor = check_lambda_zip_imports.TARGET_PYTHON_VERSION
+    assert deployed_parity.expected_python_runtime() == f"python{major}.{minor}"
+
+
+def test_expected_relay_runtime_is_the_agent_relay_terraform_default() -> None:
+    text = (REPO_ROOT / "infra" / "modules" / "agent_relay" / "variables.tf").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r'(?ms)^variable\s+"runtime"\s*\{.*?default\s*=\s*"(nodejs\d+\.x)"', text)
+    assert match is not None
+    assert deployed_parity.expected_relay_runtime() == match.group(1)
+
+
+def test_relay_function_name_is_the_one_infra_main_tf_declares() -> None:
+    main_tf = (REPO_ROOT / "infra" / "main.tf").read_text(encoding="utf-8")
+    prefix = re.search(r'(?m)^\s*name_prefix\s*=\s*"([^"]+)"', main_tf)
+    block = re.search(r'(?ms)^module\s+"agent_relay"\s*\{(.*?)^\}', main_tf)
+    assert prefix is not None and block is not None
+    declared = re.search(r'(?m)^\s*function_name\s*=\s*"([^"]+)"', block.group(1))
+    assert declared is not None
+    resolved = declared.group(1).replace("${local.name_prefix}", prefix.group(1))
+    assert "${" not in resolved, f"unresolved interpolation in {declared.group(1)!r}"
+    assert resolved == deployed_parity.RELAY_FUNCTION
+
+
+def test_deploy_gate_emits_no_runtime_rows_and_never_lists_functions(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    client = FakeLambdaClient(
+        _configurations_matching(written),
+        functions=_all_listed(tmp_path, **{function_name_for(ALL_TOOLS[0]): "python3.12"}),
+    )
+    exit_code, results = deployed_parity.deploy_gate(
+        client, directory=tmp_path, stream=io.StringIO()
+    )
+    assert exit_code == 0
+    assert client.list_calls == []
+    assert {r.check for r in results}.isdisjoint(
+        {deployed_parity.RUNTIME_CHECK, deployed_parity.RUNTIME_COVERAGE_CHECK}
+    )
+
+
+# ---------------------------------------------------------------------------
+# AWS error details carry the error code, never the message or an ARN.
+# ---------------------------------------------------------------------------
+
+_CALLER_ARN: Final[str] = f"arn:aws:sts::{_PLANTED_ACCOUNT}:assumed-role/x/y"
+
+
+def _denied(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": f"User: {_CALLER_ARN} is not authorized to perform: lambda:{operation}",
+            }
+        },
+        operation,
+    )
+
+
+def _assert_no_caller_identity(results: list[Any]) -> None:
+    for result in results:
+        assert _PLANTED_ACCOUNT not in result.detail, result
+        assert "arn:" not in result.detail, result
+
+
+def test_a_denied_get_function_configuration_reports_only_the_error_code(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    tool = ALL_TOOLS[1]
+    client = FakeLambdaClient(
+        _configurations_matching(written),
+        raises={function_name_for(tool): _denied("GetFunctionConfiguration")},
+    )
+    results = _run_checks(client, tmp_path)
+    verdict = next(
+        r for r in results if r.resource == tool.name and r.check == deployed_parity.PARITY_CHECK
+    )
+    assert verdict.status == "fail"
+    assert "AccessDeniedException" in verdict.detail
+    assert "lambda:GetFunctionConfiguration" in verdict.detail
+    _assert_no_caller_identity(results)
+
+
+def test_a_denied_list_functions_reports_only_the_error_code(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    client = FakeLambdaClient(
+        _configurations_matching(written), list_raises=_denied("ListFunctions")
+    )
+    results = _run_checks(client, tmp_path)
+    coverage = _runtime_coverage(results)
+    assert coverage.status == "fail"
+    assert "AccessDeniedException" in coverage.detail
+    assert "lambda:ListFunctions" in coverage.detail
+    _assert_no_caller_identity(results)
+
+
+def test_a_response_without_code_sha256_never_echoes_its_arns(tmp_path: Path) -> None:
+    written = _write_all_zips(tmp_path)
+    configurations = _configurations_matching(written)
+    tool = ALL_TOOLS[2]
+    entry = configurations[function_name_for(tool)]
+    entry.pop("CodeSha256")
+    entry["FunctionArn"] = f"arn:aws:lambda:us-east-1:{_PLANTED_ACCOUNT}:function:x"
+    entry["Role"] = f"arn:aws:iam::{_PLANTED_ACCOUNT}:role/x"
+    results = _run_checks(FakeLambdaClient(configurations), tmp_path)
+    verdict = next(
+        r for r in results if r.resource == tool.name and r.check == deployed_parity.PARITY_CHECK
+    )
+    assert verdict.status == "fail"
+    assert "no CodeSha256" in verdict.detail and "FunctionArn" in verdict.detail
+    _assert_no_caller_identity(results)
+
+
+def test_aws_error_code_is_the_shared_harness_helper() -> None:
+    """`deployed_parity` reads error codes through `harness.aws_error_code`, holding no copy."""
+    assert vars(deployed_parity)["aws_error_code"] is harness.aws_error_code
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,14 @@ import sys
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    MissingTerraformOutputError,
+    SmokeContext,
+    aws_error_detail,
+    run_main,
+)
 from scripts.smoke.lambda_actions import FUNCTION_NAME_PREFIX
 from scripts.smoke.public_exposure import source_declared_function_names
 
@@ -109,7 +116,7 @@ def _stack_trail(ctx: SmokeContext, bucket: str) -> Mapping[str, Any] | str:
     try:
         response = ctx.client("cloudtrail").describe_trails(includeShadowTrails=False)
     except Exception as exc:  # noqa: BLE001 - reported as a fail row, never aborts the run
-        return f"describe-trails failed: {type(exc).__name__}: {exc}"
+        return aws_error_detail("cloudtrail:DescribeTrails", exc)
     matching = [
         trail for trail in response.get("trailList", []) if trail.get("S3BucketName") == bucket
     ]
@@ -139,7 +146,7 @@ def _check_logging(ctx: SmokeContext, resource: str, trail: Mapping[str, Any]) -
         status = ctx.client("cloudtrail").get_trail_status(Name=name)
     except Exception as exc:  # noqa: BLE001 - reported as a fail row, never aborts the run
         return _fail(
-            resource, CHECK_TRAIL_LOGGING, f"get-trail-status failed: {type(exc).__name__}: {exc}"
+            resource, CHECK_TRAIL_LOGGING, aws_error_detail("cloudtrail:GetTrailStatus", exc)
         )
     is_logging = status.get("IsLogging")
     if is_logging is True:
@@ -153,7 +160,7 @@ def resolve_trail(ctx: SmokeContext) -> tuple[str, Mapping[str, Any] | str]:
     """`(resource, trail)` for the stack's trail, or `(resource, reason)` if it is unidentified."""
     try:
         bucket = ctx.outputs.require_str(TRAIL_BUCKET_OUTPUT)
-    except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+    except MissingTerraformOutputError as exc:
         return "cloudtrail", f"cannot locate the trail: {exc}"
     trail = _stack_trail(ctx, bucket)
     if isinstance(trail, str):
@@ -175,7 +182,7 @@ def alb_check(ctx: SmokeContext) -> CheckResult:
     """The ALB deletion-protection row."""
     try:
         arn = ctx.outputs.require_str(ALB_ARN_OUTPUT)
-    except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+    except MissingTerraformOutputError as exc:
         return _fail("alb", CHECK_ALB_DELETION_PROTECTION, f"cannot locate the ALB: {exc}")
     resource = f"alb:{arn.partition(':loadbalancer/')[2] or arn}"
     try:
@@ -184,7 +191,7 @@ def alb_check(ctx: SmokeContext) -> CheckResult:
         return _fail(
             resource,
             CHECK_ALB_DELETION_PROTECTION,
-            f"describe-load-balancer-attributes failed: {type(exc).__name__}: {exc}",
+            aws_error_detail("elasticloadbalancing:DescribeLoadBalancerAttributes", exc),
         )
     values = [
         attribute.get("Value")
@@ -224,13 +231,13 @@ def expected_log_groups(ctx: SmokeContext) -> tuple[list[str], list[str]]:
     for output in LOG_GROUP_OUTPUTS:
         try:
             names.append(ctx.outputs.require_str(output))
-        except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+        except MissingTerraformOutputError as exc:
             problems.append(f"output {output!r} unavailable: {exc}")
     functions = list(source_declared_function_names())
     for output in LAMBDA_FUNCTION_OUTPUTS:
         try:
             functions.append(ctx.outputs.require_str(output))
-        except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+        except MissingTerraformOutputError as exc:
             problems.append(f"output {output!r} unavailable: {exc}")
     names += [f"/aws/lambda/{function}" for function in functions]
     try:
@@ -239,7 +246,7 @@ def expected_log_groups(ctx: SmokeContext) -> tuple[list[str], list[str]]:
         if not marker or not state_machine_name:
             raise ValueError(f"{state_machine!r} is not a state machine ARN")
         names.append(f"/aws/vendedlogs/states/{state_machine_name}")
-    except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+    except (MissingTerraformOutputError, ValueError) as exc:
         problems.append(f"output {STATE_MACHINE_ARN_OUTPUT!r} unusable: {exc}")
     names += [f"/aws/codebuild/{CODEBUILD_PROJECT_NAME}", API_ACCESS_LOG_GROUP]
     return list(dict.fromkeys(names)), problems
@@ -284,7 +291,7 @@ def log_group_checks(
             _fail(
                 "log_groups",
                 CHECK_LOG_GROUPS_DISCOVERED,
-                f"describe-log-groups failed: {type(exc).__name__}: {exc}",
+                aws_error_detail("logs:DescribeLogGroups", exc),
             )
         ]
     problems += [f"prefix {prefix!r} matches no log group" for prefix in unmatched_prefixes]
@@ -352,8 +359,14 @@ def codebuild_check(ctx: SmokeContext) -> CheckResult:
                 f"eval-artefacts bucket default KMS keys {bucket_keys!r}; expected exactly one",
             )
         bucket_key = _key_identity(ctx, str(bucket_keys[0]))
+    except MissingTerraformOutputError as exc:
+        return _fail(resource, CHECK_CODEBUILD_ENCRYPTION_KEY, str(exc))
     except Exception as exc:  # noqa: BLE001 - reported as a fail row, never aborts the run
-        return _fail(resource, CHECK_CODEBUILD_ENCRYPTION_KEY, f"{type(exc).__name__}: {exc}")
+        return _fail(
+            resource,
+            CHECK_CODEBUILD_ENCRYPTION_KEY,
+            aws_error_detail("codebuild/kms/s3 encryption-key lookup", exc),
+        )
     observed = (
         f"encryptionKey resolves to KeyManager={project_key.get('KeyManager')!r}; "
         f"same key as the eval-artefacts bucket: {project_key.get('KeyId') == bucket_key.get('KeyId')}"

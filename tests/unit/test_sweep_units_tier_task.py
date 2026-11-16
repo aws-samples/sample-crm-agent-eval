@@ -68,6 +68,7 @@ def _unit(
     supervisor, subagent, tool = tiers
     return TaskUnitResult(
         task_id=task_id,
+        repeat_index=0,
         task_score=TaskScore(
             task_id=task_id,
             scoring_mode="machine",

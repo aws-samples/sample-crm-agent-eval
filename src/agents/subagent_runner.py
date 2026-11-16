@@ -16,13 +16,14 @@ runs this loop. Given a :class:`~agents.subagents.base.SubagentSpec` and the sup
 
 The subagent's first message is the system prompt ``config/agent_prompts/subagent.yaml`` rendered
 with the spec's ``role`` and ``purpose`` (:func:`subagent_system_message`); the intent follows as
-the user message. A ``data`` outcome carries every successful leaf result in call order,
-``{"results": [{"tool": name, "body": payload}, ...]}``, the list bounded once by
-:func:`bound_results` and marked ``"truncated": true`` when cut. A
+the user message. A ``data`` outcome carries every successful (bounded) leaf result in call
+order, ``{"results": [{"tool": name, "body": payload}, ...]}``, the list bounded by
+:func:`bound_results` and marked ``"truncated": true`` when it or any leaf result was cut. A
 ``tool_failure`` from a leaf tool is cleared when a later call to the same tool returns ``data`` or
 ``no_match``; a denial is never cleared.
 
-Tool results pass through verbatim, bounded only by :func:`agents.events.truncate_tool_output`.
+Each leaf result is bounded by :func:`agents.events.bound_tool_output`; the bounded copy is what the
+model and the aggregate receive.
 The runner reads no wall clock of its own. Given the turn's :class:`~agents.budget.TurnBudget`, it
 checks the budget's wall clock between rounds and bounds every model wait by the time left
 (:func:`agents.budget.until_deadline`, :func:`agents.budget.within_deadline`). When the clock runs
@@ -54,6 +55,8 @@ from agents.events import (
     TOOL_RESULT_BYTE_CEILING,
     TRUNCATION_MARKER,
     AgentEvent,
+    bound_tool_output,
+    record_list_field,
     truncate_tool_output,
 )
 from agents.prompt_estimate import refuse_if_over_limit
@@ -269,6 +272,7 @@ class _SubagentDriver:
     tool_calls: list[ToolCallAttribution] = field(default_factory=list)
     _results: list[dict[str, object]] = field(default_factory=list)
     _matched_nothing: bool = False
+    _bounded_leaf_data: bool = False
     _denied: SubagentOutcome | None = None
     _open_failures: dict[str, str] = field(default_factory=dict)
 
@@ -285,6 +289,7 @@ class _SubagentDriver:
             if round_number > max_rounds:
                 return
             if self.budget is not None and self.budget.is_deadline_expired():
+                self.budget.note_exhausted_at(SUBAGENT_TIER)
                 return
             total_input = total_output = total_cache_read = total_cache_write = 0
             saw_usage = False
@@ -430,10 +435,12 @@ class _SubagentDriver:
     ) -> dict[str, object]:
         """Realise one leaf tool call through the actor, classify it, and record events+attribution.
 
-        The actor may be sync or async (:data:`ToolActor`). Returns the actor's raw ``output``
-        verbatim for the next round's tool result; the emitted ``tool_result`` event carries the
-        record-boundary-bounded copy.
+        The actor may be sync or async (:data:`ToolActor`). The actor's ``output`` is bounded by
+        :func:`agents.events.bound_tool_output`; the bounded copy is classified, carried by the
+        emitted ``tool_result`` event and returned for the next round's tool result.
         """
+        if self.budget is not None:
+            self.budget.charge_tool_call(f"called {tool.name}", tier=TOOL_TIER, role=self.spec.role)
         call = self.tool_actor(tool, _call_intent(tool_input, fallback_intent))
         if isinstance(call, Awaitable):
             result = await (
@@ -446,16 +453,18 @@ class _SubagentDriver:
         raw_output = result.output
         self.invocations.append(result.invocation)
 
-        display_output, truncated = _bounded_output(raw_output)
-        notice = describe_truncation(raw_output, event_truncated=truncated)
-        outcome = classify_tool_result(raw_output)
+        bounded_output, truncated = bound_tool_output(raw_output)
+        notice = describe_truncation(bounded_output, event_truncated=truncated)
+        outcome = classify_tool_result(bounded_output)
         self._record_outcome(tool.name, outcome)
+        if truncated and outcome.kind == "data":
+            self._bounded_leaf_data = True
 
         self.events.append(
             AgentEvent(kind="tool_call", tool_name=tool.name, tool_input=dict(tool_input))
         )
         self.events.append(
-            AgentEvent(kind="tool_result", tool_output=display_output, truncated=truncated)
+            AgentEvent(kind="tool_result", tool_output=bounded_output, truncated=truncated)
         )
         if tool.name == _SUBMIT_PROPOSAL_TOOL_NAME and "error" not in raw_output:
             self.events.append(proposal_event_for(raw_output))
@@ -468,7 +477,7 @@ class _SubagentDriver:
                 truncated=truncated or notice is not None,
             )
         )
-        return raw_output
+        return bounded_output
 
     def _record_outcome(self, tool_name: str, outcome: SubagentOutcome) -> None:
         """Fold one leaf outcome into the delegation's aggregate.
@@ -517,7 +526,7 @@ class _SubagentDriver:
         if self._results:
             results, truncated = bound_results(self._results)
             data: dict[str, object] = {RESULTS_KEY: results}
-            if truncated:
+            if truncated or self._bounded_leaf_data:
                 data["truncated"] = True
             return SubagentOutcome(kind="data", data=data)
         return SubagentOutcome(kind="no_match")
@@ -528,17 +537,6 @@ def _repr_size(value: object) -> int:
     return len(repr(value).encode("utf-8"))
 
 
-def _record_list_field(body: dict[str, object]) -> tuple[str, list[object]] | None:
-    """Return the ``body`` list to trim at a record boundary: ``items``, else its largest list."""
-    items = body.get("items")
-    if isinstance(items, list):
-        return "items", items
-    lists = [(key, value) for key, value in body.items() if isinstance(value, list) and value]
-    if not lists:
-        return None
-    return max(lists, key=lambda pair: _repr_size(pair[1]))
-
-
 def _trim_entry(entry: dict[str, object], budget: int) -> dict[str, object] | None:
     """Return ``entry`` cut to ``budget`` bytes by trimming its body's record list.
 
@@ -547,7 +545,7 @@ def _trim_entry(entry: dict[str, object], budget: int) -> dict[str, object] | No
     body = entry.get("body")
     if not isinstance(body, dict):
         return None
-    record_list = _record_list_field(body)
+    record_list = record_list_field(body)
     if record_list is None:
         return None
     field_name, records = record_list
@@ -596,28 +594,6 @@ def bound_results(
             kept.append({TRUNCATION_MARKER: True})
         return kept, True
     return kept, False
-
-
-def _bounded_output(raw_output: dict[str, object]) -> tuple[dict[str, object], bool]:
-    """Apply the existing record-boundary byte ceiling to a result's ``items``, if any.
-
-    Uses :func:`agents.events.truncate_tool_output`, as direct tool results do. A payload with no
-    ``items`` list passes through unchanged.
-    """
-    body = raw_output.get("body")
-    container = body if isinstance(body, dict) else raw_output
-    items = container.get("items")
-    if not isinstance(items, list):
-        return raw_output, False
-    bounded_items, truncated = truncate_tool_output(
-        [item for item in items if isinstance(item, dict)]
-    )
-    if not truncated:
-        return raw_output, False
-    bounded_container = {**container, "items": bounded_items}
-    if isinstance(body, dict):
-        return {**raw_output, "body": bounded_container}, True
-    return bounded_container, True
 
 
 __all__ = [

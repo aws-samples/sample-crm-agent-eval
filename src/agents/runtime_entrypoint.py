@@ -387,29 +387,31 @@ def run_turn(
     *,
     store: SessionStore,
     resume_from: int = 0,
+    resume: bool = False,
 ) -> Iterator[str]:
     """Drive one turn's already-produced event stream into resumable SSE lines.
 
     A fresh turn first calls :meth:`SessionStore.begin_turn`, dropping the session's earlier
     turns, then records every event from ``events`` except a ``heartbeat`` in ``store`` before
-    rendering it; a heartbeat is rendered only. When
-    ``resume_from`` is below the session's last recorded sequence, only the recorded events after
-    it are yielded and ``events`` is not consumed.
+    rendering it; a heartbeat is rendered only. A reconnect, where ``resume`` is ``True`` and
+    ``resume_from`` is at least ``0`` and below the session's last recorded sequence, yields only
+    the recorded events after it and does not consume ``events``. Any other call is a fresh turn.
 
     Args:
         invocation: The decoded, tuning-validated invocation driving this turn.
         events: The turn's own event stream, e.g. from repeated calls to
             :func:`agents.supervisor.provider_event_to_agent_event` over a provider's stream.
-            Consumed only when ``resume_from`` is at or beyond the last recorded sequence.
+            Not consumed on a reconnect.
         store: Where events are recorded and replayed from.
         resume_from: The highest sequence number the caller already received for this session.
-            ``0`` means "from the start" — a fresh turn.
+        resume: Whether the caller is reconnecting to the session's last turn. Only the value
+            ``True`` counts; anything else is a fresh turn.
 
     Yields:
         One SSE data line per event, in :func:`format_sse_line`'s framing.
     """
     last_recorded = store.last_sequence(invocation.session_id)
-    if resume_from < last_recorded:
+    if resume is True and 0 <= resume_from < last_recorded:
         for replayed in store.events_after(invocation.session_id, sequence=resume_from):
             yield format_sse_line(replayed)
         return

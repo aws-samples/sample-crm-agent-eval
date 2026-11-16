@@ -41,6 +41,7 @@ def _arm() -> ArmResult:
             runtime_identifier="local-stub-runtime",
             price_table_version="v0-provisional",
             answer_style_sha256="0" * 64,
+            prompt_caching="explicit cache points",
         ),
         model_metrics_fields={
             "model_id": _MODEL_ID,

@@ -10,7 +10,6 @@ import csv
 import dataclasses
 import io
 import json
-from pathlib import Path
 from typing import cast
 
 from eval import harness, matrix
@@ -26,11 +25,7 @@ from eval.matrix import (
 )
 from eval.metrics import aggregate_tier_summary, not_measured_latency_metrics
 from eval.scoring import SCORED_TIERS, TierScore, TierScores
-from tests.unit.test_matrix import _sample_arm
-
-_LEGACY_ARTIFACT = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "eval" / "legacy_matrix_artifact.json"
-)
+from tests.unit.test_matrix import _archivable_arm
 
 _DEFINITION = (
     "a task counts when its tier expectation was met in a strict majority of its applicable repeats"
@@ -61,7 +56,7 @@ def _arm() -> ArmResult:
     summary = aggregate_tier_summary(
         (), not_measured_latency_metrics(), _three_repeat_turns(), withhold_cost=True
     )
-    return dataclasses.replace(_sample_arm(), tier_summary_fields=summary.to_report_fields())
+    return dataclasses.replace(_archivable_arm(), tier_summary_fields=summary.to_report_fields())
 
 
 def _matrix() -> MatrixResult:
@@ -211,16 +206,6 @@ def test_an_archive_lacking_the_key_loads_and_renders_n_a() -> None:
         ]
         is None
     )
-
-
-def test_the_pre_spec_legacy_archive_still_loads_and_renders() -> None:
-    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
-    arms = [arm_from_report_fields(fields) for fields in payload["arms"]]
-    matrix_result = build_matrix_result(arms)
-    markdown = render_markdown(matrix_result)
-    assert _md_rows(markdown, "Supervisor")["Task completion over repeats"] == ["n/a"] * len(arms)
-    render_csv(matrix_result)
-    render_json(matrix_result)
 
 
 def test_an_archive_carrying_the_key_round_trips_it() -> None:

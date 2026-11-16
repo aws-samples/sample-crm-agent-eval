@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from scripts.smoke.cognito_claims import LiveSmokeUserProvisioner, _live_decode_for
-from scripts.smoke.harness import SmokeContext, smoke_context
+from scripts.smoke.harness import SmokeContext, exception_detail, smoke_context
 from scripts.smoke.tenant import SmokeTenant, is_smoke_run_id
 
 from crm.authz import DEMO_TENANT
@@ -154,7 +154,7 @@ def assert_supplied_token(ctx: SmokeContext, *, id_token: str, expected_tenant: 
     except Exception as exc:
         raise RuntimeError(
             f"the supplied token could not be decoded or verified against the pool: "
-            f"{type(exc).__name__}: {exc}. A token that cannot be verified cannot be shown to name "
+            f"{exception_detail(exc)}. A token that cannot be verified cannot be shown to name "
             "this run's tenant, so it is refused rather than passed on."
         ) from exc
     return assert_token_tenant(claims, expected=expected_tenant)

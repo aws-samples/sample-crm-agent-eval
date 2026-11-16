@@ -110,6 +110,7 @@ def _arm_at_timestamp(timestamp: str) -> ArmResult:
             price_table_version=provenance.price_table_version,
             answer_style_sha256=provenance.answer_style_sha256,
             prompt_bundle_sha256=provenance.prompt_bundle_sha256,
+            prompt_caching=provenance.prompt_caching,
         ),
         model_metrics_fields=base.model_metrics_fields,
         aggregate_score_fields=base.aggregate_score_fields,

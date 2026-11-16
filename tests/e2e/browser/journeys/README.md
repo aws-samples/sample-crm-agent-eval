@@ -26,8 +26,9 @@ describes what it asserts and its declared limits.
 | `19-account-opportunities` | An account's detail page lists its opportunities in the shared table; an account with none shows "No opportunities yet." and no table |
 | `20-chat-cost` | Each reply shows its cost with a per-tier breakdown and the header totals the conversation; the withheld text appears only when `config/pricing.yaml` is `provisional: true` |
 | `21-tier-comparison` | A stub sweep's tier comparison summary renders three tables (Supervisor, Subagent, ToolCall), each headed `Metric` plus one column per arm with fixed row labels and the notes beneath; every cell equals the run status's `tier_comparison_table`, and the downloaded `matrix.md`'s tier section carries the same cells and notes. No verdict or winner term appears in either |
+| `22-chat-recall` | A follow-up in the same conversation recalls a code word stated in an earlier turn: it reuses the turn's `session_id` with a positive `resume_from` and its answer differs from the earlier one, so a replay cannot pass. A later turn recalls two code words. After "New conversation" the same question gets a fresh `session_id` and an answer without the code word. Real model turns, billed as chat |
 
-Journeys 14–20 sit in one directory each.
+Journeys 14–22 sit in one directory each.
 
 ## Running them
 

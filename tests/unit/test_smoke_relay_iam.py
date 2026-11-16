@@ -1064,7 +1064,8 @@ class TestTheDataPlaneDenyRows:
             row = results[f"D7[usage_records]{suffix}"]
             assert row.status == "fail", f"{row.check}: {row.detail}"
         if decision is None:
-            assert "error (ClientError" in results["D7[usage_records]_positive_control"].detail
+            detail = results["D7[usage_records]_positive_control"].detail
+            assert "error (iam:SimulateCustomPolicy failed (AccessDenied))" in detail
 
     @pytest.mark.parametrize("action", [ACTION_DYNAMODB_GET_ITEM, ACTION_DYNAMODB_PUT_ITEM])
     def test_a_relay_grant_on_usage_records_reds_its_deny_row(self, action: str) -> None:
@@ -1288,7 +1289,8 @@ class TestX1ChatTargetDenyCoversActionsNobodyEnumerated:
         results = _by_check(_run(iam=iam)[0])
         row = results[self._ROW]
         assert row.status == "fail"
-        assert "ClientError" in row.detail and "NoSuchEntity" in row.detail
+        assert "failed (NoSuchEntity)" in row.detail
+        assert f"{_CHAT_TARGET_ROLE_ARN} not found" not in row.detail
         assert results["U1_function_url_auth_type"].status == "pass"
 
     def test_chat_target_absent_from_the_invokers_fails_the_row(
@@ -1486,3 +1488,60 @@ class TestTheRuntimeRoleCannotInvokeAgentLessTools:
         )
         results = _by_check(_run(iam=iam)[0])
         assert results[f"R1[{_AGENT_LESS[0]}]_not_granted_to_runtime_by_policy"].status == "fail"
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted_error(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"{_PLANTED_ARN} is not authorized"}},
+        operation,
+    )
+
+
+class _PlantedIam(_FakeIam):
+    """Every simulate of a role other than the relay and the Runtime role, every synthetic Allow
+    and every `get_role` raise a `ClientError` whose message carries `_PLANTED_ARN`."""
+
+    def simulate_principal_policy(
+        self,
+        *,
+        PolicySourceArn: str,  # noqa: N803 - boto3's own parameter names
+        ActionNames: list[str],  # noqa: N803
+        ResourceArns: list[str],  # noqa: N803
+    ) -> dict[str, Any]:
+        if PolicySourceArn not in {_RELAY_ROLE_ARN, _RUNTIME_ROLE_ARN}:
+            raise _planted_error("SimulatePrincipalPolicy")
+        return super().simulate_principal_policy(
+            PolicySourceArn=PolicySourceArn, ActionNames=ActionNames, ResourceArns=ResourceArns
+        )
+
+    def simulate_custom_policy(self, **kwargs: Any) -> dict[str, Any]:
+        raise _planted_error("SimulateCustomPolicy")
+
+    def get_role(self, *, RoleName: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_error("GetRole")
+
+
+class _PlantedLambda(_FakeLambda):
+    def get_function_url_config(self, *, FunctionName: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_error("GetFunctionUrlConfig")
+
+
+class TestAwsErrorsCarryNoMessage:
+    def test_a_planted_arn_in_any_aws_error_never_reaches_a_detail(self) -> None:
+        iam = _PlantedIam(_compliant_decisions(), wildcard=_compliant_wildcard())
+        results = _run(iam=iam, lambda_client=_PlantedLambda())[0]
+        by_check = _by_check(results)
+        assert not [r for r in results if _PLANTED_ARN in r.detail]
+        planted_rows = [r for r in results if "failed (AccessDenied)" in r.detail]
+        assert {r.check for r in planted_rows} >= {
+            "U1_function_url_auth_type",
+            "D12_target_role_resolves",
+            "X1_chat_target_deny_covers_actions_nobody_enumerated",
+            "D7[usage_records]_positive_control",
+        }
+        assert any(r.check.startswith("D15[") for r in planted_rows)
+        assert any(r.check.startswith("I1[") for r in planted_rows)
+        assert all(by_check[r.check].status == "fail" for r in planted_rows)

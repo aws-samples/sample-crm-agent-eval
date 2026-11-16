@@ -20,7 +20,7 @@ import {
   type TokenSource,
 } from "../../api/CrmApiClient";
 import { TIER_COMPARISON_TIERS } from "./types";
-import type { EvalMatrix, EvalTierComparisonTable } from "./types";
+import type { EvalMatrix, EvalRecordFormat, EvalTierComparisonTable } from "./types";
 
 /**
  * The run statuses `RunRecord.to_payload()` renders (`eval.runs.JOB_STATUSES`).
@@ -110,6 +110,8 @@ export interface EvalRunStatusResponse {
    * table whose shape cannot be read is dropped at parse time and renders as unavailable.
    */
   readonly tier_comparison_table?: EvalTierComparisonTable;
+  /** `"earlier"` when the run was recorded in an earlier format; absent on a current-format run. */
+  readonly record_format?: EvalRecordFormat;
   /**
    * Paths/URLs to the run artifacts, once produced. `useEvalRun.toArtifactLinks` converts these to
    * the client-side `EvalArtifactLinks`.

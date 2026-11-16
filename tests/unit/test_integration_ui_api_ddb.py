@@ -767,6 +767,39 @@ def test_derived_out_of_book_candidate_of_another_tenant_is_never_used() -> None
     assert not [tool for tool, _ in calls if tool == "get_account"]
 
 
+def test_a_failed_out_of_book_read_names_the_aws_code_never_the_message() -> None:
+    """A DynamoDB error while deriving the 403 target is reported by operation and code only."""
+    planted_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+    book = [f"acct-{SMOKE_TENANT}-0000", f"acct-{SMOKE_TENANT}-0001"]
+    client = _dynamodb_client()
+    stubber = Stubber(client)
+    _stub_full_round_trip(stubber)
+    stubber.add_client_error(
+        "get_item",
+        service_error_code="AccessDeniedException",
+        service_message=f"User: {planted_arn} is not authorized",
+        http_status_code=400,
+    )
+    stubber.activate()
+    token = _token_with_claims({"custom:tenant": SMOKE_TENANT, "custom:book": ",".join(book)})
+
+    results = list(
+        checks(
+            _make_ctx(client),
+            http_caller=_happy_http_caller(),
+            token=token,
+            account_id=ACCOUNT_ID,
+            out_of_book_account_id=None,
+        )
+    )
+    stubber.deactivate()
+
+    denial = _check(results, "out_of_book_refused_403")
+    assert denial.status == "fail"
+    assert "failed (AccessDeniedException)" in denial.detail
+    assert planted_arn not in denial.detail
+
+
 @pytest.mark.parametrize("kind", ["not_a_jwt", "forged"])
 def test_an_unverifiable_token_is_refused_before_any_call_even_with_a_tenant_flag(
     kind: str,

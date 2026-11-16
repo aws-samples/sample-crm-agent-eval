@@ -61,6 +61,7 @@ from scripts.smoke.harness import (
     ExpectedCheckCount,
     InsecureSchemeError,
     SmokeContext,
+    exception_detail,
     run_main,
 )
 
@@ -277,7 +278,7 @@ def _http_status_of(exc: BaseException) -> int | None:
 def _describe(exc: BaseException) -> str:
     if isinstance(exc, BaseExceptionGroup) and exc.exceptions:
         return _describe(exc.exceptions[0])
-    return f"{type(exc).__name__}: {exc}"[:300]
+    return exception_detail(exc)[:300]
 
 
 @dataclass
@@ -663,7 +664,11 @@ def checks(
     try:
         url1, url2 = gateway1_url(ctx), gateway2_url(ctx)
     except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
-        yield _row("terraform_output_present", False, f"a Gateway URL output is unusable ({exc})")
+        yield _row(
+            "terraform_output_present",
+            False,
+            f"a Gateway URL output is unusable ({exception_detail(exc)})",
+        )
         return
     runner: SessionRunner = session_runner or run_session
 
@@ -708,7 +713,9 @@ def checks(
             try:
                 yield from provisioner.cleanup()
             except Exception as exc:  # noqa: BLE001 - every cleanup is attempted
-                yield _row("principal_cleanup", False, f"cleanup raised {_describe(exc)}")
+                yield _row(
+                    "principal_cleanup", False, f"cleanup raised {exception_detail(exc)[:300]}"
+                )
 
 
 def expected_check_count(ctx: SmokeContext) -> ExpectedCheckCount:

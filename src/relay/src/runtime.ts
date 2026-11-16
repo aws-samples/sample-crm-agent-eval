@@ -86,6 +86,7 @@ export interface TurnRequest {
   readonly pageContext?: unknown;
   readonly tuning?: unknown;
   readonly resumeFrom?: number;
+  readonly resume?: true;
 }
 
 /** The principal type the relay declares: it serves only Cognito user tokens. */
@@ -121,6 +122,9 @@ export function buildRuntimePayload(request: TurnRequest): Record<string, unknow
   }
   if (request.resumeFrom !== undefined) {
     payload["resume_from"] = request.resumeFrom;
+  }
+  if (request.resume === true) {
+    payload["resume"] = true;
   }
   return payload;
 }

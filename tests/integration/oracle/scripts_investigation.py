@@ -134,24 +134,51 @@ _GT04: Final[OracleScript] = (
         tool="research",
         args={
             "intent": (
-                "Read opp-0000, opp-0040 and opp-0080, and the contact list of their account "
-                "acct-0000."
+                "Find the opportunities rep-ashford owns on acct-0000 and read opp-0000, "
+                "opp-0040, opp-0080 and opp-0120."
             )
         },
+    ),
+    Call(
+        role="research",
+        tool="search_opportunities",
+        args={"account_id": "acct-0000", "owner_rep_id": "rep-ashford"},
     ),
     Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0000"}),
     Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0040"}),
     Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0080"}),
+    Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0120"}),
+    Answer(
+        role="research",
+        text=(
+            "rep-ashford owns eight opportunities on acct-0000; opp-0000, opp-0040 and opp-0080 "
+            "name the departed cont-0000 as primary contact."
+        ),
+    ),
+    Call(
+        role="supervisor",
+        tool="research",
+        args={
+            "intent": (
+                "Read opp-0160, opp-0200, opp-0240 and opp-0280, and the contact list of acct-0000."
+            )
+        },
+    ),
+    Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0160"}),
+    Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0200"}),
+    Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0240"}),
+    Call(role="research", tool="get_opportunity", args={"opportunity_id": "opp-0280"}),
     Call(role="research", tool="get_account", args={"account_id": "acct-0000"}),
     Answer(
         role="research",
-        text="opp-0000's primary contact cont-0000 has departed; cont-0001 is an active successor.",
+        text="opp-0200 also names cont-0000; cont-0001 is an active successor at acct-0000.",
     ),
     Answer(
         role="supervisor",
         text=(
-            "Of opp-0000, opp-0040 and opp-0080, opp-0000's primary contact cont-0000 has "
-            "departed; cont-0001 at acct-0000 is a plausible successor."
+            "Of rep-ashford's opportunities on acct-0000, opp-0000, opp-0040, opp-0080 and "
+            "opp-0200 have the departed cont-0000 as primary contact; cont-0001 at acct-0000 is a "
+            "plausible successor."
         ),
     ),
 )

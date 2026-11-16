@@ -41,7 +41,13 @@ from scripts.smoke.api_routes import (
     _tenant_refusal,
     verified_token_claims,
 )
-from scripts.smoke.harness import CheckResult, SmokeContext, open_https, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    SmokeContext,
+    exception_detail,
+    open_https,
+    run_main,
+)
 
 from crm.authz import DEMO_TENANT
 from crm.envelope import CLAIM_BOOK, split_book
@@ -495,7 +501,7 @@ def checks(  # noqa: C901, PLR0912, PLR0915 - one cohesive round trip; splitting
                 ctx, smoke_tenant, [*in_book_accounts(claims), account_id]
             )
         except (ValueError, LookupError, CrmError) as exc:
-            derivation_failure = f"{type(exc).__name__}: {exc}"
+            derivation_failure = exception_detail(exc)
     if out_of_book_account_id is None:
         yield CheckResult(
             resource="denial",

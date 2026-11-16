@@ -45,7 +45,36 @@ over-bound and an off-charset `route`; each must be refused with HTTP 400 carryi
 generic validation message, with the marker absent from the response body. They make no model call
 and are not counted.
 
+**Check 8 — latest-message prompt caching.** Three tool-free anthropic-supervisor turns with one
+prompt from :func:`cache_history_prompt`: **C** in a fresh session, then **A** and **B** in one
+shared session S. The prompt carries a nonce drawn once per run, so a re-run within the cache TTL
+cannot read an earlier run's cached copy of it. `pass` when no turn emitted a `tool_call` frame and
+B's supervisor `cache_read_tokens` exceeds C's: a cache point on the latest message is read back by
+a later turn. The row does not show that the session's history reached the model; check 9 does. A
+`tool_call` frame on any of the three is a `defer` (:data:`CACHE_HISTORY_TOOL_CALL_REASON`); C
+reading zero with no write reported on any turn is a `defer` (:data:`CACHE_UNREPORTED_REASON`);
+otherwise B not exceeding C fails. The three turns are issued only when the module's share still has
+room for all of them.
+
+**Check 9 — a follow-up turn carries the session's history.** Four tool-free anthropic-supervisor
+turns: **A** in a fresh session S states a run-unique code word (:func:`history_fact_prompt`), **B**
+in S asks for it, and a control in another fresh session asks the same. `pass` when B's answer
+contains the code word, B's supervisor `cache_write_tokens > 0` with `cache_read_tokens` at least
+A's, and the control completed without it. A fourth turn in S omits `resume_from`, as an MCP
+client's follow-up does, and repeats the question in other words: it must answer with the code word
+and read more cached prompt than B, which a replay of B cannot. The Runtime log streams must show
+every check-9 turn, and no stream of any of this module's sessions may carry a
+`history_read_failed`, `history_write_failed` or `history_write_conflict` line. The operator then
+reads S's history item in `reps` (:func:`crm.store.keys.history_key` under user A's tenant): it must
+exist, name user A's tenant as its owner, and expire within the store's TTL. Every history item this
+module's sessions could have written is deleted in a `finally` and proved absent by re-read. The
+four turns are issued only when the module's share still has room for all of them.
+
 Runtime-role Bedrock IAM is checked by `scripts/smoke/runtime_bedrock_iam.py`, not here.
+
+Every live turn sends its session's recorded-frame count as `resume_from`
+(:class:`ResumeCursor`), so a follow-up turn in a session runs rather than replaying the session's
+previous turn.
 
 Tokens come from disposable smoke users removed in a `finally`; never the `demo` or `canary`
 tenant. Billable: a live turn makes real model calls. Model-backed turns are counted against this
@@ -65,10 +94,21 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, NamedTuple
+from decimal import Decimal
+from typing import Any, Final, NamedTuple, Protocol
 
-from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, open_https, run_main
+from scripts.smoke.harness import (
+    DEFER,
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    exception_detail,
+    open_https,
+    run_main,
+)
 
+from agents.conversation_history import DEFAULT_TTL_SECONDS, HISTORY_ITEM_ATTRIBUTES
+from crm.store.keys import history_key
 from crm.toolspec.page_context import ROUTE_MAX_LENGTH
 from providers.capabilities import CapabilityMatrix, load_capability_matrix
 from providers.tier_tuning import WIRE_SCHEMA_VERSION
@@ -120,7 +160,7 @@ ATTRIBUTION_ROW_SUFFIX: Final[str] = ":attribution"
 #: Post-deploy model-backed turns, split between the modules that spend them.
 MODEL_TURN_ENVELOPE: Final[int] = 20
 MODEL_TURN_ALLOTMENTS: Final[Mapping[str, int]] = {
-    "three_tier_chat": 5,
+    "three_tier_chat": 12,
     "mcp_chat_gateway": 2,
     "agents": 1,
 }
@@ -139,6 +179,71 @@ CACHE_UNREPORTED_REASON: Final[str] = "platform_reported_no_cache_tokens"
 
 #: Check 6's second openai turn: no tool needed, so it is one supervisor round.
 _OPENAI_CACHE_PROBE_PROMPT: Final[str] = "Reply with the single word: ready. Do not call any tool."
+
+#: Check 8's instruction, which :func:`cache_history_prompt` follows with the run's nonce.
+_CACHE_HISTORY_INSTRUCTION: Final[str] = (
+    "Reply with one short sentence confirming you are ready. Do not call any tool."
+)
+
+
+def cache_history_prompt(nonce: str) -> str:
+    """Check 8's prompt for one run: the instruction plus `nonce`, sent unchanged on C, A and B."""
+    return f"{_CACHE_HISTORY_INSTRUCTION} Ignore this cache-busting nonce: {nonce}."
+
+
+#: Check 8's model-backed turns: C (fresh session), then A and B (one shared session).
+CACHE_HISTORY_TURNS: Final[int] = 3
+
+#: Check 8's defer reason when a turn called a tool, so it was not a single supervisor call.
+CACHE_HISTORY_TOOL_CALL_REASON: Final[str] = "cache_history_turn_called_a_tool"
+
+CACHE_HISTORY_CHECK: Final[str] = "supervisor_prompt_cache_reads_latest_message:anthropic"
+
+#: Check 9's model-backed turns: A and B in one session, a fresh-session control, then a follow-up
+#: in A's session that omits `resume_from`.
+HISTORY_RECALL_TURNS: Final[int] = 4
+
+HISTORY_RECALL_CHECK: Final[str] = "followup_turn_carries_history:anthropic"
+HISTORY_ITEM_CHECK: Final[str] = "history_item_owned_and_expiring"
+HISTORY_ITEMS_DELETED_CHECK: Final[str] = "history_items_deleted"
+HISTORY_OMITTED_RESUME_CHECK: Final[str] = "followup_without_resume_from_carries_history:anthropic"
+HISTORY_LOG_CHECK: Final[str] = "history_store_failures_absent_from_runtime_logs"
+
+#: The Runtime's log events for a history store error or a write lost after its retries; the turn's
+#: answer is delivered regardless.
+HISTORY_FAILURE_EVENTS: Final[tuple[str, ...]] = (
+    "history_read_failed",
+    "history_write_failed",
+    "history_write_conflict",
+)
+
+#: How long check 9 polls the Runtime log group for its turns' `invocation_started` lines.
+_HISTORY_LOG_POLL_SECONDS: Final[float] = 180.0
+_HISTORY_LOG_POLL_INTERVAL: Final[float] = 10.0
+
+#: The `reps` table, which holds the Runtime's conversation-history items.
+_HISTORY_TABLE: Final[str] = "reps"
+
+#: Check 9's question, sent unchanged on B and on the control; it never carries the code word.
+HISTORY_RECALL_PROMPT: Final[str] = (
+    "What is my project code word? Reply with the code word only. Do not call any tool."
+)
+
+#: Check 9's fourth turn, sent without `resume_from`; worded apart from B's so it is a new request.
+HISTORY_REPEAT_PROMPT: Final[str] = (
+    "Repeat my project code word once more, with no other text. Do not call any tool."
+)
+
+
+def history_fact_prompt(code_word: str) -> str:
+    """Check 9's turn A: states `code_word` as a fact for a later turn in the session to recall."""
+    return f"My project code word is {code_word}. Reply OK. Do not call any tool."
+
+
+def history_code_word() -> str:
+    """A run-unique code word for check 9; it occurs in no prompt but turn A's."""
+    return f"zq{_suffix()[:12]}"
+
 
 #: Check 7's prompt; the turn is refused before any model call.
 _PAGE_REFUSAL_PROMPT: Final[str] = "Reply with the single word: ready."
@@ -334,6 +439,67 @@ CloudTrailLookup = Callable[[SmokeContext, int, int], "list[CloudTrailEvent]"]
 ProvisionerFactory = Callable[[SmokeContext], Any]
 
 
+class HistoryItems(Protocol):
+    """Operator access to the `reps` history items, by their `rep_id` key."""
+
+    def get(self, rep_id: str) -> Mapping[str, Any] | None:
+        """The item at `rep_id`, strongly consistent, or `None`."""
+        ...
+
+    def delete(self, rep_id: str) -> None:
+        """Delete the item at `rep_id`; absent is not an error."""
+        ...
+
+
+#: `(ctx) -> HistoryItems`. Live default addresses the deployed `reps` table.
+HistoryItemsFactory = Callable[[SmokeContext], HistoryItems]
+
+
+class _LiveHistoryItems:
+    """`HistoryItems` over the deployed `reps` table, as the operator credential."""
+
+    def __init__(self, ctx: SmokeContext) -> None:
+        from crm.store.store import Store
+
+        names = ctx.outputs.require_mapping("dynamodb_table_names")
+        accounts = str(names["accounts"])
+        self._store = Store(
+            client=ctx.client("dynamodb"), table_prefix=accounts[: -len("accounts")]
+        )
+
+    def get(self, rep_id: str) -> Mapping[str, Any] | None:
+        return self._store.get_item(_HISTORY_TABLE, {"rep_id": rep_id}, consistent=True)
+
+    def delete(self, rep_id: str) -> None:
+        self._store.delete_item(_HISTORY_TABLE, {"rep_id": rep_id})
+
+
+def delete_history_items(items: HistoryItems, keys: Sequence[str]) -> CheckResult:
+    """Delete every history item in `keys` and prove each absent by a consistent re-read."""
+    remaining: list[str] = []
+    try:
+        for key in keys:
+            items.delete(key)
+            if items.get(key) is not None:
+                remaining.append(key)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_ITEMS_DELETED_CHECK,
+            status="fail",
+            detail=f"could not delete the history items: {exception_detail(exc)}",
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=HISTORY_ITEMS_DELETED_CHECK,
+        status="fail" if remaining else "pass",
+        detail=(
+            f"{len(keys)} history key(s) deleted, {len(remaining)} still present on re-read"
+            + (f": {remaining}" if remaining else "")
+        ),
+    )
+
+
 def _tier_profiles(
     families: Mapping[str, str], matrix: CapabilityMatrix | None = None
 ) -> dict[str, str]:
@@ -400,6 +566,7 @@ def _live_run_turn(
     tuning: Mapping[str, Any],
     *,
     page_context: Mapping[str, Any] | None = None,
+    resume_from: int | None = 0,
 ) -> TurnResult:
     """Issue one authenticated turn through CloudFront -> relay -> Runtime, returning status + reason.
 
@@ -416,12 +583,10 @@ def _live_run_turn(
     domain = ctx.outputs.require_str("cloudfront_domain_name")
     runtime_arn = ctx.outputs.require_str("agentcore_runtime_arn")
     url = f"https://{domain}/agent/{urllib.parse.quote(runtime_arn, safe='')}"
-    body_fields: dict[str, Any] = {
-        "prompt": prompt,
-        "session_id": session_id,
-        "resume_from": 0,
-        "tuning": dict(tuning),
-    }
+    body_fields: dict[str, Any] = {"prompt": prompt, "session_id": session_id}
+    if resume_from is not None:
+        body_fields["resume_from"] = resume_from
+    body_fields["tuning"] = dict(tuning)
     if page_context is not None:
         body_fields["page_context"] = dict(page_context)
     payload = json.dumps(body_fields).encode("utf-8")
@@ -475,6 +640,59 @@ def _live_run_turn(
             message=str(body.get("message", "")) if isinstance(body, dict) else "",
             raw_body=raw.decode("utf-8", errors="replace"),
         )
+
+
+class ResumeCursor:
+    """Per-session count of the frames the Runtime records (every kind but `heartbeat`).
+
+    A turn in a session that already has recorded frames must send that count as `resume_from`;
+    a lower value is a reconnect, and the Runtime replays the earlier frames instead of running it.
+    """
+
+    def __init__(self) -> None:
+        self._recorded: dict[str, int] = {}
+
+    def resume_from(self, session_id: str) -> int:
+        """The `resume_from` the next turn in `session_id` sends."""
+        return self._recorded.get(session_id, 0)
+
+    def advance(self, session_id: str, kinds: Iterable[str]) -> None:
+        """Count the recorded frames of a turn in `session_id` that streamed `kinds`."""
+        recorded = sum(1 for kind in kinds if kind != "heartbeat")
+        self._recorded[session_id] = self.resume_from(session_id) + recorded
+
+
+class _LiveTurns:
+    """The live `RunTurn`: :func:`_live_run_turn` with each session's :class:`ResumeCursor` value.
+
+    `omit_resume_from=True` sends no `resume_from` at all, as an MCP client's follow-up does.
+    """
+
+    def __init__(self) -> None:
+        self.cursor = ResumeCursor()
+
+    def __call__(
+        self,
+        ctx: SmokeContext,
+        token: str,
+        session_id: str,
+        prompt: str,
+        tuning: Mapping[str, Any],
+        *,
+        page_context: Mapping[str, Any] | None = None,
+        omit_resume_from: bool = False,
+    ) -> TurnResult:
+        result = _live_run_turn(
+            ctx,
+            token,
+            session_id,
+            prompt,
+            tuning,
+            page_context=page_context,
+            resume_from=None if omit_resume_from else self.cursor.resume_from(session_id),
+        )
+        self.cursor.advance(session_id, result.kinds)
+        return result
 
 
 def _live_cloudtrail_lookup(ctx: SmokeContext, start_ms: int, end_ms: int) -> list[CloudTrailEvent]:
@@ -902,6 +1120,343 @@ def evaluate_cache_read(
     )
 
 
+def evaluate_cache_history(
+    fresh: TurnResult, seed: TurnResult, followup: TurnResult, *, model: str
+) -> CheckResult:
+    """Check 8: the follow-up turn in a session reads more cached prompt than a fresh session.
+
+    `fresh` is C, `seed` is A and `followup` is B (A's session). `fail` when any turn's supervisor
+    line on `model` is missing or malformed; `defer` when any turn emitted a `tool_call` frame, or
+    when C read nothing and no turn reported a cache write; `pass` when B's read exceeds C's; `fail`
+    otherwise.
+    """
+    turns = {"C": fresh, "A": seed, "B": followup}
+    counts = {label: _supervisor_cache_counts(turn, model) for label, turn in turns.items()}
+    observed = (
+        f"{model}: supervisor (read, write) C={counts['C']} A={counts['A']} B={counts['B']}; "
+        f"statuses {'/'.join(str(t.status) for t in turns.values())}"
+    )
+    tool_turns = [label for label, turn in turns.items() if "tool_call" in turn.kinds]
+    if any(value is None for value in counts.values()):
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=CACHE_HISTORY_CHECK,
+            status="fail",
+            detail=(
+                f"{observed}; expected a completed frame with integer cache_read_tokens and "
+                "cache_write_tokens on each turn's supervisor cost line"
+            ),
+        )
+    if tool_turns:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=CACHE_HISTORY_CHECK,
+            status=DEFER,
+            detail=f"{observed}; turn(s) {tool_turns} called a tool, so the reads are not comparable",
+            defer_reason=CACHE_HISTORY_TOOL_CALL_REASON,
+        )
+    read = {label: value[0] for label, value in counts.items() if value is not None}
+    written = sum(value[1] for value in counts.values() if value is not None)
+    if read["B"] > read["C"]:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=CACHE_HISTORY_CHECK,
+            status="pass",
+            detail=f"{observed}; B read cached session history beyond C's prefix",
+        )
+    if read["C"] == 0 and written == 0:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=CACHE_HISTORY_CHECK,
+            status=DEFER,
+            detail=f"{observed}; the platform reported no prompt-cache write on any turn",
+            defer_reason=CACHE_UNREPORTED_REASON,
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=CACHE_HISTORY_CHECK,
+        status="fail",
+        detail=f"{observed}; B read no more cached prompt than the fresh-session turn C",
+    )
+
+
+def evaluate_history_recall(
+    seed: TurnResult,
+    followup: TurnResult,
+    control: TurnResult,
+    *,
+    code_word: str,
+    model: str,
+) -> CheckResult:
+    """Check 9: B recalls A's code word from the session's history, and a fresh session does not.
+
+    `seed` is A, `followup` is B (A's session) and `control` is the fresh-session turn. `pass` only
+    when B's answer contains `code_word`, B's supervisor line on `model` reports
+    `cache_write_tokens > 0` with `cache_read_tokens` at least A's, and the control completed with
+    an answer that does not contain `code_word`. Anything else fails.
+    """
+    counts = {
+        "A": _supervisor_cache_counts(seed, model),
+        "B": _supervisor_cache_counts(followup, model),
+    }
+    recalled = code_word in followup.answer
+    control_completed = control.status == 200 and control.completed is not None
+    leaked = code_word in control.answer
+    observed = (
+        f"{model}: supervisor (read, write) A={counts['A']} B={counts['B']}; statuses "
+        f"{seed.status}/{followup.status}/{control.status}; B recalled the code word: {recalled}; "
+        f"control completed: {control_completed}, control carried it: {leaked}"
+    )
+    seed_counts, followup_counts = counts["A"], counts["B"]
+    if seed_counts is None or followup_counts is None:
+        reason = "expected integer cache tokens on A's and B's supervisor cost lines"
+    elif not recalled:
+        reason = "B's answer does not contain the code word A stated in the same session"
+    elif followup_counts[1] <= 0:
+        reason = "B reported no cache write, so no new history tail was sent to the model"
+    elif followup_counts[0] < seed_counts[0]:
+        reason = "B read less cached prompt than A, so B's prompt does not extend A's"
+    elif not control_completed:
+        reason = "the fresh-session control did not complete, so a leak cannot be ruled out"
+    elif leaked:
+        reason = "the fresh-session control answered with the code word: history crossed sessions"
+    else:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_RECALL_CHECK,
+            status="pass",
+            detail=f"{observed}; B recalled the session's history and the control did not",
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=HISTORY_RECALL_CHECK,
+        status="fail",
+        detail=f"{observed}; {reason}",
+    )
+
+
+def evaluate_history_item(
+    item: Mapping[str, Any] | None, *, tenant: str, now: float, ttl_seconds: int
+) -> CheckResult:
+    """Check 9's operator read: the history item exists, is owned by `tenant`, and expires in TTL.
+
+    `pass` when `item` carries exactly :data:`HISTORY_ITEM_ATTRIBUTES` (so no `tenant`), with
+    `kind == "history"`, `owner_tenant == tenant`, a non-empty `owner_rep_id`, and a numeric
+    `expires_at` in `(now, now + ttl_seconds]`.
+    """
+    if item is None:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_ITEM_CHECK,
+            status="fail",
+            detail=f"no history item for the session under tenant {tenant!r}",
+        )
+    expires_at = item.get("expires_at")
+    numeric = isinstance(expires_at, int | float | Decimal) and not isinstance(expires_at, bool)
+    in_window = numeric and now < float(expires_at) <= now + ttl_seconds  # type: ignore[arg-type]
+    owner_rep = item.get("owner_rep_id")
+    extra = sorted(set(item) - HISTORY_ITEM_ATTRIBUTES)
+    missing = sorted(HISTORY_ITEM_ATTRIBUTES - set(item))
+    ok = (
+        not extra
+        and not missing
+        and item.get("kind") == "history"
+        and item.get("owner_tenant") == tenant
+        and isinstance(owner_rep, str)
+        and bool(owner_rep)
+        and in_window
+    )
+    turns = item.get("turns")
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=HISTORY_ITEM_CHECK,
+        status="pass" if ok else "fail",
+        detail=(
+            f"kind={item.get('kind')!r} owner_tenant matches: {item.get('owner_tenant') == tenant} "
+            f"owner_rep_id set: {isinstance(owner_rep, str) and bool(owner_rep)} "
+            f"turns={len(turns) if isinstance(turns, list) else turns!r} expires_at={expires_at!r} "
+            f"window=({now:.0f}, {now + ttl_seconds:.0f}] extra={extra} missing={missing}"
+            + ("" if ok else "; expected a history item owned by user A's tenant within the TTL")
+        ),
+    )
+
+
+def evaluate_omitted_resume_recall(
+    followup: TurnResult, repeat: TurnResult, *, code_word: str, model: str
+) -> CheckResult:
+    """Check 9's fourth turn: a same-session follow-up without `resume_from` still recalls.
+
+    `followup` is B and `repeat` the fourth turn. `pass` when the repeat's answer contains
+    `code_word` and its supervisor `cache_read_tokens` exceeds B's. A replay of B carries B's
+    answer and B's counts unchanged, so it fails.
+    """
+    counts = {
+        "B": _supervisor_cache_counts(followup, model),
+        "R": _supervisor_cache_counts(repeat, model),
+    }
+    recalled = code_word in repeat.answer
+    observed = (
+        f"{model}: supervisor (read, write) B={counts['B']} repeat={counts['R']}; statuses "
+        f"{followup.status}/{repeat.status}; repeat recalled the code word: {recalled}"
+    )
+    b_counts, r_counts = counts["B"], counts["R"]
+    if b_counts is None or r_counts is None:
+        reason = "expected integer cache tokens on B's and the repeat's supervisor cost lines"
+    elif not recalled:
+        reason = "the follow-up sent without resume_from does not carry the code word"
+    elif r_counts[0] <= b_counts[0]:
+        reason = (
+            "the follow-up read no more cached prompt than B, so it did not extend the session "
+            "(a replay of B reports B's counts)"
+        )
+    else:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_OMITTED_RESUME_CHECK,
+            status="pass",
+            detail=f"{observed}; a follow-up without resume_from ran and carried the history",
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=HISTORY_OMITTED_RESUME_CHECK,
+        status="fail",
+        detail=f"{observed}; {reason}",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeLogLine:
+    """One Runtime log event: the stream it was written to and its message."""
+
+    stream: str
+    message: str
+
+
+#: `(ctx, start_ms, end_ms) -> list[RuntimeLogLine]`. Live default reads the Runtime log group.
+RuntimeLogLookup = Callable[[SmokeContext, int, int], "list[RuntimeLogLine]"]
+
+
+def _live_runtime_log_lookup(ctx: SmokeContext, start_ms: int, end_ms: int) -> list[RuntimeLogLine]:
+    """Every event in the Runtime log group between `start_ms` and `end_ms`, following pages."""
+    client = ctx.client("logs")
+    request: dict[str, Any] = {
+        "logGroupName": ctx.outputs.require_str("agentcore_runtime_log_group_name"),
+        "startTime": start_ms,
+        "endTime": end_ms,
+    }
+    lines: list[RuntimeLogLine] = []
+    while True:
+        response = client.filter_log_events(**request)
+        lines.extend(
+            RuntimeLogLine(
+                stream=str(e.get("logStreamName", "")), message=str(e.get("message", ""))
+            )
+            for e in response.get("events", [])
+        )
+        token = response.get("nextToken")
+        if not token:
+            return lines
+        request["nextToken"] = token
+
+
+def _invocations_by_session(
+    lines: Sequence[RuntimeLogLine], sessions: Sequence[str]
+) -> dict[str, list[str]]:
+    """`{session: [stream, ...]}` of the `invocation_started` lines naming each session."""
+    found: dict[str, list[str]] = {session: [] for session in sessions}
+    for line in lines:
+        if '"invocation_started"' not in line.message:
+            continue
+        for session in sessions:
+            if f'"session_id": "{session}"' in line.message:
+                found[session].append(line.stream)
+    return found
+
+
+def evaluate_history_logs(
+    lines: Sequence[RuntimeLogLine],
+    turns_by_session: Mapping[str, int],
+    *,
+    module_sessions: Sequence[str] = (),
+    poll_summary: str = "",
+) -> CheckResult:
+    """Check 9's log read: no history store failure on any of the module's turns.
+
+    A history failure line carries no session id, so it is attributed by its log stream: a stream
+    whose name contains one of `module_sessions` or of `turns_by_session`'s sessions. The control
+    is that each of `turns_by_session`'s sessions has at least that many `invocation_started`
+    lines, all in streams whose name contains the session id; without it a missing failure line
+    proves nothing.
+    """
+    sessions = list(turns_by_session)
+    invocations = _invocations_by_session(lines, sessions)
+    seen = {session: len(streams) for session, streams in invocations.items()}
+    attributable = {*sessions, *module_sessions}
+    session_streams = {
+        line.stream for line in lines if any(session in line.stream for session in attributable)
+    }
+    attributed = all(
+        seen[session] >= turns_by_session[session]
+        and all(session in stream for stream in invocations[session])
+        for session in sessions
+    )
+    failures = [
+        f"{line.stream}: {event}"
+        for line in lines
+        if line.stream in session_streams
+        for event in HISTORY_FAILURE_EVENTS
+        if f'"{event}"' in line.message
+    ]
+    observed = (
+        f"invocation_started per session {seen} (expected {dict(turns_by_session)}); "
+        f"{len(session_streams)} session stream(s); history failure lines {failures}"
+        + (f" [{poll_summary}]" if poll_summary else "")
+    )
+    if not attributed:
+        reason = (
+            "the log read did not find every turn's invocation_started line in a stream naming "
+            "its session, so the absence of a failure line is not evidence"
+        )
+    elif failures:
+        reason = "the history store failed on a module turn; the answer is delivered either way"
+    else:
+        return CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_LOG_CHECK,
+            status="pass",
+            detail=f"{observed}; every turn logged and no history store failure",
+        )
+    return CheckResult(
+        resource=RESOURCE_CLASS,
+        check=HISTORY_LOG_CHECK,
+        status="fail",
+        detail=f"{observed}; {reason}",
+    )
+
+
+def _poll_history_logs(
+    lookup: RuntimeLogLookup,
+    ctx: SmokeContext,
+    start_ms: int,
+    turns_by_session: Mapping[str, int],
+    *,
+    clock: Callable[[], float],
+    sleeper: Callable[[float], None] | None,
+) -> tuple[list[RuntimeLogLine], str]:
+    """Poll until every session's `invocation_started` lines are in, or the bound elapses."""
+    wait = sleeper if sleeper is not None else time.sleep
+    started = clock()
+    polls = 0
+    while True:
+        lines = lookup(ctx, start_ms, int(clock() * 1000) + 60_000)
+        polls += 1
+        seen = _invocations_by_session(lines, list(turns_by_session))
+        complete = all(len(seen[s]) >= n for s, n in turns_by_session.items())
+        if complete or clock() - started >= _HISTORY_LOG_POLL_SECONDS:
+            return lines, f"polls={polls} elapsed={clock() - started:.0f}s lines={len(lines)}"
+        wait(_HISTORY_LOG_POLL_INTERVAL)
+
+
 def evaluate_page_context_refusal(
     check: str, result: TurnResult, *, marker: str, control: TurnResult
 ) -> CheckResult:
@@ -943,10 +1498,28 @@ def checks(
     cloudtrail_lookup: CloudTrailLookup | None = None,
     clock: Callable[[], float] | None = None,
     sleeper: Callable[[float], None] | None = None,
+    history_items: HistoryItemsFactory | None = None,
+    runtime_logs: RuntimeLogLookup | None = None,
 ) -> Iterable[CheckResult]:
-    """Provision users, drive the live turns of checks 1-7, assert, and clean up in a `finally`."""
+    """Provision users, drive the live turns of checks 1-9, assert, and clean up in a `finally`.
+
+    Every session id a token is sent with is recorded, and each provisioned user's history items
+    for those sessions are deleted before the users are removed.
+    """
     factory = provisioner_factory if provisioner_factory is not None else _default_provisioner
-    turn = run_turn if run_turn is not None else _live_run_turn
+    send = run_turn if run_turn is not None else _LiveTurns()
+    items_factory = history_items if history_items is not None else _LiveHistoryItems
+    log_lookup = runtime_logs if runtime_logs is not None else _live_runtime_log_lookup
+    sessions_by_token: dict[str, list[str]] = {}
+
+    def turn(
+        ctx: SmokeContext, token: str, session_id: str, *args: Any, **kwargs: Any
+    ) -> TurnResult:
+        sessions = sessions_by_token.setdefault(token, [])
+        if session_id not in sessions:
+            sessions.append(session_id)
+        return send(ctx, token, session_id, *args, **kwargs)
+
     lookup = cloudtrail_lookup if cloudtrail_lookup is not None else _live_cloudtrail_lookup
     now = clock if clock is not None else time.time
     attribution = select_attribution_mapping()
@@ -957,12 +1530,15 @@ def checks(
     runtime_role = _runtime_role_name(ctx)
 
     budget = ModelTurnBudget(RESOURCE_CLASS)
+    logs_from_ms = int(now() * 1000) - 60_000
     provisioners: list[Any] = []
+    tokens: dict[int, str] = {}
     try:
         # --- Check 1: three-tier CloudTrail attribution ---
         prov_a = factory(ctx)
         provisioners.append(prov_a)
         token_a = prov_a.provision()
+        tokens[id(prov_a)] = token_a
         if attribution.families is None:
             yield attribution_collision_row(attribution)
         else:
@@ -1027,6 +1603,7 @@ def checks(
         prov_b = factory(ctx)
         provisioners.append(prov_b)
         token_b = prov_b.provision()
+        tokens[id(prov_b)] = token_b
         shared_session = f"t3-hist-{_suffix()}"
         # A seeds the session under the mixed-family tuning (check 2), then reuses it (control:
         # owner reuse is permitted). B reusing A's session_id must be refused as a session
@@ -1100,10 +1677,147 @@ def checks(
                 page_context=page_context_for(route),
             )
             yield evaluate_page_context_refusal(check, refusal, marker=marker, control=probe)
+
+        # --- Check 8: a same-session follow-up reads cached history beyond the stable prefix ---
+        if budget.allotment - len(budget.used) < CACHE_HISTORY_TURNS:
+            yield budget_refused(budget, "cache-history turns")
+            return
+        history_tuning = tuning_block(dict.fromkeys(_TIERS, _FAMILY))
+        history_model = expected_tier_models(dict.fromkeys(_TIERS, _FAMILY))["supervisor"]
+        history_session = f"t3-chist-{_suffix()}"
+        history_prompt = cache_history_prompt(_suffix())
+        history: list[TurnResult] = []
+        for label, session in (
+            ("cache-history turn C", f"t3-cfresh-{_suffix()}"),
+            ("cache-history turn A", history_session),
+            ("cache-history turn B", history_session),
+        ):
+            budget.spend(label)
+            history.append(turn(ctx, token_a, session, history_prompt, history_tuning))
+        yield evaluate_cache_history(*history, model=history_model)
+
+        # --- Check 9: a same-session follow-up recalls a fact from the session's history ---
+        if budget.allotment - len(budget.used) < HISTORY_RECALL_TURNS:
+            yield budget_refused(budget, "history-recall turns")
+            return
+        code_word = history_code_word()
+        recall_session = f"t3-recall-{_suffix()}"
+        control_session = f"t3-rfresh-{_suffix()}"
+        recall: list[TurnResult] = []
+        for label, session, prompt in (
+            ("history-recall turn A", recall_session, history_fact_prompt(code_word)),
+            ("history-recall turn B", recall_session, HISTORY_RECALL_PROMPT),
+            ("history-recall control", control_session, HISTORY_RECALL_PROMPT),
+        ):
+            budget.spend(label)
+            recall.append(turn(ctx, token_a, session, prompt, history_tuning))
+        yield evaluate_history_recall(*recall, code_word=code_word, model=history_model)
+        budget.spend("history-recall follow-up without resume_from")
+        repeat = turn(
+            ctx,
+            token_a,
+            recall_session,
+            HISTORY_REPEAT_PROMPT,
+            history_tuning,
+            omit_resume_from=True,
+        )
+        yield evaluate_omitted_resume_recall(
+            recall[1], repeat, code_word=code_word, model=history_model
+        )
+        turns_by_session = {recall_session: 3, control_session: 1}
+        try:
+            lines, poll_summary = _poll_history_logs(
+                log_lookup, ctx, logs_from_ms, turns_by_session, clock=now, sleeper=sleeper
+            )
+            yield evaluate_history_logs(
+                lines,
+                turns_by_session,
+                module_sessions=[sid for sids in sessions_by_token.values() for sid in sids],
+                poll_summary=poll_summary,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
+            yield CheckResult(
+                resource=RESOURCE_CLASS,
+                check=HISTORY_LOG_CHECK,
+                status="fail",
+                detail=f"could not read the Runtime log group: {exception_detail(exc)}",
+            )
+        tenant_a = str(prov_a.tenant())
+        try:
+            item = items_factory(ctx).get(history_key(tenant_a, recall_session))
+            yield evaluate_history_item(
+                item, tenant=tenant_a, now=now(), ttl_seconds=DEFAULT_TTL_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
+            yield CheckResult(
+                resource=RESOURCE_CLASS,
+                check=HISTORY_ITEM_CHECK,
+                status="fail",
+                detail=f"could not read the session's history item: {exception_detail(exc)}",
+            )
     finally:
         yield budget.result()
+        yield from _delete_module_history(
+            ctx, items_factory, provisioners, tokens, sessions_by_token
+        )
         for prov in provisioners:
             yield from prov.cleanup()
+
+
+def _delete_module_history(
+    ctx: SmokeContext,
+    items_factory: HistoryItemsFactory,
+    provisioners: Sequence[Any],
+    tokens: Mapping[int, str],
+    sessions_by_token: Mapping[str, Sequence[str]],
+) -> Iterable[CheckResult]:
+    """Delete each provisioned user's history items for every session its token was sent with."""
+    keys: list[str] = []
+    for prov in provisioners:
+        token = tokens.get(id(prov))
+        sessions = sessions_by_token.get(token, ()) if token is not None else ()
+        tenant = str(prov.tenant()) if sessions else ""
+        keys.extend(history_key(tenant, session) for session in sessions if tenant)
+    if not keys:
+        return
+    try:
+        items = items_factory(ctx)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
+        yield CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_ITEMS_DELETED_CHECK,
+            status="fail",
+            detail=f"could not address the history items: {exception_detail(exc)}",
+        )
+        return
+    yield delete_history_items(items, keys)
+
+
+def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:
+    """The rows a run that issues every turn emits whatever each turn's outcome."""
+    cost_rows = {
+        label: 4 + len(expected_tier_models(families)) + len(expected_tier_efforts(families))
+        for label, families in (("mixed-family", MIXED_FAMILIES), ("openai", OPENAI_FAMILIES))
+    }
+    single_rows = {
+        "check 1 collision or attribution control": 1,
+        "stale-tuning refusal": 1,
+        "owner session reuse control": 1,
+        "cache read per family": 2,
+        "page-context route refusals": len(refused_routes("m")),
+        "latest-message caching": 1,
+        "history recall, omitted-resume recall, logs and history item": 4,
+        "model-backed turn count": 1,
+        "history items deleted": 1,
+    }
+    return ExpectedCheckCount(
+        minimum=sum(cost_rows.values()) + sum(single_rows.values()),
+        basis=(
+            f"turn-cost rows {cost_rows} (4 plus one per tier model and tier effort from "
+            f"config/models.yaml) and one-row checks {single_rows}; provisioner cleanup rows are "
+            "not counted"
+        ),
+    )
 
 
 def _poll_cloudtrail(
@@ -1156,13 +1870,14 @@ def _suffix() -> str:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point. Live path provisions users and drives checks 1-7."""
+    """Entry point. Live path provisions users and drives checks 1-9."""
     return run_main(
         argv,
         layer=LAYER,
         resource_class=RESOURCE_CLASS,
         description=__doc__ or RESOURCE_CLASS,
         checks=checks,
+        expected=expected_check_count,
     )
 
 

@@ -601,6 +601,33 @@ def test_allowlist_check_reds_on_a_dropped_entry() -> None:
     assert _allowlisted_modules(mutated) != _grant_holding_modules(files)
 
 
+def _non_module_entries(main_tf: str) -> list[str]:
+    """Entries of `local.dynamodb_data_plane_role_arns` that are not a `module.*` role ARN."""
+    match = re.search(
+        r"dynamodb_data_plane_role_arns\s*=\s*concat\((.*?)\n  \)", main_tf, re.DOTALL
+    )
+    assert match is not None, "no `dynamodb_data_plane_role_arns = concat(...)` local"
+    body = re.sub(
+        r"\[\s*for\s+\w+\s+in\s+module\.\w+\s*:\s*\w+\.role_arn\s*\]", " ", match.group(1)
+    )
+    return [
+        token
+        for token in re.findall(r"[A-Za-z_][\w.\[\]\"]*\.arn\b", body)
+        if not token.startswith("module.")
+    ]
+
+
+def test_the_allowlist_adds_exactly_the_runtime_role_beyond_the_lambda_roles() -> None:
+    assert _non_module_entries(_root_files()["main.tf"]) == ["aws_iam_role.agentcore_runtime.arn"]
+
+
+def test_the_runtime_role_check_reds_when_the_entry_is_dropped() -> None:
+    main_tf = _root_files()["main.tf"]
+    mutated = main_tf.replace("      aws_iam_role.agentcore_runtime.arn,\n", "", 1)
+    assert mutated != main_tf
+    assert _non_module_entries(mutated) == []
+
+
 def test_root_passes_operators_to_both_lists_and_root_to_administrators_only() -> None:
     block = _block(_code(MAIN_TF), 'module "dynamodb"')
     assert re.search(

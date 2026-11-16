@@ -41,7 +41,7 @@ from crm.errors import (
 from crm.store import keys
 from crm.store.store import Store
 from eval.harness import EvalMode
-from eval.matrix import tier_comparison_table
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY, tier_comparison_table
 from eval.sweep_units import DEFAULT_ARM_EFFORT
 
 _logger = logging.getLogger(__name__)
@@ -219,6 +219,12 @@ class RunRecord:
         The execution ARN is not emitted. ``tier_comparison_table`` is the
         :func:`eval.matrix.tier_comparison_table` of the matrix's ``tier_comparison`` block when
         the block is a mapping; a block that cannot be formatted is omitted and logged.
+
+        A stored ``matrix_report`` whose top-level ``record_shape_version`` is not
+        :data:`eval.matrix.RECORD_SHAPE_VERSION` (absent included) is an earlier-format record: the
+        payload omits ``matrix``, ``tier_comparison_table`` and ``artifacts``, carries
+        ``record_format: "earlier"``, and one ``eval_record_format_earlier`` line is logged per run id
+        per process (see :func:`_log_earlier_record_format`).
         """
         payload: dict[str, Any] = {
             "run_id": self.run_id,
@@ -245,12 +251,40 @@ class RunRecord:
             "estimate_basis": self.estimate_basis,
             "teardown_status": self.teardown_status,
             "error": self.failure_summary,
-            "matrix": self.matrix_report,
-            "tier_comparison_table": _payload_tier_table(self.run_id, self.matrix_report),
-            "artifacts": self.artifact_links,
         }
+        if _is_earlier_record_format(self.matrix_report):
+            _log_earlier_record_format(self.run_id)
+            optional["record_format"] = EARLIER_RECORD_FORMAT
+        else:
+            optional["matrix"] = self.matrix_report
+            optional["tier_comparison_table"] = _payload_tier_table(self.run_id, self.matrix_report)
+            optional["artifacts"] = self.artifact_links
         payload.update({key: value for key, value in optional.items() if value is not None})
         return payload
+
+
+#: The payload's ``record_format`` for a run whose stored matrix predates the current record shape.
+EARLIER_RECORD_FORMAT: Final[str] = "earlier"
+
+
+#: Run ids this process has already logged ``eval_record_format_earlier`` for.
+_EARLIER_FORMAT_LOGGED_RUN_IDS: set[str] = set()
+
+
+def _log_earlier_record_format(run_id: str) -> None:
+    """Log ``eval_record_format_earlier`` for ``run_id`` unless this process already has."""
+    if run_id in _EARLIER_FORMAT_LOGGED_RUN_IDS:
+        return
+    _EARLIER_FORMAT_LOGGED_RUN_IDS.add(run_id)
+    _logger.info(json.dumps({"event": "eval_record_format_earlier", "correlation_id": run_id}))
+
+
+def _is_earlier_record_format(matrix_report: Mapping[str, Any] | None) -> bool:
+    """True when a stored matrix is present and its top-level record shape is not the current one."""
+    if matrix_report is None:
+        return False
+    version = matrix_report.get(RECORD_SHAPE_VERSION_KEY)
+    return type(version) is not int or version != RECORD_SHAPE_VERSION
 
 
 #: Longest refusal text an ``eval_tier_table_unavailable`` line carries.

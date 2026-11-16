@@ -195,6 +195,7 @@ LAYER_4_MODULES=(
   "scripts.smoke.access_log_delivery"
   "scripts.smoke.relay_iam"
   "scripts.smoke.runtime_bedrock_iam"
+  "scripts.smoke.runtime_history_iam"
   "scripts.smoke.runtime_inbound_auth"
   "scripts.smoke.runtime_network_posture"
   "scripts.smoke.chat_timeouts"
@@ -505,6 +506,17 @@ teardown_smoke_tenant(store, SmokeTenant(run_id=run_id, tenant=tenant))
   return 1
 }
 
+# Replays the per-run module stderr log to this script's stderr, then removes the log.
+# shellcheck disable=SC2329  # invoked from on_exit.
+finish_stderr_log() {
+  [[ -n "${STDERR_LOG:-}" && -f "${STDERR_LOG}" ]] || return 0
+  if [[ -s "${STDERR_LOG}" ]]; then
+    echo "${SCRIPT_NAME}: module stderr from this run follows; ${STDERR_LOG} is removed after it." >&2
+    cat "${STDERR_LOG}" >&2
+  fi
+  rm -f "${STDERR_LOG}"
+}
+
 # Teardown runs on normal exit, on a failing layer, and on interrupt/termination.
 # shellcheck disable=SC2329  # invoked indirectly, via `trap on_exit EXIT INT TERM` below.
 on_exit() {
@@ -518,6 +530,7 @@ on_exit() {
   # The user is removed first; each step sets TEARDOWN_EXIT_CODE on failure.
   teardown_smoke_user || true
   teardown_tenant || true
+  finish_stderr_log || true
   # A teardown failure becomes the exit code only when nothing else failed.
   if [[ "${LAYER_EXIT_CODE}" -ne 0 ]]; then
     exit "${LAYER_EXIT_CODE}"
@@ -593,7 +606,7 @@ run_module() {
   if [[ -z "${json_output}" ]]; then
     # No parseable stdout is recorded as a failed resource class.
     local resource_class="${module_args[0]##*.}"
-    json_output="$(printf '{"layer": %s, "resource_class": "%s", "checks": [{"resource": "%s", "check": "invocation", "status": "fail", "detail": "no parseable output; see %s"}]}' \
+    json_output="$(printf '{"layer": %s, "resource_class": "%s", "checks": [{"resource": "%s", "check": "invocation", "status": "fail", "detail": "no parseable output; its stderr is replayed at the end of this run (log %s, removed at exit)"}]}' \
       "${layer_number}" "${resource_class}" "${resource_class}" "${STDERR_LOG}")"
     rc=1
   else

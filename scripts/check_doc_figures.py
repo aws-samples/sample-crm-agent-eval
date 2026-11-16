@@ -240,7 +240,7 @@ def _decode_embed(payload: str, is_base64: bool) -> str | None:
         text: str | None = base64.b64decode(urllib.parse.unquote(compact), validate=True).decode(
             "utf-8"
         )
-    except (binascii.Error, ValueError):
+    except binascii.Error, ValueError:
         text = None if is_base64 else urllib.parse.unquote(compact)
     return text if text is not None and "<" in text else None
 

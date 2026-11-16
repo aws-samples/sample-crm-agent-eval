@@ -226,6 +226,14 @@ def _emitted_keys(statuses: frozenset[str] | None = None) -> set[str]:
         ),
         replace(
             base,
+            status="completed",
+            finished_at="2026-01-01T00:05:00+00:00",
+            teardown_status="ok",
+            matrix_report={"arms": []},
+            artifact_links=artifacts,
+        ),
+        replace(
+            base,
             status="failed",
             finished_at="2026-01-01T00:05:00+00:00",
             teardown_status="failed",

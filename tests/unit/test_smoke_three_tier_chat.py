@@ -6,8 +6,14 @@ The provisioner factory, turn runner, CloudTrail lookup, clock and sleeper are a
 
 from __future__ import annotations
 
+import inspect
+import io
 import json
+import re
+import urllib.error
 from collections.abc import Iterable, Mapping
+from decimal import Decimal
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +22,7 @@ import yaml
 from scripts.smoke import three_tier_chat
 from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.three_tier_chat import (
+    _CACHE_HISTORY_INSTRUCTION,
     _CLOUDTRAIL_MAX_PAGES,
     _CLOUDTRAIL_POLL_INTERVAL,
     _CLOUDTRAIL_POLL_SECONDS,
@@ -31,7 +38,19 @@ from scripts.smoke.three_tier_chat import (
     ATTRIBUTION_CANDIDATES,
     ATTRIBUTION_COLLISION_CHECK,
     ATTRIBUTION_ROW_SUFFIX,
+    CACHE_HISTORY_CHECK,
+    CACHE_HISTORY_TOOL_CALL_REASON,
+    CACHE_HISTORY_TURNS,
     CACHE_UNREPORTED_REASON,
+    HISTORY_FAILURE_EVENTS,
+    HISTORY_ITEM_CHECK,
+    HISTORY_ITEMS_DELETED_CHECK,
+    HISTORY_LOG_CHECK,
+    HISTORY_OMITTED_RESUME_CHECK,
+    HISTORY_RECALL_CHECK,
+    HISTORY_RECALL_PROMPT,
+    HISTORY_RECALL_TURNS,
+    HISTORY_REPEAT_PROMPT,
     MIXED_FAMILIES,
     MODEL_TURN_ALLOTMENTS,
     MODEL_TURN_ENVELOPE,
@@ -41,20 +60,36 @@ from scripts.smoke.three_tier_chat import (
     RESOURCE_CLASS,
     CloudTrailEvent,
     ModelTurnBudget,
+    ResumeCursor,
+    RuntimeLogLine,
     TurnResult,
     _live_cloudtrail_lookup,
+    _live_run_turn,
+    _live_runtime_log_lookup,
+    _LiveTurns,
+    _poll_history_logs,
     _tier_attributed,
     _tier_profiles,
     attribution_collision_row,
+    cache_history_prompt,
     checks,
+    delete_history_items,
+    evaluate_cache_history,
     evaluate_cache_read,
     evaluate_history_cross_session,
+    evaluate_history_item,
+    evaluate_history_logs,
+    evaluate_history_recall,
+    evaluate_omitted_resume_recall,
     evaluate_page_context_refusal,
     evaluate_temperature_refusal,
     evaluate_three_tier_attribution,
     evaluate_turn_cost,
+    expected_check_count,
     expected_tier_efforts,
     expected_tier_models,
+    history_code_word,
+    history_fact_prompt,
     page_context_for,
     refused_routes,
     select_attribution_mapping,
@@ -62,9 +97,15 @@ from scripts.smoke.three_tier_chat import (
     tuning_block,
 )
 
+from agents.conversation_history import (
+    DEFAULT_TTL_SECONDS,
+    HISTORY_ITEM_ATTRIBUTES,
+    DynamoDbConversationHistory,
+)
 from agents.registry import tool_registry_for
 from agents.runtime_server import _VALIDATION_ERROR_KIND
 from agents.supervisor import DIRECT_TOOL_NAMES
+from crm.store.keys import history_key
 from providers.capabilities import load_capability_matrix
 from providers.tier_tuning import WIRE_SCHEMA_VERSION
 
@@ -328,6 +369,35 @@ def test_owner_control_fails_when_reuse_rejected_and_stops() -> None:
 # --- checks() end-to-end, fully injected ---
 
 
+def _tenant_of(token: str) -> str:
+    """The disposable tenant `_FakeProvisioner` allocates for `token`."""
+    return f"eval-smoke-{token}"
+
+
+#: `expires_at` the fake Runtime stamps on a history item: inside `_run`'s clock window plus the TTL.
+_FAKE_EXPIRES_AT = 50_000
+
+#: How check 9's turn A states its fact; the fake reads the code word back out of it.
+_FACT_PREFIX = history_fact_prompt("\0").split("\0")[0]
+
+
+class _FakeHistoryItems:
+    """`HistoryItems` over a dict; `sticky` keys survive `delete`, as a refused delete would."""
+
+    def __init__(self, items: dict[str, dict[str, Any]], *, sticky: Iterable[str] = ()) -> None:
+        self.items = items
+        self.deleted: list[str] = []
+        self._sticky = set(sticky)
+
+    def get(self, rep_id: str) -> Mapping[str, Any] | None:
+        return self.items.get(rep_id)
+
+    def delete(self, rep_id: str) -> None:
+        self.deleted.append(rep_id)
+        if rep_id not in self._sticky:
+            self.items.pop(rep_id, None)
+
+
 class _FakeProvisioner:
     def __init__(self, token: str) -> None:
         self._token = token
@@ -336,6 +406,9 @@ class _FakeProvisioner:
     def provision(self) -> str:
         return self._token
 
+    def tenant(self) -> str:
+        return _tenant_of(self._token)
+
     def cleanup(self) -> Iterable[CheckResult]:
         self.cleaned_up = True
         yield CheckResult(
@@ -343,7 +416,9 @@ class _FakeProvisioner:
         )
 
 
-def _priced_frame(tuning: Mapping[str, Any]) -> dict[str, Any]:
+def _priced_frame(
+    tuning: Mapping[str, Any], *, cache_read: int = 1024, cache_write: int = 0
+) -> dict[str, Any]:
     """A `completed` frame priced and resolved the way the Runtime renders one for `tuning`."""
     tiers = tuning["tiers"]
     families = {tier: tiers[tier]["family"] for tier in tiers}
@@ -357,8 +432,8 @@ def _priced_frame(tuning: Mapping[str, Any]) -> dict[str, Any]:
                 "role": tier,
                 "model_id": model,
                 "cost_usd": 0.01,
-                "cache_read_tokens": 1024,
-                "cache_write_tokens": 0,
+                "cache_read_tokens": cache_read,
+                "cache_write_tokens": cache_write,
                 "long_context_calls": 0,
             }
             for tier, model in models.items()
@@ -394,12 +469,22 @@ def _carries_temperature(tuning: Mapping[str, Any]) -> bool:
     return any("temperature" in request for request in tuning["tiers"].values())
 
 
-def _completed(text: str = "", tuning: Mapping[str, Any] | None = None) -> TurnResult:
+def _completed(
+    text: str = "",
+    tuning: Mapping[str, Any] | None = None,
+    *,
+    cache_read: int = 1024,
+    cache_write: int = 0,
+) -> TurnResult:
     return TurnResult(
         status=200,
         kinds=("text_delta", "completed"),
         answer=text,
-        completed=_priced_frame(tuning) if tuning is not None else None,
+        completed=(
+            _priced_frame(tuning, cache_read=cache_read, cache_write=cache_write)
+            if tuning is not None
+            else None
+        ),
     )
 
 
@@ -417,7 +502,19 @@ class _StatefulTurns:
     A different token reusing an owned session id gets a 400 with the generic validation message;
     `bad_collision` returns a completed 200 instead. A `page_context` whose route is not
     `_CONTROL_ROUTE` is refused with that 400; `accepts_bad_route` completes it instead and
-    `echoes_route` puts the route in the refusal body.
+    `echoes_route` puts the route in the refusal body. The n-th completed turn in a session reports
+    `1024 * n` cache-read and 256 cache-write tokens on every cost line, as a growing cached history
+    would.
+
+    A turn stating check 9's code word is remembered for its session, and a recall prompt in that
+    session answers with it; `forgets_history` answers every recall without it and `leaks_history`
+    answers a recall in any session with the last code word stated. Each completed turn writes its
+    session's history item into `history` unless `records_history` is false.
+
+    Every accepted turn appends an `invocation_started` line to `log_lines`, in the stream
+    `runtime-logs-<session_id>`; `history_failure` adds that failure event's line to the stream of
+    every completed turn. `replays_omitted_resume` answers a turn sent without `resume_from` with
+    its session's previous result verbatim, as a Runtime that treats it as a reconnect would.
     """
 
     def __init__(
@@ -427,8 +524,25 @@ class _StatefulTurns:
         honours_temperature: bool = False,
         accepts_bad_route: bool = False,
         echoes_route: bool = False,
+        forgets_history: bool = False,
+        leaks_history: bool = False,
+        records_history: bool = True,
+        history_failure: str | None = None,
+        replays_omitted_resume: bool = False,
     ) -> None:
+        self._history_failure = history_failure
+        self._replays_omitted_resume = replays_omitted_resume
+        self._last_by_session: dict[str, TurnResult] = {}
+        self.log_lines: list[RuntimeLogLine] = []
+        self.omitted: list[bool] = []
+        self._forgets_history = forgets_history
+        self._leaks_history = leaks_history
+        self._records_history = records_history
+        self._facts: dict[str, str] = {}
+        self._last_fact = ""
+        self.history: dict[str, dict[str, Any]] = {}
         self._owner_by_session: dict[str, str] = {}
+        self._turns_by_session: dict[str, int] = {}
         self._bad_collision = bad_collision
         self._honours_temperature = honours_temperature
         self._accepts_bad_route = accepts_bad_route
@@ -446,10 +560,12 @@ class _StatefulTurns:
         tuning: Mapping[str, Any],
         *,
         page_context: Mapping[str, Any] | None = None,
+        omit_resume_from: bool = False,
     ) -> TurnResult:
         self.tunings.append(tuning)
         self.prompts.append(prompt)
         self.page_contexts.append(page_context)
+        self.omitted.append(omit_resume_from)
         if _carries_temperature(tuning) and not self._honours_temperature:
             return _refusal()
         route = (page_context or {}).get("route", _CONTROL_ROUTE)
@@ -460,13 +576,64 @@ class _StatefulTurns:
             if self._bad_collision:
                 return _completed("")  # not refused at all -> should red the denial
             return TurnResult(status=400, kinds=(), answer="", message=_GENERIC_VALIDATION_MESSAGE)
-        return _completed("noted", tuning)
+        stream = f"runtime-logs-{session_id}"
+        self.log_lines.append(
+            RuntimeLogLine(
+                stream=stream,
+                message=json.dumps({"event": "invocation_started", "session_id": session_id}),
+            )
+        )
+        previous = self._last_by_session.get(session_id)
+        if omit_resume_from and self._replays_omitted_resume and previous is not None:
+            return previous
+        count = self._turns_by_session[session_id] = self._turns_by_session.get(session_id, 0) + 1
+        if prompt.startswith(_FACT_PREFIX):
+            self._facts[session_id] = self._last_fact = prompt[len(_FACT_PREFIX) :].split(".")[0]
+        answer = "noted"
+        if prompt in (HISTORY_RECALL_PROMPT, HISTORY_REPEAT_PROMPT):
+            remembered = self._last_fact if self._leaks_history else self._facts.get(session_id)
+            answer = "I do not know." if self._forgets_history or not remembered else remembered
+        if self._records_history:
+            tenant = _tenant_of(token)
+            self.history[history_key(tenant, session_id)] = {
+                "rep_id": history_key(tenant, session_id),
+                "kind": "history",
+                "owner_rep_id": f"user-{token}",
+                "owner_tenant": tenant,
+                "turns": [{"prompt": prompt, "answer": answer}] * count,
+                "version": count,
+                "updated_at": "2026-11-15T00:00:00+00:00",
+                "expires_at": _FAKE_EXPIRES_AT,
+            }
+        if self._history_failure is not None:
+            self.log_lines.append(
+                RuntimeLogLine(stream=stream, message=json.dumps({"event": self._history_failure}))
+            )
+        result = _completed(answer, tuning, cache_read=1024 * count, cache_write=256)
+        self._last_by_session[session_id] = result
+        return result
+
+
+def _history_of(run_turn: object) -> dict[str, dict[str, Any]]:
+    """The history items a fake Runtime wrote, unwrapping `_CapturingTurns`."""
+    inner = getattr(run_turn, "_inner", run_turn)
+    history: dict[str, dict[str, Any]] = getattr(inner, "history", {})
+    return history
+
+
+def _log_lines_of(run_turn: object) -> list[RuntimeLogLine]:
+    """The Runtime log lines a fake Runtime wrote, unwrapping `_CapturingTurns`."""
+    inner = getattr(run_turn, "_inner", run_turn)
+    lines: list[RuntimeLogLine] = getattr(inner, "log_lines", [])
+    return lines
 
 
 def _run(
     *,
     events: list[CloudTrailEvent],
     run_turn: object,
+    history_items: _FakeHistoryItems | None = None,
+    runtime_logs: Any = None,
 ) -> tuple[dict[str, str], list[_FakeProvisioner]]:
     provs: list[_FakeProvisioner] = []
     tokens = iter(["token-A", "token-B"])
@@ -482,6 +649,7 @@ def _run(
     # Each tick exceeds the CloudTrail poll window, so the poll deadline is reached in one step.
     ticks = iter(range(1000, 1_000_000, 1000))
 
+    items = history_items if history_items is not None else _FakeHistoryItems(_history_of(run_turn))
     ctx = context_for_test(outputs={"agentcore_runtime_role_arn": _ROLE_ARN}, clients={})
     rows = list(
         checks(
@@ -491,6 +659,12 @@ def _run(
             cloudtrail_lookup=lookup,
             clock=lambda: float(next(ticks)),
             sleeper=lambda _s: None,
+            history_items=lambda _ctx: items,
+            runtime_logs=(
+                runtime_logs
+                if runtime_logs is not None
+                else lambda _c, _s, _e: list(_log_lines_of(run_turn))
+            ),
         )
     )
     return {r.check: r.status for r in rows}, provs
@@ -526,6 +700,11 @@ def test_checks_happy_path_all_pass_and_both_users_cleaned_up() -> None:
     assert set(attribution_rows.values()) == {"pass"}
     assert by_check["stale_temperature_tuning_refused"] == "pass"
     assert by_check["model_backed_turns_within_envelope"] == "pass"
+    assert by_check[HISTORY_RECALL_CHECK] == "pass"
+    assert by_check[HISTORY_OMITTED_RESUME_CHECK] == "pass"
+    assert by_check[HISTORY_LOG_CHECK] == "pass"
+    assert by_check[HISTORY_ITEM_CHECK] == "pass"
+    assert by_check[HISTORY_ITEMS_DELETED_CHECK] == "pass"
     assert by_check["cleaned_up"] == "pass"
     assert len(provs) == 2
     assert all(p.cleaned_up for p in provs)
@@ -892,7 +1071,7 @@ def test_a_spent_budget_refuses_the_openai_turn_after_check_4(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     allotments = dict(MODEL_TURN_ALLOTMENTS)
-    allotments[RESOURCE_CLASS] -= 2
+    allotments[RESOURCE_CLASS] -= CACHE_HISTORY_TURNS + HISTORY_RECALL_TURNS + 2
     monkeypatch.setattr(three_tier_chat, "MODEL_TURN_ALLOTMENTS", allotments)
     turns = _StatefulTurns()
     by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
@@ -1237,6 +1416,7 @@ def test_lookup_raises_rather_than_truncating_at_the_page_cap() -> None:
 
 # --- check 6: prompt-cache read on the wire ---
 
+_TIER_NAMES = ("supervisor", "subagent", "tool")
 _ANTHROPIC_SUPERVISOR = expected_tier_models(MIXED_FAMILIES)["supervisor"]
 _OPENAI_SUPERVISOR = expected_tier_models(OPENAI_FAMILIES)["supervisor"]
 
@@ -1361,7 +1541,7 @@ def test_a_spent_budget_refuses_the_cache_probe_and_its_page_context_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     allotments = dict(MODEL_TURN_ALLOTMENTS)
-    allotments[RESOURCE_CLASS] -= 1
+    allotments[RESOURCE_CLASS] -= CACHE_HISTORY_TURNS + HISTORY_RECALL_TURNS + 1
     monkeypatch.setattr(three_tier_chat, "MODEL_TURN_ALLOTMENTS", allotments)
     turns = _StatefulTurns()
     by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
@@ -1452,3 +1632,783 @@ def test_a_runtime_that_accepts_or_echoes_the_route_fails_both_rows_end_to_end(
 ) -> None:
     by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
     assert [by_check[row] for row in _ROUTE_ROWS] == ["fail", "fail"]
+
+
+# --- check 8: prompt-cache reads cover session history ---
+
+
+def _history_turn(
+    read: object, write: object = 0, *, kinds: tuple[str, ...] = ("text_delta", "completed")
+) -> TurnResult:
+    """A recorded-shape tool-free turn: the one supervisor cost line a single-call turn carries."""
+    lines = [
+        {
+            "tier": "supervisor",
+            "role": "supervisor",
+            "model_id": _ANTHROPIC_SUPERVISOR,
+            "cost_usd": 0.01,
+            "cache_read_tokens": read,
+            "cache_write_tokens": write,
+            "long_context_calls": 0,
+        }
+    ]
+    return TurnResult(
+        status=200,
+        kinds=kinds,
+        answer="Ready.",
+        completed={"kind": "completed", "cost_lines": lines, "cost_usd": 0.01},
+    )
+
+
+def _history_row(fresh: TurnResult, seed: TurnResult, followup: TurnResult) -> CheckResult:
+    return evaluate_cache_history(fresh, seed, followup, model=_ANTHROPIC_SUPERVISOR)
+
+
+def test_a_follow_up_reading_beyond_the_fresh_prefix_passes() -> None:
+    row = _history_row(_history_turn(4400), _history_turn(4400, 300), _history_turn(4700))
+    assert (row.check, row.status) == (CACHE_HISTORY_CHECK, "pass")
+
+
+def test_a_follow_up_reading_only_the_fresh_prefix_fails() -> None:
+    row = _history_row(_history_turn(4400), _history_turn(4400), _history_turn(4400))
+    assert row.status == "fail"
+
+
+def test_a_follow_up_reading_less_than_the_fresh_prefix_fails() -> None:
+    assert _history_row(_history_turn(4400), _history_turn(0), _history_turn(100)).status == "fail"
+
+
+def test_no_read_and_no_write_on_any_turn_defers() -> None:
+    row = _history_row(_history_turn(0), _history_turn(0), _history_turn(0))
+    assert (row.status, row.defer_reason) == ("defer", CACHE_UNREPORTED_REASON)
+
+
+def test_a_write_with_no_follow_up_read_fails_rather_than_defers() -> None:
+    row = _history_row(_history_turn(0, 4400), _history_turn(0), _history_turn(0))
+    assert row.status == "fail"
+
+
+@pytest.mark.parametrize("position", [0, 1, 2], ids=["C", "A", "B"])
+def test_a_tool_call_on_any_turn_defers_even_when_the_reads_would_pass(position: int) -> None:
+    turns = [_history_turn(4400), _history_turn(4400), _history_turn(4700)]
+    turns[position] = _history_turn(
+        turns[position].completed["cost_lines"][0]["cache_read_tokens"],  # type: ignore[index]
+        kinds=("tool_call", "tool_result", "text_delta", "completed"),
+    )
+    row = _history_row(*turns)
+    assert (row.status, row.defer_reason) == ("defer", CACHE_HISTORY_TOOL_CALL_REASON)
+
+
+@pytest.mark.parametrize(
+    "followup",
+    [TurnResult(status=502, kinds=(), answer=""), _history_turn(None), _history_turn(True)],
+    ids=["no_frame", "null_read", "bool_read"],
+)
+def test_an_unreadable_turn_fails_rather_than_defers(followup: TurnResult) -> None:
+    assert _history_row(_history_turn(4400), _history_turn(4400), followup).status == "fail"
+
+
+def _is_history_prompt(prompt: str) -> bool:
+    return prompt.startswith(_CACHE_HISTORY_INSTRUCTION)
+
+
+def _history_prompts(turns: _StatefulTurns) -> list[str]:
+    return [p for p in turns.prompts if _is_history_prompt(p)]
+
+
+def test_c_a_and_b_share_one_prompt_carrying_a_run_nonce() -> None:
+    turns = _StatefulTurns()
+    _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    prompts = _history_prompts(turns)
+    assert len(prompts) == CACHE_HISTORY_TURNS
+    assert len(set(prompts)) == 1
+    assert re.search(r"Ignore this cache-busting nonce: [0-9a-f]{32}\.$", prompts[0])
+
+
+def test_two_runs_send_different_check_8_prompts() -> None:
+    first, second = _StatefulTurns(), _StatefulTurns()
+    _run(events=_ALL_TIER_EVENTS, run_turn=first)
+    _run(events=_ALL_TIER_EVENTS, run_turn=second)
+    assert _history_prompts(first)[0] != _history_prompts(second)[0]
+
+
+def test_the_prompt_nonce_leaves_the_instruction_unchanged() -> None:
+    assert cache_history_prompt("abc") == (
+        f"{_CACHE_HISTORY_INSTRUCTION} Ignore this cache-busting nonce: abc."
+    )
+    assert cache_history_prompt("abc") != cache_history_prompt("abd")
+
+
+def test_check_8_sends_c_fresh_then_a_and_b_in_one_session_as_anthropic() -> None:
+    turns = _CapturingTurns()
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    prompts, tunings = turns._inner.prompts, turns._inner.tunings
+    indices = [i for i, p in enumerate(prompts) if _is_history_prompt(p)]
+    assert len(indices) == CACHE_HISTORY_TURNS
+    fresh, seed, followup = (turns.session_ids[i] for i in indices)
+    assert seed == followup and fresh != seed
+    assert fresh not in turns.session_ids[: indices[0]]
+    assert seed not in turns.session_ids[: indices[1]]
+    anthropic = tuning_block(dict.fromkeys(_TIER_NAMES, "anthropic"))
+    assert all(tunings[i] == anthropic for i in indices)
+    assert expected_tier_models(dict.fromkeys(_TIER_NAMES, "anthropic"))["supervisor"] == (
+        _ANTHROPIC_SUPERVISOR
+    )
+    assert by_check[CACHE_HISTORY_CHECK] == "pass"
+
+
+def test_the_happy_path_fake_reads_more_on_a_session_follow_up() -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns())
+    assert by_check[CACHE_HISTORY_CHECK] == "pass"
+
+
+def test_a_runtime_caching_only_the_stable_prefix_fails_check_8_end_to_end() -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_CacheTurns(4400, 0))
+    assert by_check[CACHE_HISTORY_CHECK] == "fail"
+
+
+@pytest.mark.parametrize("short", [1, CACHE_HISTORY_TURNS])
+def test_a_share_without_room_for_all_three_turns_sends_none_of_them(
+    monkeypatch: pytest.MonkeyPatch, short: int
+) -> None:
+    allotments = dict(MODEL_TURN_ALLOTMENTS)
+    allotments[RESOURCE_CLASS] -= HISTORY_RECALL_TURNS + short
+    monkeypatch.setattr(three_tier_chat, "MODEL_TURN_ALLOTMENTS", allotments)
+    turns = _StatefulTurns()
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    assert not any(_is_history_prompt(p) for p in turns.prompts)
+    assert CACHE_HISTORY_CHECK not in by_check
+    assert all(by_check[row] == "pass" for row in _ROUTE_ROWS)
+
+
+# --- check 9: a follow-up turn carries the session's history ---
+
+_WORD = "zqfeedc0ffee12"
+
+
+def _recall_turn(
+    answer: str, read: object = 4400, write: object = 120, *, status: int = 200
+) -> TurnResult:
+    """A tool-free anthropic-supervisor turn answering `answer` with the given cache counts."""
+    turn = _history_turn(read, write)
+    return TurnResult(status=status, kinds=turn.kinds, answer=answer, completed=turn.completed)
+
+
+def _recall_row(
+    seed: TurnResult | None = None,
+    followup: TurnResult | None = None,
+    control: TurnResult | None = None,
+) -> CheckResult:
+    return evaluate_history_recall(
+        seed if seed is not None else _recall_turn("OK", 0, 4400),
+        followup if followup is not None else _recall_turn(_WORD, 4400, 120),
+        control if control is not None else _recall_turn("I do not know.", 4300, 90),
+        code_word=_WORD,
+        model=_ANTHROPIC_SUPERVISOR,
+    )
+
+
+def test_a_recalled_word_with_a_new_cached_tail_and_a_clean_control_passes() -> None:
+    row = _recall_row()
+    assert (row.check, row.status) == (HISTORY_RECALL_CHECK, "pass")
+
+
+def test_the_content_alone_without_a_new_cache_write_fails() -> None:
+    assert _recall_row(followup=_recall_turn(_WORD, 4400, 0)).status == "fail"
+
+
+def test_the_tokens_alone_without_the_recalled_word_fails() -> None:
+    assert _recall_row(followup=_recall_turn("I do not know.", 4400, 120)).status == "fail"
+
+
+def test_a_control_that_carries_the_word_fails() -> None:
+    row = _recall_row(control=_recall_turn(f"It is {_WORD}.", 4300, 90))
+    assert row.status == "fail"
+    assert "crossed sessions" in row.detail
+
+
+def test_a_follow_up_reading_less_than_the_seed_fails() -> None:
+    row = _recall_row(seed=_recall_turn("OK", 4400, 100), followup=_recall_turn(_WORD, 4000, 120))
+    assert row.status == "fail"
+
+
+def test_a_control_that_did_not_complete_fails() -> None:
+    assert _recall_row(control=TurnResult(status=502, kinds=(), answer="")).status == "fail"
+
+
+@pytest.mark.parametrize(
+    "followup",
+    [
+        TurnResult(status=502, kinds=(), answer=_WORD),
+        _recall_turn(_WORD, None),
+        _recall_turn(_WORD, True),
+    ],
+    ids=["no_frame", "null_read", "bool_read"],
+)
+def test_an_unreadable_follow_up_fails(followup: TurnResult) -> None:
+    assert _recall_row(followup=followup).status == "fail"
+
+
+def test_the_code_word_is_run_unique_and_only_in_the_fact_prompt() -> None:
+    word = history_code_word()
+    assert word != history_code_word()
+    assert word in history_fact_prompt(word)
+    assert word not in HISTORY_RECALL_PROMPT
+    assert history_fact_prompt(word).startswith(_FACT_PREFIX)
+
+
+_TTL = DEFAULT_TTL_SECONDS
+_ABSENT = object()
+_NOW = 1_000_000.0
+
+
+def _item(**overrides: Any) -> dict[str, Any]:
+    tenant = _tenant_of("token-A")
+    item: dict[str, Any] = {
+        "rep_id": history_key(tenant, "s"),
+        "kind": "history",
+        "owner_rep_id": "user-a",
+        "owner_tenant": tenant,
+        "turns": [{"prompt": "p", "answer": "a"}],
+        "version": 1,
+        "updated_at": "2026-11-15T00:00:00+00:00",
+        "expires_at": int(_NOW) + _TTL - 5,
+    }
+    item.update(overrides)
+    return {key: value for key, value in item.items() if value is not _ABSENT}
+
+
+def _item_row(item: Mapping[str, Any] | None) -> CheckResult:
+    return evaluate_history_item(item, tenant=_tenant_of("token-A"), now=_NOW, ttl_seconds=_TTL)
+
+
+def test_the_ttl_is_the_history_stores_default() -> None:
+    default = inspect.signature(DynamoDbConversationHistory).parameters["ttl_seconds"].default
+    assert default == _TTL
+    assert isinstance(_TTL, int) and _TTL > 0
+
+
+def test_the_fixture_item_carries_exactly_the_stores_attribute_set() -> None:
+    assert set(_item()) == HISTORY_ITEM_ATTRIBUTES
+
+
+def test_an_owned_item_expiring_within_the_ttl_passes() -> None:
+    row = _item_row(_item())
+    assert (row.check, row.status) == (HISTORY_ITEM_CHECK, "pass")
+
+
+def test_a_decimal_expiry_is_read_as_a_number() -> None:
+    assert _item_row(_item(expires_at=Decimal(int(_NOW) + 60))).status == "pass"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"owner_tenant": "eval-smoke-token-B"},
+        {"owner_rep_id": ""},
+        {"owner_rep_id": None},
+        {"kind": "conversation"},
+        {"expires_at": int(_NOW)},
+        {"expires_at": int(_NOW) + _TTL + 1},
+        {"expires_at": True},
+        {"expires_at": "9999999999"},
+        {"tenant": "eval-smoke-token-A"},
+        {"updated_at": _ABSENT},
+    ],
+    ids=[
+        "foreign_tenant",
+        "empty_owner",
+        "no_owner",
+        "wrong_kind",
+        "expired",
+        "beyond_ttl",
+        "bool_expiry",
+        "string_expiry",
+        "tenant_attribute",
+        "missing_attribute",
+    ],
+)
+def test_an_item_not_owned_or_not_expiring_in_the_ttl_fails(overrides: dict[str, Any]) -> None:
+    assert _item_row(_item(**overrides)).status == "fail"
+
+
+def test_an_absent_item_fails() -> None:
+    assert _item_row(None).status == "fail"
+
+
+def test_deleting_the_history_items_proves_each_absent() -> None:
+    items = _FakeHistoryItems({"k1": {}, "k2": {}})
+    row = delete_history_items(items, ["k1", "k2", "k3"])
+    assert (row.check, row.status) == (HISTORY_ITEMS_DELETED_CHECK, "pass")
+    assert items.items == {}
+    assert items.deleted == ["k1", "k2", "k3"]
+
+
+def test_an_item_surviving_its_delete_fails_the_row() -> None:
+    row = delete_history_items(_FakeHistoryItems({"k1": {}}, sticky=["k1"]), ["k1"])
+    assert row.status == "fail"
+    assert "k1" in row.detail
+
+
+def test_a_delete_error_fails_the_row_rather_than_raising() -> None:
+    class _Refusing(_FakeHistoryItems):
+        def delete(self, rep_id: str) -> None:
+            raise RuntimeError("AccessDenied")
+
+    assert delete_history_items(_Refusing({}), ["k1"]).status == "fail"
+
+
+def _recall_indices(prompts: list[str]) -> list[int]:
+    return [
+        i
+        for i, p in enumerate(prompts)
+        if p.startswith(_FACT_PREFIX) or p in (HISTORY_RECALL_PROMPT, HISTORY_REPEAT_PROMPT)
+    ]
+
+
+def test_check_9_sends_a_b_a_fresh_control_then_an_unresumed_follow_up_as_anthropic() -> None:
+    turns = _CapturingTurns()
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    prompts, tunings, omitted = turns._inner.prompts, turns._inner.tunings, turns._inner.omitted
+    indices = _recall_indices(prompts)
+    assert len(indices) == HISTORY_RECALL_TURNS
+    seed, followup, control, repeat = (turns.session_ids[i] for i in indices)
+    assert seed == followup == repeat and control != seed
+    assert seed not in turns.session_ids[: indices[0]]
+    assert control not in turns.session_ids[: indices[2]]
+    assert prompts[indices[0]].startswith(_FACT_PREFIX)
+    assert prompts[indices[1]] == prompts[indices[2]] == HISTORY_RECALL_PROMPT
+    assert prompts[indices[3]] == HISTORY_REPEAT_PROMPT
+    assert [omitted[i] for i in indices] == [False, False, False, True]
+    assert omitted.count(True) == 1
+    anthropic = tuning_block(dict.fromkeys(_TIER_NAMES, "anthropic"))
+    assert all(tunings[i] == anthropic for i in indices)
+    assert by_check[HISTORY_RECALL_CHECK] == "pass"
+    assert by_check[HISTORY_OMITTED_RESUME_CHECK] == "pass"
+
+
+def test_a_runtime_that_forgets_history_fails_check_9_end_to_end() -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(forgets_history=True))
+    assert by_check[HISTORY_RECALL_CHECK] == "fail"
+
+
+def test_a_runtime_that_leaks_history_across_sessions_fails_check_9_end_to_end() -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(leaks_history=True))
+    assert by_check[HISTORY_RECALL_CHECK] == "fail"
+
+
+def test_a_runtime_writing_no_history_item_fails_the_item_row_end_to_end() -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(records_history=False))
+    assert by_check[HISTORY_ITEM_CHECK] == "fail"
+
+
+def test_every_history_item_the_run_wrote_is_deleted_before_the_users_are_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    turns = _StatefulTurns()
+    order: list[str] = []
+    original_cleanup = _FakeProvisioner.cleanup
+
+    def recording_cleanup(self: _FakeProvisioner) -> Iterable[CheckResult]:
+        order.append("cleanup")
+        yield from original_cleanup(self)
+
+    monkeypatch.setattr(_FakeProvisioner, "cleanup", recording_cleanup)
+
+    class _Ordered(_FakeHistoryItems):
+        def delete(self, rep_id: str) -> None:
+            order.append("delete")
+            super().delete(rep_id)
+
+    items = _Ordered(turns.history)
+    by_check, provs = _run(events=_ALL_TIER_EVENTS, run_turn=turns, history_items=items)
+    assert by_check[HISTORY_ITEMS_DELETED_CHECK] == "pass"
+    written_tenants = {_tenant_of("token-A"), _tenant_of("token-B")}
+    assert {key.split("#")[1] for key in items.deleted} <= written_tenants
+    assert any(
+        key.startswith(f"history#{_tenant_of('token-A')}#t3-recall-") for key in items.deleted
+    )
+    assert turns.history == {}
+    assert order.index("cleanup") > max(i for i, step in enumerate(order) if step == "delete")
+    assert all(p.cleaned_up for p in provs)
+
+
+def test_an_unreadable_history_store_fails_the_item_and_delete_rows_and_still_cleans_up() -> None:
+    def broken(_ctx: object) -> _FakeHistoryItems:
+        raise RuntimeError("no dynamodb_table_names output")
+
+    provs: list[_FakeProvisioner] = []
+    tokens = iter(["token-A", "token-B"])
+
+    def factory(_ctx: object) -> _FakeProvisioner:
+        provs.append(_FakeProvisioner(next(tokens)))
+        return provs[-1]
+
+    ticks = iter(range(1000, 1_000_000, 1000))
+    rows = list(
+        checks(
+            context_for_test(outputs={"agentcore_runtime_role_arn": _ROLE_ARN}, clients={}),
+            provisioner_factory=factory,
+            run_turn=_StatefulTurns(),
+            cloudtrail_lookup=lambda _c, _s, _e: _ALL_TIER_EVENTS,
+            clock=lambda: float(next(ticks)),
+            sleeper=lambda _s: None,
+            history_items=broken,
+        )
+    )
+    by_check = {r.check: r.status for r in rows}
+    assert by_check[HISTORY_ITEM_CHECK] == "fail"
+    assert by_check[HISTORY_ITEMS_DELETED_CHECK] == "fail"
+    assert all(p.cleaned_up for p in provs)
+
+
+@pytest.mark.parametrize("short", [1, HISTORY_RECALL_TURNS])
+def test_a_share_without_room_for_all_three_recall_turns_sends_none_of_them(
+    monkeypatch: pytest.MonkeyPatch, short: int
+) -> None:
+    allotments = dict(MODEL_TURN_ALLOTMENTS)
+    allotments[RESOURCE_CLASS] -= short
+    monkeypatch.setattr(three_tier_chat, "MODEL_TURN_ALLOTMENTS", allotments)
+    turns = _StatefulTurns()
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    assert not _recall_indices(turns.prompts)
+    assert HISTORY_RECALL_CHECK not in by_check
+    assert HISTORY_ITEM_CHECK not in by_check
+    assert by_check[CACHE_HISTORY_CHECK] == "pass"
+    assert by_check[HISTORY_ITEMS_DELETED_CHECK] == "pass"
+
+
+def test_the_share_covers_every_check_and_the_envelope_still_fits() -> None:
+    assert MODEL_TURN_ALLOTMENTS[RESOURCE_CLASS] == 8 + HISTORY_RECALL_TURNS
+    assert sum(MODEL_TURN_ALLOTMENTS.values()) <= MODEL_TURN_ENVELOPE
+
+
+# --- resume_from: a follow-up turn sends its session's recorded-frame count ---
+
+
+def test_the_cursor_counts_every_frame_but_heartbeats_per_session() -> None:
+    cursor = ResumeCursor()
+    assert cursor.resume_from("s") == 0
+    cursor.advance("s", ("heartbeat", "text_delta", "heartbeat", "usage", "completed"))
+    assert cursor.resume_from("s") == 3
+    cursor.advance("s", ("text_delta", "text_delta", "usage", "completed"))
+    assert cursor.resume_from("s") == 7
+    assert cursor.resume_from("other") == 0
+    cursor.advance("s", ())
+    assert cursor.resume_from("s") == 7
+
+
+def test_the_live_runner_sends_each_sessions_cursor_as_resume_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[tuple[str, int]] = []
+
+    def fake_live(
+        _ctx: object, _token: str, session_id: str, *_a: Any, resume_from: int, **_k: Any
+    ) -> TurnResult:
+        sent.append((session_id, resume_from))
+        return TurnResult(status=200, kinds=("text_delta", "usage", "completed"), answer="ok")
+
+    monkeypatch.setattr(three_tier_chat, "_live_run_turn", fake_live)
+    live = _LiveTurns()
+    ctx = context_for_test(outputs={}, clients={})
+    tuning = tuning_block(dict.fromkeys(_TIER_NAMES, "anthropic"))
+    for session in ("s1", "s1", "s2", "s1"):
+        live(ctx, "t", session, "p", tuning)
+    assert sent == [("s1", 0), ("s1", 3), ("s2", 0), ("s1", 6)]
+
+
+def test_the_default_runner_is_the_resuming_live_runner() -> None:
+    source = inspect.getsource(checks)
+    assert "_LiveTurns()" in source
+    assert "else _live_run_turn" not in source
+
+
+# --- coverage floor ---
+
+
+def test_the_check_count_floor_is_met_by_a_run_whose_every_control_fails() -> None:
+    floor = expected_check_count(context_for_test(outputs={}, clients={}))
+    turns = _StatefulTurns(forgets_history=True, records_history=False)
+    rows = list(
+        checks(
+            context_for_test(outputs={"agentcore_runtime_role_arn": _ROLE_ARN}, clients={}),
+            provisioner_factory=lambda _c: _FakeProvisioner("token-A"),
+            run_turn=turns,
+            cloudtrail_lookup=lambda _c, _s, _e: [],
+            clock=iter(range(1000, 1_000_000, 1000)).__next__,
+            sleeper=lambda _s: None,
+            history_items=lambda _c: _FakeHistoryItems(turns.history),
+        )
+    )
+    module_rows = [r for r in rows if r.resource == RESOURCE_CLASS]
+    assert len(module_rows) >= floor.minimum
+    assert floor.basis
+
+
+def test_the_floor_counts_the_check_9_rows() -> None:
+    floor = expected_check_count(context_for_test(outputs={}, clients={}))
+    happy, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns())
+    assert floor.minimum <= len(happy)
+    assert "history recall" in floor.basis
+
+
+# --- check 9: a follow-up sent without resume_from (the MCP shape) still recalls ---
+
+
+def _repeat_row(followup: TurnResult, repeat: TurnResult) -> CheckResult:
+    return evaluate_omitted_resume_recall(
+        followup, repeat, code_word=_WORD, model=_ANTHROPIC_SUPERVISOR
+    )
+
+
+def test_an_unresumed_follow_up_that_extends_the_session_passes() -> None:
+    row = _repeat_row(_recall_turn(_WORD, 4400, 120), _recall_turn(_WORD, 4520, 40))
+    assert (row.check, row.status) == (HISTORY_OMITTED_RESUME_CHECK, "pass")
+
+
+def test_a_replay_of_b_fails_although_it_carries_the_word() -> None:
+    b = _recall_turn(_WORD, 4400, 120)
+    row = _repeat_row(b, b)
+    assert row.status == "fail"
+    assert "replay" in row.detail
+
+
+def test_an_unresumed_follow_up_without_the_word_fails() -> None:
+    row = _repeat_row(_recall_turn(_WORD, 4400, 120), _recall_turn("I do not know.", 4520, 40))
+    assert row.status == "fail"
+
+
+@pytest.mark.parametrize(
+    "repeat",
+    [TurnResult(status=502, kinds=(), answer=_WORD), _recall_turn(_WORD, None)],
+    ids=["no_frame", "null_read"],
+)
+def test_an_unreadable_unresumed_follow_up_fails(repeat: TurnResult) -> None:
+    assert _repeat_row(_recall_turn(_WORD, 4400, 120), repeat).status == "fail"
+
+
+def test_a_runtime_replaying_an_unresumed_follow_up_fails_only_that_row_end_to_end() -> None:
+    by_check, _ = _run(
+        events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(replays_omitted_resume=True)
+    )
+    assert by_check[HISTORY_OMITTED_RESUME_CHECK] == "fail"
+    assert by_check[HISTORY_RECALL_CHECK] == "pass"
+
+
+def _captured_body(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> dict[str, Any]:
+    """The JSON body `_live_run_turn` sends, captured before any network call."""
+    sent: list[bytes] = []
+
+    def fake_open(request: Any, timeout: float) -> Any:
+        sent.append(request.data)
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "refused", Message(), io.BytesIO(b'{"message": "m"}')
+        )
+
+    monkeypatch.setattr(three_tier_chat, "open_https", fake_open)
+    ctx = context_for_test(
+        outputs={"cloudfront_domain_name": "d.example.test", "agentcore_runtime_arn": "arn:x"},
+        clients={},
+    )
+    result = _live_run_turn(
+        ctx, "t", "s" * 40, "p", tuning_block(dict.fromkeys(_TIER_NAMES, "anthropic")), **kwargs
+    )
+    assert result.status == 400
+    body: dict[str, Any] = json.loads(sent[0])
+    return body
+
+
+def test_the_live_turn_sends_resume_from_when_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _captured_body(monkeypatch, resume_from=7)["resume_from"] == 7
+
+
+def test_the_live_turn_omits_resume_from_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert "resume_from" not in _captured_body(monkeypatch, resume_from=None)
+
+
+def test_the_live_runner_omits_resume_from_only_when_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[int | None] = []
+
+    def fake_live(*_a: Any, resume_from: int | None, **_k: Any) -> TurnResult:
+        sent.append(resume_from)
+        return TurnResult(status=200, kinds=("text_delta", "usage", "completed"), answer="ok")
+
+    monkeypatch.setattr(three_tier_chat, "_live_run_turn", fake_live)
+    live = _LiveTurns()
+    ctx = context_for_test(outputs={}, clients={})
+    tuning = tuning_block(dict.fromkeys(_TIER_NAMES, "anthropic"))
+    live(ctx, "t", "s1", "p", tuning)
+    live(ctx, "t", "s1", "p", tuning, omit_resume_from=True)
+    live(ctx, "t", "s1", "p", tuning)
+    assert sent == [0, None, 6]
+
+
+# --- check 9: the Runtime logs show every turn and no history store failure ---
+
+_S = "t3-recall-" + "a" * 32
+_C = "t3-rfresh-" + "b" * 32
+
+
+def _started(session: str, stream: str | None = None) -> RuntimeLogLine:
+    return RuntimeLogLine(
+        stream=stream if stream is not None else f"runtime-logs-{session}",
+        message=json.dumps({"event": "invocation_started", "session_id": session}),
+    )
+
+
+def _failure(event: str, session: str) -> RuntimeLogLine:
+    return RuntimeLogLine(
+        stream=f"runtime-logs-{session}", message=json.dumps({"event": event, "error_kind": "x"})
+    )
+
+
+_LOGGED = [_started(_S), _started(_S), _started(_S), _started(_C)]
+_EXPECTED = {_S: 3, _C: 1}
+
+
+def test_every_turn_logged_with_no_failure_passes() -> None:
+    row = evaluate_history_logs(_LOGGED, _EXPECTED)
+    assert (row.check, row.status) == (HISTORY_LOG_CHECK, "pass")
+
+
+@pytest.mark.parametrize("event", HISTORY_FAILURE_EVENTS)
+@pytest.mark.parametrize("session", [_S, _C])
+def test_a_history_failure_in_a_check_9_stream_fails(event: str, session: str) -> None:
+    row = evaluate_history_logs([*_LOGGED, _failure(event, session)], _EXPECTED)
+    assert row.status == "fail"
+    assert event in row.detail
+
+
+def test_a_failure_in_another_sessions_stream_is_not_attributed() -> None:
+    other = "t3-cfresh-" + "c" * 32
+    row = evaluate_history_logs(
+        [*_LOGGED, _started(other), _failure("history_write_failed", other)], _EXPECTED
+    )
+    assert row.status == "pass"
+
+
+def test_a_missing_turn_line_fails_because_the_read_is_blind() -> None:
+    row = evaluate_history_logs(_LOGGED[1:], _EXPECTED)
+    assert row.status == "fail"
+    assert "not evidence" in row.detail
+
+
+def test_a_turn_logged_in_a_stream_not_naming_its_session_fails() -> None:
+    lines = [_started(_S), _started(_S), _started(_S, stream="runtime-logs-shared"), _started(_C)]
+    assert evaluate_history_logs(lines, _EXPECTED).status == "fail"
+
+
+@pytest.mark.parametrize("event", HISTORY_FAILURE_EVENTS)
+def test_a_runtime_logging_a_history_failure_fails_check_9_end_to_end(event: str) -> None:
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(history_failure=event))
+    assert by_check[HISTORY_LOG_CHECK] == "fail"
+    assert by_check[HISTORY_RECALL_CHECK] == "pass"
+
+
+def test_an_unreadable_log_group_fails_the_log_row_end_to_end() -> None:
+    def broken(_c: object, _s: int, _e: int) -> list[RuntimeLogLine]:
+        raise RuntimeError("AccessDeniedException")
+
+    by_check, _ = _run(events=_ALL_TIER_EVENTS, run_turn=_StatefulTurns(), runtime_logs=broken)
+    assert by_check[HISTORY_LOG_CHECK] == "fail"
+
+
+def test_the_log_poll_waits_for_late_lines_and_stops_at_the_bound() -> None:
+    snapshots = iter([[], _LOGGED[:2], _LOGGED])
+    clock = _FakeClock()
+    lines, summary = _poll_history_logs(
+        lambda _c, _s, _e: next(snapshots),
+        context_for_test(outputs={}, clients={}),
+        0,
+        _EXPECTED,
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+    assert lines == _LOGGED
+    assert "polls=3" in summary
+    never = _FakeClock()
+    lines, summary = _poll_history_logs(
+        lambda _c, _s, _e: [],
+        context_for_test(outputs={}, clients={}),
+        0,
+        _EXPECTED,
+        clock=never,
+        sleeper=never.sleep,
+    )
+    assert lines == []
+    assert never.now - 1_000.0 >= three_tier_chat._HISTORY_LOG_POLL_SECONDS
+    assert summary.startswith("polls=19 ")
+
+
+class _FakeLogs:
+    def __init__(self, pages: list[list[dict[str, str]]]) -> None:
+        self._pages = pages
+        self.requests: list[dict[str, Any]] = []
+
+    def filter_log_events(self, **kwargs: Any) -> dict[str, Any]:
+        self.requests.append(kwargs)
+        index = len(self.requests) - 1
+        page: dict[str, Any] = {"events": self._pages[index]}
+        if index + 1 < len(self._pages):
+            page["nextToken"] = f"t{index + 1}"
+        return page
+
+
+def test_the_live_log_lookup_reads_the_runtime_group_and_every_page() -> None:
+    logs = _FakeLogs(
+        [[{"logStreamName": "a", "message": "m1"}], [{"logStreamName": "b", "message": "m2"}]]
+    )
+    ctx = context_for_test(
+        outputs={"agentcore_runtime_log_group_name": "/g"}, clients={"logs": logs}
+    )
+    lines = _live_runtime_log_lookup(ctx, 1, 2)
+    assert lines == [RuntimeLogLine("a", "m1"), RuntimeLogLine("b", "m2")]
+    assert logs.requests[0] == {"logGroupName": "/g", "startTime": 1, "endTime": 2}
+    assert logs.requests[1]["nextToken"] == "t1"
+
+
+def test_a_failure_in_another_module_session_stream_fails() -> None:
+    other = "t3-cfresh-" + "c" * 32
+    lines = [*_LOGGED, _started(other), _failure("history_read_failed", other)]
+    row = evaluate_history_logs(lines, _EXPECTED, module_sessions=[other])
+    assert row.status == "fail"
+    assert other in row.detail
+
+
+def test_the_end_to_end_log_read_attributes_every_module_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: list[list[str]] = []
+    original = three_tier_chat.evaluate_history_logs
+
+    def spy(*args: Any, **kwargs: Any) -> CheckResult:
+        received.append(list(kwargs["module_sessions"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(three_tier_chat, "evaluate_history_logs", spy)
+    turns = _CapturingTurns()
+    _run(events=_ALL_TIER_EVENTS, run_turn=turns)
+    assert received and set(received[0]) == set(turns.session_ids)
+
+
+def test_the_failure_events_are_the_runtimes_three_history_failure_lines() -> None:
+    assert set(HISTORY_FAILURE_EVENTS) == {
+        "history_read_failed",
+        "history_write_failed",
+        "history_write_conflict",
+    }
+
+
+def test_a_write_conflict_in_a_module_stream_fails_the_log_row() -> None:
+    row = evaluate_history_logs(
+        [
+            *_LOGGED,
+            RuntimeLogLine(f"runtime-logs-{_S}", json.dumps({"event": "history_write_conflict"})),
+        ],
+        _EXPECTED,
+    )
+    assert row.status == "fail"
+    assert "history_write_conflict" in row.detail

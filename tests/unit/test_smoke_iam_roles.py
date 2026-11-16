@@ -518,7 +518,7 @@ def test_role_not_found_from_simulate_call_is_a_failure() -> None:
         for r in results
         if r.resource == _role("create_account")
         and r.status == "fail"
-        and "simulate_principal_policy raised" in r.detail
+        and "iam:SimulatePrincipalPolicy failed (NoSuchEntity)" in r.detail
     ]
     assert len(failures) == 1  # never a skip, never a silent pass
 
@@ -5403,3 +5403,97 @@ def test_the_key_output_is_declared_in_infra() -> None:
     assert f'output "{iam_roles.ALLOWLIST_KEY_OUTPUT}"' in outputs
     source = (root / "scripts" / "smoke" / "iam_roles.py").read_text(encoding="utf-8")
     assert f'require_str("{iam_roles.ALLOWLIST_KEY_OUTPUT}")' in source
+
+
+# ---------------------------------------------------------------------------
+# AWS failures are reported by operation and code, never by message.
+# ---------------------------------------------------------------------------
+
+_PLANTED_ARN = "arn:aws:sts::" + "1234" + "5678" + "9012" + ":assumed-role/x/y"
+
+
+def _planted_client_error(operation: str) -> Exception:
+    """An AccessDenied `ClientError` whose message names a caller ARN."""
+    from botocore.exceptions import ClientError
+
+    exc: Exception = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} is not authorized"}},
+        operation,
+    )
+    assert _PLANTED_ARN in str(exc)
+    return exc
+
+
+def _raiser(operation: str) -> Callable[..., Any]:
+    def _raise(*_args: Any, **_kwargs: Any) -> Any:
+        raise _planted_client_error(operation)
+
+    return _raise
+
+
+def _assert_code_not_message(detail: str) -> None:
+    assert "(AccessDenied)" in detail, detail
+    assert _PLANTED_ARN not in detail and "assumed-role" not in detail, detail
+
+
+def test_denied_allowlist_reads_fail_their_rows_without_the_aws_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_AkSsm, "describe_parameters", _raiser("DescribeParameters"))
+    monkeypatch.setattr(_AkSsm, "get_parameter", _raiser("GetParameter"))
+    monkeypatch.setattr(_AkKms, "get_key_rotation_status", _raiser("GetKeyRotationStatus"))
+    monkeypatch.setattr(_AkKms, "list_resource_tags", _raiser("ListResourceTags"))
+    monkeypatch.setattr(_AkDynamo, "describe_table", _raiser("DescribeTable"))
+    rows, _, _ = _ak_run()
+    for index in (0, 1, 2, 3, 13):
+        row = rows[iam_roles.ALLOWLIST_KEY_CHECKS[index]]
+        assert row.status == "fail", row
+        _assert_code_not_message(row.detail)
+    for row in rows.values():
+        assert _PLANTED_ARN not in row.detail, row
+
+
+def test_denied_caller_identity_fails_every_allowlist_row_without_the_aws_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_SupSts, "get_caller_identity", _raiser("GetCallerIdentity"))
+    rows, _, _ = _ak_run()
+    for row in rows.values():
+        assert row.status == "fail", row
+        _assert_code_not_message(row.detail)
+
+
+def test_a_denied_role_listing_is_reported_without_the_aws_error_message() -> None:
+    class DeniedIam:
+        def get_paginator(self, _name: str) -> Any:
+            raise _planted_client_error("ListRoles")
+
+    _, problem = iam_roles._discover_role_arns(context_for_test(clients={"iam": DeniedIam()}))
+    assert problem is not None
+    _assert_code_not_message(problem)
+
+
+def test_an_unloadable_policy_set_is_reported_without_the_aws_error_message() -> None:
+    clients = _StubbedClientSet()
+    clients.stub.add_response("get_role", {"Role": _role_stub("create_account")})
+    for other in _SORTED_FUNCTIONS:
+        clients.add_simulate("allowed" if other == "create_account" else "explicitDeny")
+    clients.stub.add_client_error(
+        "list_role_policies",
+        service_error_code="AccessDenied",
+        service_message=f"User: {_PLANTED_ARN} is not authorized to perform: iam:ListRolePolicies",
+    )
+    clients.add_role_for("get_rep_self")
+    clients.add_role_for("update_account")
+    clients.activate()
+    results = _run_checks(clients)
+    clients.assert_no_pending()
+    unreadable = [
+        r
+        for r in results
+        if r.resource == _role("create_account")
+        and r.check in ("no_dynamodb_wildcard", "leading_keys:policies_unreadable")
+    ]
+    assert [r.status for r in unreadable] == ["fail", "fail"]
+    for row in unreadable:
+        _assert_code_not_message(row.detail)

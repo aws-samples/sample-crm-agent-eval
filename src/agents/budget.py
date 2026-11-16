@@ -27,9 +27,10 @@ import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, cast, get_args
 
 from agents.events import AgentEvent, budget_exhausted_event
+from providers.capabilities import Tier
 
 #: Maximum tool calls permitted in one chat turn.
 CHAT_MAX_TOOL_CALLS: Final[int] = 100
@@ -147,6 +148,8 @@ class TurnBudget:
             are a lower bound whenever this is non-zero.
         refused_request: The request :meth:`refuse_request` refused, or ``None``; once set, the
             budget is exhausted on the ``request_prompt_limit`` dimension.
+        exhausted_tier: The tier at which the budget was first found exhausted, recorded via
+            :meth:`note_exhausted_at`, or ``None`` while no detection site has recorded one.
         started_at: The ``clock`` reading at construction, against which the deadline is measured.
     """
 
@@ -159,6 +162,7 @@ class TurnBudget:
     completed_actions: list[str] = field(default_factory=list)
     calls_without_usage: int = 0
     refused_request: RequestRefusal | None = None
+    exhausted_tier: Tier | None = None
     started_at: float = field(init=False)
 
     def __post_init__(self) -> None:
@@ -193,6 +197,36 @@ class TurnBudget:
         self.tool_calls_made += 1
         self.completed_actions.append(description)
 
+    def charge_tool_call(self, description: str, *, tier: str, role: str) -> None:
+        """Charge one tool call before it is dispatched, or refuse it at the tool-call cap.
+
+        Under the cap this is :meth:`record_tool_call`. At the cap the call is not charged,
+        ``tier`` is recorded via :meth:`note_exhausted_at`, the refusal is logged, and
+        :class:`RequestRefusedError` is raised so the caller does not dispatch it.
+
+        Args:
+            description: What the call does, as for :meth:`record_tool_call`.
+            tier: The tier dispatching the call (``supervisor``, ``subagent`` or ``tool``).
+            role: The agent role it runs for.
+
+        Raises:
+            RequestRefusedError: If :attr:`tool_calls_made` has reached :attr:`max_tool_calls`.
+        """
+        if self.tool_calls_made >= self.max_tool_calls:
+            self.note_exhausted_at(_as_tier(tier))
+            _logger.warning(
+                json.dumps(
+                    {
+                        "event": "tool_call_refused",
+                        "reason": f"tier={tier} role={role} max_tool_calls={self.max_tool_calls}",
+                    }
+                )
+            )
+            raise RequestRefusedError(
+                f"tool call refused: {self.max_tool_calls} tool call(s) already made"
+            )
+        self.record_tool_call(description)
+
     def record_tokens(self, count: int) -> None:
         """Record tokens consumed by one model invocation within this turn.
 
@@ -210,8 +244,15 @@ class TurnBudget:
         """Return wall-clock seconds since this turn started."""
         return self.clock() - self.started_at
 
+    def note_exhausted_at(self, tier: Tier) -> None:
+        """Record ``tier`` as where the budget ran out, unless an earlier site already did."""
+        if self.exhausted_tier is None:
+            self.exhausted_tier = tier
+
     def note_call_without_usage(self, *, tier: str, role: str, cause: str) -> None:
         """Record one model call whose token usage will never be reported, and log it.
+
+        A ``deadline`` cause also records ``tier`` via :meth:`note_exhausted_at`.
 
         Args:
             tier: The call's tier (``supervisor``, ``subagent`` or ``tool``).
@@ -219,6 +260,8 @@ class TurnBudget:
             cause: Why it ended unmetered, for example ``deadline`` or ``turn_stopped``.
         """
         self.calls_without_usage += 1
+        if cause == "deadline":
+            self.note_exhausted_at(_as_tier(tier))
         _logger.warning(
             json.dumps(
                 {
@@ -233,8 +276,10 @@ class TurnBudget:
     ) -> None:
         """Record one model request refused for an estimated prompt above ``limit``, and log it.
 
-        The budget is exhausted from then on; the first refusal is the one reported.
+        The budget is exhausted from then on; the first refusal is the one reported, and
+        ``tier`` is recorded via :meth:`note_exhausted_at`.
         """
+        self.note_exhausted_at(_as_tier(tier))
         if self.refused_request is None:
             self.refused_request = RequestRefusal(
                 estimated_prompt_tokens=estimated_prompt_tokens, limit=limit, tier=tier, role=role
@@ -344,6 +389,15 @@ class TurnBudget:
         )
 
 
+_TIERS: Final[frozenset[str]] = frozenset(get_args(Tier))
+
+
+def _as_tier(tier: str) -> Tier:
+    if tier not in _TIERS:
+        raise ValueError(f"tier must be one of {sorted(_TIERS)}, got {tier!r}")
+    return cast(Tier, tier)
+
+
 class DeadlineReachedError(Exception):
     """Raised by :func:`within_deadline` when the turn's wall clock runs out during the wait."""
 
@@ -422,7 +476,7 @@ async def until_deadline[T](
                     in_flight=started,
                     metered=metered,
                 )
-            except (StopAsyncIteration, DeadlineReachedError):
+            except StopAsyncIteration, DeadlineReachedError:
                 return
             started = True
             metered = metered or (is_metered is not None and is_metered(item))

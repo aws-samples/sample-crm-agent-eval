@@ -11,6 +11,7 @@ import copy
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from crm.handlers._common import decode
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval import runs
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
 
 _FIXTURE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "events"
 _REST_V1 = json.loads((_FIXTURE / "apigw_v1_proxy_post_get_account.json").read_text("utf-8"))
@@ -36,6 +38,14 @@ def identity(rep_id: str = "rep-admin") -> Identity:
     event["requestContext"]["authorizer"]["claims"][CLAIM_REP_ID] = rep_id
     event["body"] = "{}"
     return decode(event)[0]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_earlier_format_log() -> Iterator[None]:
+    """Each test starts as a fresh process that has logged no earlier-format run."""
+    runs._EARLIER_FORMAT_LOGGED_RUN_IDS.clear()
+    yield
+    runs._EARLIER_FORMAT_LOGGED_RUN_IDS.clear()
 
 
 @pytest.fixture
@@ -56,6 +66,54 @@ def _create(store: Store, run_id: str = "r1", **overrides: Any) -> runs.RunRecor
         now=overrides.pop("now", NOW),
         **overrides,
     )
+
+
+_ARTIFACTS: dict[str, Any] = {"matrix_json": "s3://b/r1/matrix.json", "raw": []}
+
+
+def _stored_payload(
+    store: Store, matrix_report: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> dict[str, Any]:
+    """Store a completed run ``r1`` with ``matrix_report`` and artifact links; return its payload."""
+    _create(store)
+    store.update_item(
+        runs.EVAL_RUNS_TABLE,
+        {"run_id": runs.job_row_id("r1")},
+        set_values={
+            "job_status": "completed",
+            "finished_at": NOW.isoformat(),
+            "tasks_done": 40,
+            "cost_spent_usd": Decimal("1.25"),
+            "matrix_report": json.dumps(matrix_report),
+            "artifact_links": json.dumps(_ARTIFACTS),
+        },
+        condition=None,
+    )
+    caplog.set_level("INFO")
+    return runs.require_run(store, "r1").to_payload()
+
+
+def _store_matrix(store: Store, run_id: str, matrix_report: dict[str, Any], minute: int) -> None:
+    """Create a completed run ``run_id`` whose stored matrix is ``matrix_report``."""
+    _create(store, run_id=run_id, now=NOW + timedelta(minutes=minute))
+    store.update_item(
+        runs.EVAL_RUNS_TABLE,
+        {"run_id": runs.job_row_id(run_id)},
+        set_values={"job_status": "completed", "matrix_report": json.dumps(matrix_report)},
+        condition=None,
+    )
+
+
+def _format_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    events = []
+    for record in caplog.records:
+        try:
+            parsed = json.loads(record.getMessage())
+        except ValueError:
+            continue
+        if isinstance(parsed, dict) and parsed.get("event") == "eval_record_format_earlier":
+            events.append(parsed)
+    return events
 
 
 class TestVocabulary:
@@ -239,5 +297,107 @@ class TestPayload:
         assert not any("arn" in key for key in payload)
         assert "123456789012" not in json.dumps(payload)
 
+    def test_an_earlier_format_record_omits_its_results_and_says_so(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        payload = _stored_payload(store, {"arms": [], "tier_comparison": {"columns": []}}, caplog)
+        assert payload["record_format"] == "earlier"
+        assert not {"matrix", "tier_comparison_table", "artifacts"} & set(payload)
+        assert payload["status"] == "completed"
+        assert payload["tasks_done"] == 40
+        assert payload["cost_spent_usd"] == pytest.approx(1.25)
+        assert payload["finished_at"] == NOW.isoformat()
+        assert _format_events(caplog) == [
+            {"event": "eval_record_format_earlier", "correlation_id": "r1"}
+        ]
+
+    @pytest.mark.parametrize(
+        "version",
+        [1, 2, "3", 3.0, True, None],
+        ids=["v1", "v2", "string", "float", "bool", "null"],
+    )
+    def test_any_record_shape_other_than_the_current_int_is_earlier(
+        self, store: Store, caplog: pytest.LogCaptureFixture, version: object
+    ) -> None:
+        payload = _stored_payload(store, {RECORD_SHAPE_VERSION_KEY: version, "arms": []}, caplog)
+        assert payload["record_format"] == "earlier"
+        assert "matrix" not in payload and "artifacts" not in payload
+
+    def test_a_current_shape_record_keeps_its_results_and_no_marker(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        report = {RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "arms": []}
+        payload = _stored_payload(store, report, caplog)
+        assert "record_format" not in payload
+        assert payload["matrix"] == report
+        assert payload["artifacts"] == _ARTIFACTS
+        assert _format_events(caplog) == []
+
+    def test_a_run_without_a_matrix_carries_no_marker(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("INFO")
+        _create(store)
+        payload = runs.require_run(store, "r1").to_payload()
+        assert "record_format" not in payload
+        assert _format_events(caplog) == []
+
+    def test_an_earlier_format_run_is_still_listed(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _stored_payload(store, {"arms": []}, caplog)
+        _create(store, run_id="r2", now=NOW + timedelta(minutes=1))
+        page, _cursor = runs.list_runs(store)
+        listed = {record.run_id: record.to_payload() for record in page}
+        assert set(listed) == {"r1", "r2"}
+        assert listed["r1"]["record_format"] == "earlier"
+        assert "record_format" not in listed["r2"]
+
     def test_stale_queued_age_constant(self) -> None:
         assert timedelta(seconds=runs.STALE_QUEUED_SECONDS) == timedelta(minutes=5)
+
+
+class TestEarlierFormatLogOncePerRun:
+    """``eval_record_format_earlier`` is logged once per run id per process, not per page."""
+
+    def _history(self, store: Store) -> None:
+        _store_matrix(store, "e1", {"arms": []}, minute=1)
+        _store_matrix(store, "e2", {RECORD_SHAPE_VERSION_KEY: 1, "arms": []}, minute=2)
+        _store_matrix(store, "c1", {RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION}, minute=3)
+
+    def _page_everything(self, store: Store) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            page, cursor = runs.list_runs(store, cursor=cursor, limit=2)
+            payloads.extend(record.to_payload() for record in page)
+            if cursor is None:
+                return payloads
+
+    def test_paging_the_history_twice_logs_one_line_per_earlier_run(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._history(store)
+        _page, cursor = runs.list_runs(store, limit=2)
+        assert cursor is not None, "the history must span more than one page"
+        caplog.set_level("INFO")
+        first = self._page_everything(store)
+        second = self._page_everything(store)
+        assert [p["run_id"] for p in first] == [p["run_id"] for p in second] == ["c1", "e2", "e1"]
+        assert {p["run_id"] for p in second if p.get("record_format") == "earlier"} == {"e1", "e2"}
+        assert sorted(event["correlation_id"] for event in _format_events(caplog)) == ["e1", "e2"]
+
+    def test_a_fresh_process_logs_the_earlier_run_again(
+        self, store: Store, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        self._history(store)
+        caplog.set_level("INFO")
+        self._page_everything(store)
+        runs._EARLIER_FORMAT_LOGGED_RUN_IDS.clear()
+        self._page_everything(store)
+        assert sorted(event["correlation_id"] for event in _format_events(caplog)) == [
+            "e1",
+            "e1",
+            "e2",
+            "e2",
+        ]

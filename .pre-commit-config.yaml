@@ -24,7 +24,7 @@ repos:
 
       - id: check-log-redaction
         name: check no log call site under src/ can emit a token, secret, or full record payload
-        entry: python3 scripts/check_log_redaction.py
+        entry: scripts/repo_python.sh scripts/check_log_redaction.py
         language: system
         pass_filenames: false
         always_run: true
@@ -45,7 +45,7 @@ repos:
 
       - id: gitleaks
         name: gitleaks secret scan (working tree, non-ignored files)
-        entry: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY python3 scripts/check_secret_scan.py
+        entry: env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_OBJECT_DIRECTORY scripts/repo_python.sh scripts/check_secret_scan.py
         language: system
         pass_filenames: false
         always_run: true

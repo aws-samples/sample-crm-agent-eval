@@ -39,7 +39,9 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    aws_error_detail,
     error_code,
+    exception_detail,
     open_https,
     run_main,
 )
@@ -310,7 +312,7 @@ def simulation_result(
             resource=resource,
             check=row.check,
             status="fail",
-            detail=f"simulate_principal_policy raised {type(exc).__name__}: {exc} ({subject})",
+            detail=f"{aws_error_detail('iam:SimulatePrincipalPolicy', exc)} ({subject})",
         )
     if decision == "no_result":
         ok = False
@@ -423,7 +425,7 @@ def provision_or_fail(
             resource=resource,
             check=check,
             status="fail",
-            detail=f"could not provision the smoke user: {type(exc).__name__}: {exc}",
+            detail=f"could not provision the smoke user: {aws_error_detail('provision', exc)}",
         )
     return user, CheckResult(resource=resource, check=check, status="pass", detail=user.detail)
 
@@ -460,7 +462,7 @@ def check_admin_group_exists(idp: Any, *, user_pool_id: str) -> CheckResult:
             resource=RESOURCE_CLASS,
             check="admin_group_exists",
             status="fail",
-            detail=f"get_group({ADMIN_GROUP!r}) raised {type(exc).__name__}: {exc}",
+            detail=f"{aws_error_detail('cognito-idp:GetGroup', exc)} for {ADMIN_GROUP!r}",
         )
     return CheckResult(
         resource=RESOURCE_CLASS,
@@ -507,7 +509,7 @@ def check_groups_claim(
             resource=RESOURCE_CLASS,
             check="admin_token_groups_claim",
             status="fail",
-            detail=f"{CLAIM_GROUPS} rendered as {rendering} does not parse: {exc}",
+            detail=f"{CLAIM_GROUPS} rendered as {rendering} does not parse: {exception_detail(exc)}",
         )
     present = ADMIN_GROUP in groups
     return CheckResult(

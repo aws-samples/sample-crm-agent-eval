@@ -88,6 +88,17 @@ def conversation_key(conversation_id: str) -> str:
     return f"conversation{_SEPARATOR}{conversation_id}"
 
 
+def history_key(tenant: str, session_id: str) -> str:
+    """Build the ``reps`` primary key of a conversation-history item, ``"history#<tenant>#<id>"``.
+
+    Raises:
+        ValueError: If ``tenant`` or ``session_id`` is empty.
+    """
+    if not tenant or not session_id:
+        raise ValueError("tenant and session_id must both be non-empty")
+    return _SEPARATOR.join(("history", tenant, session_id))
+
+
 def eval_result_id(arm_index: int, task_id: str) -> str:
     """Build the ``eval_results`` sort-key value ``"<arm_index:02d>#<task_id>"``.
 

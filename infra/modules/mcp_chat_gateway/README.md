@@ -18,7 +18,7 @@ baseline](../../../docs/security-baseline.md). Modules named here:
 | File | Declares |
 |---|---|
 | `main.tf` | the gateway's execution role, trust policy and permissions; `aws_bedrockagentcore_gateway.this`; `aws_bedrockagentcore_gateway_target.chat`; the interceptor's invoke permission for this gateway |
-| `variables.tf`, `outputs.tf`, `versions.tf` | interface and provider pin (`hashicorp/aws` 6.71.0) |
+| `variables.tf`, `outputs.tf`, `versions.tf` | interface and provider pin (`hashicorp/aws` 6.72.0) |
 
 ## Inputs
 

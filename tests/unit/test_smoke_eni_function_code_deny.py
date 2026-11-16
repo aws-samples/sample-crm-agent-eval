@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke import eni_function_code_deny as mod
 from scripts.smoke.eni_function_code_deny import (
     EXPECTED_PROBE_ERROR,
@@ -280,6 +281,25 @@ def test_a_probe_that_was_not_denied_fails_and_is_still_deleted(
     assert not fake.probe_exists
 
 
+def test_a_function_error_payload_leaks_no_error_message_or_stacktrace() -> None:
+    """When the probe raises, the detail names only FunctionError and errorType, never the body."""
+    secret_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+    fake = _FakeLambda(
+        payload={
+            "errorType": "AccessDeniedException",
+            "errorMessage": f"User: {secret_arn} is not authorized",
+            "stackTrace": [f"  File probe.py, caller {secret_arn}"],
+        },
+        function_error="Unhandled",
+    )
+    row = _by(_run(fake), "probe_code_denied_eni_actions")[0]
+    assert row.status == "fail"
+    assert "FunctionError=Unhandled" in row.detail
+    assert "errorType=AccessDeniedException" in row.detail
+    assert secret_arn not in row.detail
+    assert "errorMessage" not in row.detail and "stackTrace" not in row.detail
+
+
 def test_a_probe_that_never_becomes_active_fails_and_is_deleted() -> None:
     fake = _FakeLambda(probe_state="Pending")
     results = _run(fake)
@@ -407,3 +427,32 @@ def test_a_deny_that_also_blocks_lambdas_own_eni_work_fails_the_service_row() ->
 def test_a_short_simulation_result_fails_the_service_row() -> None:
     results = _run(_FakeLambda(), _FakeIam(drop_from_service="xray:PutTraceSegments"))
     assert all(r.status == "fail" for r in _by(results, "service_path_allowed_eni_and_xray"))
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}}, operation
+    )
+
+
+class _DeniedLambda(_FakeLambda):
+    def create_function(self, **kwargs: Any) -> dict[str, Any]:
+        raise _planted("CreateFunction")
+
+    def delete_function(self, *, FunctionName: str) -> None:  # noqa: N803
+        self.deleted.append(FunctionName)
+        raise _planted("DeleteFunction")
+
+
+def test_aws_failures_name_the_code_never_the_message(capsys: pytest.CaptureFixture[str]) -> None:
+    results = _run(_DeniedLambda(stale={}))
+    [created] = _by(results, "probe_created_active")
+    assert created.status == "fail"
+    assert created.detail == "lambda:CreateFunction failed (AccessDeniedException)"
+    stderr = capsys.readouterr().err
+    assert "lambda:DeleteFunction failed (AccessDeniedException)" in stderr
+    assert _PLANTED_ARN not in stderr
+    assert all(_PLANTED_ARN not in r.detail for r in results)

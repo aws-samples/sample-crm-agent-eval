@@ -129,6 +129,7 @@ from scripts.smoke.harness import (
     ExpectedCheckCount,
     SmokeContext,
     Status,
+    aws_error_code,
     error_code,
     key_policy_for_simulation,
     open_https,
@@ -608,7 +609,7 @@ def _fail(resource: str, check: str, detail: str) -> CheckResult:
 
 
 def _raised(action: str, exc: BaseException) -> str:
-    return f"{action} raised {error_code(exc) or type(exc).__name__}: {exc}"
+    return f"{action} raised {aws_error_code(exc)}"
 
 
 def read_backend_config(path: Path) -> dict[str, str] | None:
@@ -1852,11 +1853,10 @@ def classify_store_probe(
         else None
     )
     if code in REACHED_RESOURCE_CODES or status_code in (404, 412):
-        message = str((getattr(outcome, "response", {}) or {}).get("Error", {}).get("Message", ""))
         return _fail(
             resource,
             f"probe_denied:{check_suffix}",
-            f"the call reached the resource, no boundary refused it ({code or status_code}: {message})",
+            f"the call reached the resource, no boundary refused it ({code or status_code})",
         )
     return classify_probe(check_suffix, resource, outcome, probe_role)
 
@@ -2023,7 +2023,7 @@ def _delete_probe_role(ctx: SmokeContext, role_name: str) -> CheckResult:
         return _fail(
             role_name,
             CHECK_PROBE_ROLE_DELETED,
-            f"deleting probe role {role_name} {_raised('', exc).strip()}. Delete it by hand.",
+            f"deleting probe role {role_name} raised {aws_error_code(exc)}. Delete it by hand.",
         )
     return CheckResult(
         resource=role_name,
@@ -2191,7 +2191,8 @@ def _probe_rows(
             _fail(
                 role_name,
                 CHECK_PROBE_ROLE_SETUP,
-                f"{_raised('setting up or running the probe', exc)}; the rows below were not classified",
+                f"setting up or running the probe raised {aws_error_code(exc)}; "
+                "the rows below were not classified",
             )
         )
         done = {row.check for row in rows}

@@ -7,6 +7,7 @@ default resolution path.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,6 +21,9 @@ from crm.store.provisioning import create_all_tables
 from crm.store.schema import TABLE_NAMES
 from crm.store.store import Store
 from eval.harness import DEFAULT_ARM_SPECS, run_sweep
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
+from eval.reprice import PRE_AGGREGATION_DIRNAME
+from eval.sweep_units import UNIT_REPEAT_INDEX_KEY, UNIT_TASK_ID_KEY
 from eval.tenancy import TenantTeardownError, teardown_tenant
 
 #: Unique per process, so concurrent xdist workers never share a table.
@@ -85,6 +89,40 @@ def test_a_full_stub_sweep_runs_end_to_end_against_the_real_dynamodb_engine(
     assert post_teardown_items == []
     post_teardown_opps, _ = sweep_store.query_tenant_scan("opportunities", tenant=result.tenant)
     assert post_teardown_opps == []
+
+
+def test_every_archived_call_names_its_task_and_repeat_on_the_real_engine(
+    sweep_store: Store, tmp_path: Path
+) -> None:
+    """With `--archive-raw` and two repeats, every pre-aggregation invocation and tool-call entry
+    names a task the arm scored and a repeat below the repeat count, and every (task, repeat) cell
+    is present.
+    """
+    repeats = 2
+    result = run_sweep(
+        store=sweep_store,
+        mode="stub",
+        output_dir=tmp_path,
+        archive_raw=True,
+        repeats=repeats,
+    )
+    archives = sorted((tmp_path / "raw" / PRE_AGGREGATION_DIRNAME).glob("*.json"))
+    assert len(archives) == len(DEFAULT_ARM_SPECS)
+    for arm_run, archive in zip(result.arm_runs, archives, strict=True):
+        payload = json.loads(archive.read_text(encoding="utf-8"))
+        assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION
+        task_ids = {score.task_id for score in arm_run.task_scores}
+        cells = {(task_id, repeat) for task_id in task_ids for repeat in range(repeats)}
+        invocation_cells = set()
+        for key in ("invocation_attributions", "tool_call_attributions"):
+            entries = payload[key]
+            assert entries, (archive.name, key)
+            for entry in entries:
+                cell = (entry[UNIT_TASK_ID_KEY], entry[UNIT_REPEAT_INDEX_KEY])
+                assert cell in cells, (archive.name, key, cell)
+                if key == "invocation_attributions":
+                    invocation_cells.add(cell)
+        assert invocation_cells == cells, archive.name
 
 
 def test_the_demo_tenant_is_never_written_or_touched_by_a_sweep(

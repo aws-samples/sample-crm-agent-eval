@@ -34,6 +34,7 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    exception_detail,
     run_main,
 )
 from scripts.smoke.iam_roles import _is_throttle  # one spelling of the throttle predicate
@@ -162,7 +163,8 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:
             check="terraform_output_present",
             status="fail",
             detail=(
-                f"required Terraform output 'agentcore_runtime_role_arn' is absent ({exc}); it is "
+                f"required Terraform output 'agentcore_runtime_role_arn' is absent "
+                f"({exception_detail(exc)}); it is "
                 "this module's whole subject. A missing output is a failure, not a skipped class: "
                 "an ARN built from a template that no longer resolves returns implicitDeny and reads "
                 "as a pass"

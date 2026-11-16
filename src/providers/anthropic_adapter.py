@@ -54,7 +54,7 @@ from providers.base import (
     ResolvedInvocation,
     guard_invocation_family,
 )
-from providers.prompt_caching import breakpoint_index
+from providers.prompt_caching import breakpoint_index, latest_message_index, select_cache_points
 from providers.sdk_transport import (
     MODEL_CALL_DEADLINE_SECONDS,
     CredentialPolicyError,
@@ -253,12 +253,21 @@ def build_request(
 
     ``stream`` is not included; the caller adds it.
     """
-    cache_at = breakpoint_index(invocation.model.model_id, messages, tools)
-    system_prompt, conversation = _split_system(messages, cache_at=cache_at)
+    model_id = invocation.model.model_id
+    system_at = breakpoint_index(model_id, messages, tools)
+    points = select_cache_points(
+        (), latest=latest_message_index(model_id, messages, tools), system=system_at
+    )
+    system_prompt, conversation = _split_system(
+        messages, cache_at=system_at if system_at in points else None
+    )
     request: dict[str, Any] = {
         "model": invocation.model.inference_profile,
         "max_tokens": MAX_OUTPUT_TOKENS,
-        "messages": [_to_messages_api_turn(message) for message in conversation],
+        "messages": [
+            _to_messages_api_turn(message, cache_point=index in points)
+            for index, message in conversation
+        ],
     }
     if system_prompt is not None:
         request["system"] = system_prompt
@@ -360,16 +369,16 @@ def _split_system(
     messages: list[dict[str, object]],
     *,
     cache_at: int | None = None,
-) -> tuple[str | list[dict[str, Any]] | None, list[dict[str, object]]]:
+) -> tuple[str | list[dict[str, Any]] | None, list[tuple[int, dict[str, object]]]]:
     """Lift ``system``-role messages into the top-level system prompt, in order.
 
     The Messages API rejects a ``system`` role inside ``messages``; ``user``/``assistant``/``tool``
-    turns pass through untouched. With ``cache_at`` (a message index from
+    turns pass through untouched, each paired with its seam index. With ``cache_at`` (a message index from
     :func:`providers.prompt_caching.breakpoint_index`) the prompt is a list of text blocks and that
     message's block carries ``cache_control``; otherwise the parts are joined into one string.
     """
     blocks: list[dict[str, Any]] = []
-    conversation: list[dict[str, object]] = []
+    conversation: list[tuple[int, dict[str, object]]] = []
     for index, message in enumerate(messages):
         content = message.get("content")
         if message.get("role") == "system" and isinstance(content, str) and content:
@@ -378,7 +387,7 @@ def _split_system(
                 block["cache_control"] = {"type": "ephemeral"}
             blocks.append(block)
         else:
-            conversation.append(message)
+            conversation.append((index, message))
     if not blocks:
         return None, conversation
     if cache_at is None:
@@ -386,12 +395,37 @@ def _split_system(
     return blocks, conversation
 
 
-def _to_messages_api_turn(message: dict[str, object]) -> dict[str, Any]:
+def _to_messages_api_turn(
+    message: dict[str, object], *, cache_point: bool = False
+) -> dict[str, Any]:
     """Translate one seam message into a Messages API turn.
 
     An ``assistant`` turn with ``tool_calls`` becomes ``tool_use`` blocks, and a ``tool`` turn with
-    ``tool_results`` becomes a ``user`` turn of ``tool_result`` blocks.
+    ``tool_results`` becomes a ``user`` turn of ``tool_result`` blocks. With ``cache_point`` the
+    turn's last content block carries ``cache_control``.
     """
+    turn = _translate_turn(message)
+    return _with_cache_point(turn) if cache_point else turn
+
+
+def _with_cache_point(turn: dict[str, Any]) -> dict[str, Any]:
+    """Return ``turn`` with ``cache_control`` on its last content block, leaving ``turn`` unchanged.
+
+    String content becomes one text block; empty content is returned without a point.
+    """
+    content = turn["content"]
+    if isinstance(content, str) and content:
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": content}]
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
+        blocks = [*content[:-1], dict(content[-1])]
+    else:
+        return turn
+    blocks[-1]["cache_control"] = {"type": "ephemeral"}
+    return {**turn, "content": blocks}
+
+
+def _translate_turn(message: dict[str, object]) -> dict[str, Any]:
+    """Translate one seam message into a Messages API turn without any cache point."""
     tool_calls = message.get("tool_calls")
     if message.get("role") == "assistant" and isinstance(tool_calls, list):
         content: list[dict[str, Any]] = []

@@ -61,7 +61,7 @@ mkdir -p "$(dirname "${OUTPUTS_SNAPSHOT}")"
   || refresh_failed "terraform output -json exited non-zero"
 python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if isinstance(d, dict) and d else 1)' \
   "${PARTIAL}" || refresh_failed "the recorded document is not a non-empty JSON object"
-python3 "${SCRIPT_DIR}/outputs_provenance.py" --stamp "${PARTIAL}" --recorded-by refresh \
+"${SCRIPT_DIR}/repo_python.sh" "${SCRIPT_DIR}/outputs_provenance.py" --stamp "${PARTIAL}" --recorded-by refresh \
   || refresh_failed "recording the snapshot's provenance failed"
 mv "${PARTIAL}" "${OUTPUTS_SNAPSHOT}" || refresh_failed "the atomic install (mv) failed"
 echo "${SCRIPT_NAME}: recorded $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len([k for k in d if not k.startswith("_")]))' "${OUTPUTS_SNAPSHOT}") outputs to ${OUTPUTS_SNAPSHOT}"

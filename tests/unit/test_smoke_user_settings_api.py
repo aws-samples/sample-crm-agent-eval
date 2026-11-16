@@ -15,6 +15,7 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 from scripts.smoke import user_settings_api as mod
 from scripts.smoke.admin_authz import ApiPost, SimulationRow
@@ -28,6 +29,7 @@ from crm.handlers import user_settings as handler_module
 from crm.store.keys import user_settings_key
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
+from eval.tenancy import TenantTeardownError
 from providers.capabilities import Family, Tier, load_capability_matrix
 from providers.tier_tuning import TIERS
 
@@ -719,3 +721,62 @@ def test_an_item_saved_under_b_despite_the_rejection_is_removed_in_cleanup(store
 def test_the_other_table_row_sends_leading_keys() -> None:
     row = {r.check: r for r in _rows()}["role_denies_other_table"]
     assert row.leading_keys is not None
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}}, operation
+    )
+
+
+class _DeniedStore:
+    """Every store call raises a planted `AccessDeniedException`."""
+
+    def __getattr__(self, name: str) -> Any:
+        def _raise(*_: Any, **__: Any) -> Any:
+            raise _planted(name)
+
+        return _raise
+
+
+class TestNoAwsErrorMessageInDetails:
+    """Each AWS failure row names the operation and the code, never the error message."""
+
+    def test_a_raising_simulation(self, store: Store) -> None:
+        def denied(_ctx: Any) -> Iterator[CheckResult]:
+            yield from ()
+            raise _planted("GetFunction")
+
+        results = list(
+            mod.checks(
+                context_for_test(),
+                store=store,
+                post=_api(store),
+                get=_api_get(),
+                provisioner_factory=lambda _t: FakeProvisioner("rep-a"),
+                simulations=denied,
+            )
+        )
+        row = {r.check: r for r in results}["role_simulations"]
+        assert "GetFunction failed (AccessDeniedException)" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_settings_delete(self) -> None:
+        row = mod._delete_settings_item(_DeniedStore(), tenant="t", rep_id="r", who="A")
+        assert row.status == "fail"
+        assert "delete_item failed (AccessDeniedException)" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_teardown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def denied(_store: Any, smoke_tenant: SmokeTenant) -> dict[str, int]:
+            cause = _planted("BatchWriteItem")
+            raise TenantTeardownError(smoke_tenant.tenant, deleted=None, cause=cause) from cause
+
+        monkeypatch.setattr(mod, "teardown_smoke_tenant", denied)
+        row = mod._teardown(object(), SmokeTenant(run_id="smoke-ab", tenant="eval-smoke-ab"))
+        assert row.status == "fail"
+        assert "BatchWriteItem failed (AccessDeniedException)" in row.detail
+        assert _PLANTED_ARN not in row.detail

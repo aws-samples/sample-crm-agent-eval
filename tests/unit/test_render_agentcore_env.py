@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -426,6 +427,7 @@ class TestSandboxReachesTheApply:
         sandbox = tmp_path / "sandbox_guard"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (scripts_dir / "deploy.sh").write_text(DEPLOY_SH.read_text(encoding="utf-8"), "utf-8")
         (scripts_dir / "deploy.sh").chmod(0o755)
         for name, src in (
@@ -624,6 +626,7 @@ class TestProfileRegionResolutionOrder:
         sandbox = tmp_path / "sandbox"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
 
         for name, source in (("deploy.sh", DEPLOY_SH), ("teardown.sh", TEARDOWN_SH)):
@@ -740,6 +743,7 @@ class TestRestoreOnFailureAndInterrupt:
         sandbox = tmp_path / "sandbox"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
 
         (scripts_dir / "deploy.sh").write_text(
@@ -942,6 +946,7 @@ class TestRestoreOnFailureAndInterrupt:
         sandbox = tmp_path / "sandbox_teardown"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
 
         (scripts_dir / "teardown.sh").write_text(
@@ -1064,6 +1069,7 @@ class TestNonInteractivity:
         sandbox = tmp_path / f"sandbox_{script_name}"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
         source = DEPLOY_SH if script_name == "deploy.sh" else TEARDOWN_SH
         (scripts_dir / script_name).write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -1270,6 +1276,7 @@ class TestRelayGuards:
         sandbox = tmp_path / "sandbox_relay"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
         (scripts_dir / "deploy.sh").write_text(
             DEPLOY_SH.read_text(encoding="utf-8"), encoding="utf-8"
@@ -1374,6 +1381,7 @@ class TestPostApplyParityGate:
         sandbox = tmp_path / "sandbox_parity"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
         (scripts_dir / "deploy.sh").write_text(
             DEPLOY_SH.read_text(encoding="utf-8"), encoding="utf-8"
@@ -1496,6 +1504,7 @@ class TestPostApplyDriftBound:
         sandbox = tmp_path / "sandbox_drift"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
         (scripts_dir / "deploy.sh").write_text(
             DEPLOY_SH.read_text(encoding="utf-8"), encoding="utf-8"
@@ -1703,6 +1712,7 @@ class TestFrontendPublishStep:
         sandbox = tmp_path / "sandbox_publish"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (sandbox / "infra").mkdir()
         (scripts_dir / "deploy.sh").write_text(
             DEPLOY_SH.read_text(encoding="utf-8"), encoding="utf-8"
@@ -1940,6 +1950,7 @@ class _DeployFixSandbox:
         sandbox = tmp_path / "sandbox_deployfix"
         scripts_dir = sandbox / "scripts"
         scripts_dir.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         (scripts_dir / "deploy.sh").write_text(DEPLOY_SH.read_text(encoding="utf-8"), "utf-8")
         (scripts_dir / "deploy.sh").chmod(0o755)
         for name, src in (

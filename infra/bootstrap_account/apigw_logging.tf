@@ -1,4 +1,4 @@
-# Account-wide API Gateway CloudWatch Logs setting. The 6.71.0 `aws_api_gateway_account` schema
+# Account-wide API Gateway CloudWatch Logs setting. The 6.72.0 `aws_api_gateway_account` schema
 # has no `reset_on_delete` argument; see README.md for the destroy behaviour.
 
 resource "aws_iam_role" "apigw_cloudwatch" {

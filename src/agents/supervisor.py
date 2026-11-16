@@ -26,7 +26,7 @@ from typing import Final, Literal
 
 from agents.budget import TurnBudget
 from agents.cancellation import CancellationStore
-from agents.events import AgentEvent, truncate_tool_output
+from agents.events import TOOL_OUTPUT_TRUNCATED_KEY, AgentEvent, bound_tool_output
 from agents.registry import RegisteredTool, tool_registry_for
 from agents.subagents import ALL_SUBAGENT_SPECS, SUBAGENT_SPECS_BY_ROLE
 from agents.subagents.base import SubagentSpec
@@ -59,7 +59,7 @@ SubagentOutcomeKind = Literal["data", "no_match", "denied", "tool_failure"]
 #: Field a ``search_opportunities`` tool result carries alongside ``items`` when the search
 #: examination budget (:data:`crm.search.EXAMINATION_BUDGET`) was reached before either the
 #: underlying index was exhausted or the caller's ``limit`` was satisfied.
-_SEARCH_TRUNCATED_KEY: Final[str] = "truncated"
+_SEARCH_TRUNCATED_KEY: Final[str] = TOOL_OUTPUT_TRUNCATED_KEY
 _SEARCH_EXAMINED_COUNT_KEY: Final[str] = "examined_count"
 
 #: Error codes classified as ``"denied"``, each mapped to the scope named when the payload omits one.
@@ -163,15 +163,15 @@ def classify_tool_result(tool_output: dict[str, object]) -> SubagentOutcome:
 def describe_truncation(tool_output: dict[str, object], *, event_truncated: bool) -> str | None:
     """Return a user-facing truncation notice, or ``None`` when nothing was truncated.
 
-    Two independent signals are checked: the byte-ceiling flag
-    :attr:`agents.events.AgentEvent.truncated`, and ``search_opportunities``'s own
-    ``truncated``/``examined_count`` fields from :data:`crm.search.EXAMINATION_BUDGET`. Either alone
-    produces a notice; the search signal takes precedence.
+    Two signals are checked: the search examination budget (``search_opportunities``'s
+    ``truncated`` with its ``examined_count``, from :data:`crm.search.EXAMINATION_BUDGET`), and the
+    byte ceiling (``event_truncated``, or a ``truncated`` flag without ``examined_count``, as
+    :func:`agents.events.bound_tool_output` writes). Either alone produces a notice; the search
+    signal takes precedence.
 
     Args:
-        tool_output: The raw tool result payload, possibly carrying ``truncated`` and
-            ``examined_count`` (the ``search_opportunities`` shape) at either its top level or
-            under a nested ``body``.
+        tool_output: The tool result payload, possibly carrying ``truncated`` and
+            ``examined_count`` at either its top level or under a nested ``body``.
         event_truncated: Whether the enclosing :class:`agents.events.AgentEvent` reported
             ``truncated=True`` — the byte-ceiling signal, independent of the search-specific one.
 
@@ -181,15 +181,14 @@ def describe_truncation(tool_output: dict[str, object], *, event_truncated: bool
     body = tool_output.get("body", tool_output)
     payload = body if isinstance(body, dict) else tool_output
 
-    search_truncated = bool(payload.get(_SEARCH_TRUNCATED_KEY))
-    if search_truncated:
-        examined = payload.get(_SEARCH_EXAMINED_COUNT_KEY)
+    flagged = bool(payload.get(_SEARCH_TRUNCATED_KEY))
+    examined = payload.get(_SEARCH_EXAMINED_COUNT_KEY)
+    if flagged and examined is not None:
         return (
-            "Search stopped early after examining "
-            f"{examined if examined is not None else 'a bounded number of'} records; "
+            f"Search stopped early after examining {examined} records; "
             "not every matching record may be included."
         )
-    if event_truncated:
+    if event_truncated or flagged:
         return "The tool result was too large to include in full and was truncated."
     return None
 
@@ -643,8 +642,8 @@ def provider_event_to_agent_event(
     With ``stream_event_id`` unset, a ``text_delta`` maps to ``None`` and the caller accumulates its
     text (see :class:`TextAccumulator`) for ``accumulated_text`` on ``completed``. With it set, a
     ``text_delta`` maps to a ``partial=True`` frame carrying that ``event_id``. Every other provider
-    event type maps onto its identically named agent event kind, with a large ``tool_result``
-    payload truncated at a record boundary via :func:`agents.events.truncate_tool_output`.
+    event type maps onto its identically named agent event kind, with a ``tool_result`` payload
+    bounded by :func:`agents.events.bound_tool_output`.
 
     Args:
         event: One event from a provider's normalised stream.
@@ -681,12 +680,7 @@ def provider_event_to_agent_event(
     if event.type == "tool_result":
         if event.tool_output is None:
             raise ValueError("tool_result provider event missing tool_output")
-        items = event.tool_output.get("items")
-        if isinstance(items, list):
-            kept, truncated = truncate_tool_output(items)
-            output = {**event.tool_output, "items": kept}
-        else:
-            output, truncated = event.tool_output, False
+        output, truncated = bound_tool_output(event.tool_output)
         return AgentEvent(kind="tool_result", tool_output=output, truncated=truncated)
     if event.type == "usage":
         if event.input_tokens is None or event.output_tokens is None:

@@ -67,7 +67,7 @@ def _run_git(*arguments: str) -> str | None:
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     if completed.returncode != 0:
         return None

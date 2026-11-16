@@ -13,15 +13,15 @@
 #     the repo-root fixtures/ package, and config/.
 #   - chat_target.zip -- src/gateway/chat_target.py plus crm/, gateway/, providers/ and config/,
 #     laid out like eval_trigger.zip (first-party packages under src/). No model SDK.
-#   - agent-source.zip -- the full src/ tree plus config/, pyproject.toml, requirements.txt and the
-#     root Dockerfile: CodeBuild's Docker build context (infra/modules/agentcore/ecr_codebuild.tf),
-#     not a Lambda zip.
+#   - agent-source.zip -- the src/ tree except src/relay/, plus config/, pyproject.toml,
+#     requirements.txt and the root Dockerfile: CodeBuild's Docker build context
+#     (infra/modules/agentcore/ecr_codebuild.tf), not a Lambda zip.
 #
 # Third-party dependencies: boto3/botocore are provided by the Lambda runtime and never vendored.
 # Each zip declares a seed (jsonschema for the tool zips; PyJWT and cryptography for the interceptor;
 # none for pre_token_generation; jsonschema, PyYAML, starlette and python-multipart for
 # eval_trigger; jsonschema and PyYAML for chat_target), and the rest of the closure is resolved: pip installs for the Lambda platform
-# (python3.13, x86_64), then scripts/check_lambda_zip_imports.py reports which distributions the
+# (python3.14, x86_64), then scripts/check_lambda_zip_imports.py reports which distributions the
 # Lambda marker environment still requires, and those are installed until a fixed point. Every
 # vendored version must be exact-pinned in requirements.txt; no version literal appears here.
 #
@@ -148,19 +148,16 @@ if [[ "${PRINT_PINS}" -eq 1 ]]; then
   exit 0
 fi
 
-# Prefers the project's virtualenv, falling back to `python3`.
-PYTHON="${REPO_ROOT}/.venv/bin/python3"
-if [[ ! -x "${PYTHON}" ]]; then
-  PYTHON="python3"
-fi
+# The project's virtualenv, else an ambient `python3` new enough for the repository (scripts/repo_python.sh).
+PYTHON="$("${SCRIPT_DIR}/repo_python.sh" --print)"
 
-# Installs `_PIP_PINS` into `$1` for the Lambda platform (x86_64, python3.13); `--constraint` binds
+# Installs `_PIP_PINS` into `$1` for the Lambda platform (x86_64, python3.14); `--constraint` binds
 # every version pip resolves to requirements.txt.
 _PIP_PINS=()
 _pip_vendor_install() {
   local dir="$1"
   "${PYTHON}" -m pip install --no-input --target "${dir}" --quiet --upgrade \
-    --platform manylinux2014_x86_64 --python-version 3.13 --only-binary=:all: \
+    --platform manylinux2014_x86_64 --python-version 3.14 --only-binary=:all: \
     --constraint "${REQUIREMENTS_FILE}" "${_PIP_PINS[@]}"
   rm -rf "${dir:?}/bin"
   find "${dir}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
@@ -185,7 +182,7 @@ _verify_vendor_pins() {
 }
 
 # Installs `_PIP_PINS` into `$1`, then repeatedly installs the distributions the Lambda marker
-# environment (python_version 3.13 / linux / x86_64) still requires, until none are missing. The round
+# environment (python_version 3.14 / linux / x86_64) still requires, until none are missing. The round
 # cap guards against a metadata cycle.
 _install_target_closure() {
   local dir="$1" round=0 missing_text pins_text name pin
@@ -330,11 +327,12 @@ rsync -a "${CHAT_TARGET_VENDOR_DIR}/" "${chat_target_dir}/"
 (cd "${chat_target_dir}" && zip -qr "${BUILD_DIR}/chat_target.zip" .)
 log "Packaged chat_target.zip"
 
-# agent-source.zip -- src/, config/, pyproject.toml, requirements.txt, and the Dockerfile at the
-# archive root, where CodeBuild's `docker build` expects it.
+# agent-source.zip -- src/ without src/relay/, config/, pyproject.toml, requirements.txt, and the
+# Dockerfile at the archive root, where CodeBuild's `docker build` expects it.
 agent_source_dir="${STAGE_ROOT}/agent-source"
 mkdir -p "${agent_source_dir}"
-rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '*.egg-info' "${SRC_DIR}/" "${agent_source_dir}/src/"
+rsync -a --exclude '/relay/' --exclude '__pycache__' --exclude '*.pyc' --exclude '*.egg-info' \
+  "${SRC_DIR}/" "${agent_source_dir}/src/"
 rsync -a "${REPO_ROOT}/config/" "${agent_source_dir}/config/"
 for f in pyproject.toml requirements.txt Dockerfile; do
   if [[ -f "${REPO_ROOT}/${f}" ]]; then
@@ -346,7 +344,7 @@ log "Packaged agent-source.zip"
 
 log "Done. $(find "${BUILD_DIR}" -maxdepth 1 -name '*.zip' | wc -l | tr -d ' ') zip(s) in ${BUILD_DIR}"
 
-# Verification-only, never packaged: a host-loadable CPython 3.13 build of the tool and interceptor
+# Verification-only, never packaged: a host-loadable CPython 3.14 build of the tool and interceptor
 # zips' vendored distributions, at the same pins, for check_lambda_zip_imports's isolated_import phase. Best effort;
 # when it is absent or incomplete the gate falls back to the build host interpreter and says so.
 TARGET_SHADOW_DIR="${LAMBDA_TARGET_SHADOW_DIR:-${REPO_ROOT}/infra/build/target-python-shadow}"
@@ -355,7 +353,7 @@ _build_target_shadow() {
   _SHADOW_PINS=()
   target_python="$("${PYTHON}" "${SCRIPT_DIR}/check_lambda_zip_imports.py" --print-target-python || true)"
   if [[ -z "${target_python}" ]]; then
-    log "No CPython 3.13 discoverable; skipping the target-version substitute directory (isolated_import will run on this host and say so)"
+    log "No CPython 3.14 discoverable; skipping the target-version substitute directory (isolated_import will run on this host and say so)"
     return 0
   fi
   local dist_info stem
@@ -369,11 +367,11 @@ _build_target_shadow() {
   rm -rf "${TARGET_SHADOW_DIR}"
   mkdir -p "${TARGET_SHADOW_DIR}"
   if "${PYTHON}" -m pip install --no-input --target "${TARGET_SHADOW_DIR}" --quiet --upgrade \
-      --python-version 3.13 --only-binary=:all: \
+      --python-version 3.14 --only-binary=:all: \
       --constraint "${REQUIREMENTS_FILE}" "${_SHADOW_PINS[@]}"; then
     log "Target-version substitute directory built for ${target_python} at ${TARGET_SHADOW_DIR}"
   else
-    log "Could not build the target-version substitute directory (no host wheel for a pin at python-version 3.13); isolated_import will fall back to this host and say so"
+    log "Could not build the target-version substitute directory (no host wheel for a pin at python-version 3.14); isolated_import will fall back to this host and say so"
   fi
 }
 _build_target_shadow

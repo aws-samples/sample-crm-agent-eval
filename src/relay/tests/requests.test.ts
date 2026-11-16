@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   PROMPT_MAX_CHARS,
   PROMPT_TOO_LONG_MESSAGE,
+  decodeBody,
   isPromptWithinCap,
   promptLengthError,
 } from "../src/requests.js";
@@ -69,5 +70,28 @@ describe("promptLengthError", () => {
     ["an unparseable body", eventWithBody("not json")],
   ])("is undefined for %s", (_label, event) => {
     expect(promptLengthError(event)).toBeUndefined();
+  });
+});
+
+describe("decodeBody's resume flag", () => {
+  function decodedResume(extra: Record<string, unknown>): unknown {
+    const event = eventWithBody(JSON.stringify({ prompt: "hi", session_id: "s".repeat(40), ...extra }));
+    const body = decodeBody(event);
+    expect(body).toBeDefined();
+    return body === undefined ? undefined : "resume" in body ? body.resume : "absent";
+  }
+
+  it("keeps resume when it is exactly the JSON boolean true", () => {
+    expect(decodedResume({ resume: true })).toBe(true);
+  });
+
+  it.each([
+    ["absent", {}],
+    ["false", { resume: false }],
+    ["the string 'true'", { resume: "true" }],
+    ["the number 1", { resume: 1 }],
+    ["null", { resume: null }],
+  ])("drops resume when it is %s", (_label, extra) => {
+    expect(decodedResume(extra)).toBe("absent");
   });
 });

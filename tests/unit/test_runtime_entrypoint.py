@@ -392,7 +392,7 @@ def test_run_turn_replays_only_events_after_resume_from_on_reconnect() -> None:
         store.append("sess-2", event)
 
     # Client saw only the first event (sequence 1) before the connection dropped.
-    replay_lines = list(run_turn(invocation, iter([]), store=store, resume_from=1))
+    replay_lines = list(run_turn(invocation, iter([]), store=store, resume_from=1, resume=True))
     assert len(replay_lines) == 2
     kinds = [json.loads(line[len("data: ") : -2])["kind"] for line in replay_lines]
     assert kinds == ["tool_result", "completed"]
@@ -402,6 +402,7 @@ def test_run_turn_replay_never_consumes_the_live_event_iterator() -> None:
     """On a pure replay, the turn's own event stream (which would re-invoke the model) is untouched."""
     store = InMemorySessionStore()
     invocation = _fake_invocation(session_id="sess-3")
+    store.append("sess-3", AgentEvent(kind="usage", input_tokens=1, output_tokens=1))
     store.append("sess-3", AgentEvent(kind="completed", text="done"))
 
     consumed: list[AgentEvent] = []
@@ -411,8 +412,89 @@ def test_run_turn_replay_never_consumes_the_live_event_iterator() -> None:
             consumed.append(event)
             yield event
 
-    list(run_turn(invocation, _tracking_events(), store=store, resume_from=0))
+    list(run_turn(invocation, _tracking_events(), store=store, resume_from=1, resume=True))
     assert consumed == []
+
+
+@pytest.mark.parametrize("resume_from", [0, -1])
+def test_run_turn_with_resume_from_zero_or_less_runs_a_fresh_turn_despite_recorded_events(
+    resume_from: int,
+) -> None:
+    """A same-session follow-up sending no cursor runs the new turn instead of replaying the last."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-follow")
+    first = [AgentEvent(kind="usage", input_tokens=1, output_tokens=1)]
+    list(
+        run_turn(
+            invocation, iter([*first, AgentEvent(kind="completed", text="first")]), store=store
+        )
+    )
+    assert store.last_sequence("sess-follow") == 2
+
+    lines = list(
+        run_turn(
+            invocation,
+            iter([AgentEvent(kind="completed", text="second")]),
+            store=store,
+            resume_from=resume_from,
+        )
+    )
+
+    assert _sse_texts(lines) == ["second"]
+
+
+def test_run_turn_with_resume_and_resume_from_zero_replays_the_whole_last_turn() -> None:
+    """A reconnect that applied no frame yet replays the turn instead of running it again."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-zero")
+    first = [
+        AgentEvent(kind="usage", input_tokens=1, output_tokens=1),
+        AgentEvent(kind="completed", text="first"),
+    ]
+    list(run_turn(invocation, iter(first), store=store))
+    consumed: list[AgentEvent] = []
+
+    def _rerun() -> Iterator[AgentEvent]:
+        event = AgentEvent(kind="completed", text="rerun")
+        consumed.append(event)
+        yield event
+
+    lines = list(run_turn(invocation, _rerun(), store=store, resume_from=0, resume=True))
+
+    assert consumed == []
+    assert [json.loads(line[len("data: ") : -2])["kind"] for line in lines] == [
+        "usage",
+        "completed",
+    ]
+
+
+@pytest.mark.parametrize("resume", ["true", 1, "1", None, False])
+def test_run_turn_ignores_a_resume_value_that_is_not_true(resume: object) -> None:
+    """Only the boolean ``True`` marks a reconnect; any other value runs a fresh turn."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-flag")
+    list(run_turn(invocation, iter([AgentEvent(kind="completed", text="first")]), store=store))
+    lines = list(
+        run_turn(
+            invocation,
+            iter([AgentEvent(kind="completed", text="second")]),
+            store=store,
+            resume_from=0,
+            resume=resume,  # type: ignore[arg-type]
+        )
+    )
+    assert _sse_texts(lines) == ["second"]
+
+
+def test_run_turn_with_resume_from_omitted_runs_a_fresh_turn_despite_recorded_events() -> None:
+    """The default cursor is a fresh turn, never a replay of the session's previous turn."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-default")
+    list(run_turn(invocation, iter([AgentEvent(kind="completed", text="first")]), store=store))
+    lines = list(
+        run_turn(invocation, iter([AgentEvent(kind="completed", text="second")]), store=store)
+    )
+    assert _sse_texts(lines) == ["second"]
 
 
 def test_run_turn_with_resume_from_at_or_beyond_last_sequence_runs_a_fresh_turn() -> None:
@@ -423,7 +505,7 @@ def test_run_turn_with_resume_from_at_or_beyond_last_sequence_runs_a_fresh_turn(
     store.append("sess-4", AgentEvent(kind="completed", text="turn one"))
 
     new_events = iter([AgentEvent(kind="completed", text="turn two")])
-    lines = list(run_turn(invocation, new_events, store=store, resume_from=1))
+    lines = list(run_turn(invocation, new_events, store=store, resume_from=1, resume=True))
     assert len(lines) == 1
     body = json.loads(lines[0][len("data: ") : -2])
     assert body["text"] == "turn two"
@@ -508,7 +590,7 @@ def test_run_turn_replays_a_whole_turn_that_exactly_fills_the_bound() -> None:
     turn = [AgentEvent(kind="completed", text=f"e{index}") for index in range(1, 5)]
     list(run_turn(invocation, iter(turn), store=store, resume_from=0))
 
-    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=0))
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=0, resume=True))
 
     assert [json.loads(line[len("data: ") : -2])["text"] for line in replayed] == [
         "e1",
@@ -530,7 +612,7 @@ def test_run_turn_resumes_the_latest_turn_after_earlier_turns_were_dropped() -> 
             )
         )
 
-    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=7))
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=7, resume=True))
 
     assert [json.loads(line[len("data: ") : -2])["text"] for line in replayed] == ["t3e2", "t3e3"]
 
@@ -565,7 +647,7 @@ def test_run_turn_resume_inside_a_later_turn_returns_every_event_after_the_curso
     _run_fresh_turn(store, invocation, ["t1e1", "t1e2", "t1e3"])
     _run_fresh_turn(store, invocation, ["t2e1", "t2e2", "t2e3", "t2e4"])
 
-    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=4))
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=4, resume=True))
 
     assert _sse_texts(replayed) == ["t2e2", "t2e3", "t2e4"]
 

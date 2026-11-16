@@ -24,7 +24,14 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final
 
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    aws_error_detail,
+    exception_detail,
+    run_main,
+)
 
 LAYER: Final[int] = 4
 RESOURCE_CLASS: Final[str] = "chat_timeouts"
@@ -75,7 +82,7 @@ def _timeout_row(
             resource=function_name,
             check=check,
             status="fail",
-            detail=f"get_function_configuration raised {type(exc).__name__}: {exc}",
+            detail=aws_error_detail("lambda:GetFunctionConfiguration", exc),
         )
     observed = configuration.get("Timeout")
     return CheckResult(
@@ -91,13 +98,22 @@ def _origin_read_timeout_row(ctx: SmokeContext) -> CheckResult:
     try:
         distribution_id = ctx.outputs.require_str("cloudfront_distribution_id")
         relay_host = urllib.parse.urlparse(ctx.outputs.require_str("agent_relay_function_url"))
+    except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
+        return CheckResult(
+            resource="cloudfront",
+            check=check,
+            status="fail",
+            detail=f"could not read the distribution: {exception_detail(exc)}",
+        )
+    try:
         config = ctx.client("cloudfront").get_distribution_config(Id=distribution_id)
     except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
         return CheckResult(
             resource="cloudfront",
             check=check,
             status="fail",
-            detail=f"could not read the distribution: {type(exc).__name__}: {exc}",
+            detail="could not read the distribution: "
+            + aws_error_detail("cloudfront:GetDistributionConfig", exc),
         )
     origins = ((config.get("DistributionConfig") or {}).get("Origins") or {}).get("Items") or []
     matching = [o for o in origins if o.get("DomainName") == relay_host.hostname]
@@ -132,8 +148,16 @@ def _image_rows(ctx: SmokeContext, zip_path: Path) -> Iterator[CheckResult]:
         return
     expected = expected_image_tag(zip_path)
     try:
-        runtime_arn = ctx.outputs.require_str("agentcore_runtime_arn")
-        runtime_id = runtime_arn.rpartition("/")[2]
+        runtime_id = ctx.outputs.require_str("agentcore_runtime_arn").rpartition("/")[2]
+    except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
+        yield CheckResult(
+            resource=resource,
+            check="runtime_image_is_the_built_one",
+            status="fail",
+            detail=f"could not describe the Runtime: {exception_detail(exc)}",
+        )
+        return
+    try:
         runtime = ctx.client("bedrock-agentcore-control").get_agent_runtime(
             agentRuntimeId=runtime_id
         )
@@ -142,7 +166,8 @@ def _image_rows(ctx: SmokeContext, zip_path: Path) -> Iterator[CheckResult]:
             resource=resource,
             check="runtime_image_is_the_built_one",
             status="fail",
-            detail=f"could not describe the Runtime: {type(exc).__name__}: {exc}",
+            detail="could not describe the Runtime: "
+            + aws_error_detail("bedrock-agentcore-control:GetAgentRuntime", exc),
         )
         return
     uri = str(
@@ -181,7 +206,7 @@ def _ecr_row(ctx: SmokeContext, *, repository: str, tag: str) -> CheckResult:
             resource=repository,
             check=check,
             status="fail",
-            detail=f"describe_images raised {type(exc).__name__}: {exc}",
+            detail=aws_error_detail("ecr:DescribeImages", exc),
         )
     details: Sequence[Mapping[str, Any]] = images.get("imageDetails") or []
     digests = [str(d.get("imageDigest")) for d in details]
@@ -205,7 +230,7 @@ def checks(
             resource="agent_relay_function_name|dynamodb_table_names",
             check="terraform_output_present",
             status="fail",
-            detail=f"a required Terraform output is absent ({exc}); a missing output is a failure",
+            detail=f"a required Terraform output is absent ({exception_detail(exc)}); a missing output is a failure",
         )
         return
     yield _timeout_row(

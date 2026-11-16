@@ -918,6 +918,16 @@ def provisional_stub_sweep(tmp_path_factory: pytest.TempPathFactory) -> tuple[Pa
 
     Returns `(pricing_path, results_dir)`.
     """
+    return _run_provisional_stub_sweep(tmp_path_factory.mktemp("provisional_stub_sweep"))
+
+
+def _run_provisional_stub_sweep(
+    root: Path, *, archive_raw: bool = False, repeats: int = 1
+) -> tuple[Path, Path]:
+    """Run a stub sweep into `root/results` with pricing forced provisional.
+
+    Returns `(pricing_path, results_dir)`.
+    """
     import boto3
     from moto import mock_aws
 
@@ -928,7 +938,6 @@ def provisional_stub_sweep(tmp_path_factory: pytest.TempPathFactory) -> tuple[Pa
     def _noop_seeder(store: Store, *, tenant: str) -> None:
         del store, tenant
 
-    root = tmp_path_factory.mktemp("provisional_stub_sweep")
     pricing_path = root / "pricing.yaml"
     config_text = PRICING.read_text(encoding="utf-8")
     forced = re.sub(r"(?m)^provisional:\s*false\s*$", "provisional: true", config_text)
@@ -944,7 +953,12 @@ def provisional_stub_sweep(tmp_path_factory: pytest.TempPathFactory) -> tuple[Pa
         with mock_aws():
             client = boto3.client("dynamodb", region_name="us-east-1")
             create_all_tables(client)
-            run_sweep(store=Store(client=client), output_dir=results_dir)
+            run_sweep(
+                store=Store(client=client),
+                output_dir=results_dir,
+                archive_raw=archive_raw,
+                repeats=repeats,
+            )
     return pricing_path, results_dir
 
 
@@ -987,7 +1001,7 @@ class TestProvisionalStubSweep:
             for column, value in row.items():
                 try:
                     float(value)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 numeric_columns.add(column)
         assert set(_SWEEP_CLASSIFIED_KEYS) <= numeric_json_keys | numeric_columns
@@ -1184,15 +1198,23 @@ _SUMMARY_CSV_SUFFIXES: tuple[str, ...] = (
     "completion_rate",
     "accuracy",
     "cost_per_completed_task",
-    "cost_per_task",
+    "cost_per_applicable_task",
     "completed_task_latency_ms_p50",
     "completed_task_latency_ms_p95",
     "latency_sample_count",
     "invocation_count",
     "input_tokens",
+    "total_prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
     "output_tokens",
 )
 _DELEGATION_KINDS: tuple[str, ...] = ("data", "no_match", "denied", "tool_failure", "none")
+_TASK_COUNT_KEYS: tuple[str, ...] = (
+    "budget_exhausted_task_count",
+    "truncated_tool_call_count",
+    "truncated_task_count",
+)
 
 
 def _summary_csv_columns() -> list[str]:
@@ -1204,9 +1226,8 @@ def _summary_csv_columns() -> list[str]:
             for tier in _SUMMARY_TIERS
             for suffix in _SUMMARY_CSV_SUFFIXES
         ),
-        "summary_supervisor_budget_exhausted_task_count",
+        *(f"summary_{tier}_{key}" for tier in _SUMMARY_TIERS for key in _TASK_COUNT_KEYS),
         *(f"summary_subagent_delegation_{kind}" for kind in _DELEGATION_KINDS),
-        "summary_tool_truncated_task_count",
         *(f"summary_{tier}_retry_count" for tier in _SUMMARY_TIERS),
     ]
 
@@ -1219,18 +1240,22 @@ def _summary_entry(tier: str, *, cost: float | None) -> dict[str, object]:
         "accuracy": 0.6,
         "cost_withheld_provisional": cost is None,
         "cost_per_completed_task": cost,
-        "cost_per_task": cost,
+        "cost_per_applicable_task": cost,
         "completed_task_latency_ms_p50": 1200.0,
         "completed_task_latency_ms_p95": 2500.0,
         "latency_sample_count": 3,
         "invocation_count": 9,
         "input_tokens": 1000,
+        "total_prompt_tokens": 1300,
+        "cache_read_tokens": 200,
+        "cache_write_tokens": 100,
         "output_tokens": 200,
         "retry_count": 1,
+        "budget_exhausted_task_count": 1,
+        "truncated_tool_call_count": None if tier == "subagent" else 3,
+        "truncated_task_count": None if tier == "subagent" else 2,
     }
-    if tier == "supervisor":
-        entry["budget_exhausted_task_count"] = 1
-    elif tier == "subagent":
+    if tier == "subagent":
         entry["delegation_outcomes"] = {
             "data": 2,
             "no_match": 1,
@@ -1238,8 +1263,6 @@ def _summary_entry(tier: str, *, cost: float | None) -> dict[str, object]:
             "tool_failure": 0,
             "none": 1,
         }
-    else:
-        entry["truncated_task_count"] = 2
     return entry
 
 
@@ -1266,7 +1289,9 @@ def _summary_matrix_json(*, cost: float | None = None) -> dict[str, object]:
         },
     }
     return {
+        "record_shape_version": 2,
         "tier_comparison": {
+            "record_shape_version": 2,
             "columns": [
                 {
                     "label": "anthropic",
@@ -1280,7 +1305,7 @@ def _summary_matrix_json(*, cost: float | None = None) -> dict[str, object]:
             "tiers": {tier: [_summary_entry(tier, cost=cost)] for tier in _SUMMARY_TIERS},
             "notes": ["Columns are arms in run order."],
         },
-        "arms": [{"tier_task_metrics": arm_block}],
+        "arms": [{"record_shape_version": 2, "tier_task_metrics": arm_block}],
         "figure_semantics": {},
     }
 
@@ -1329,7 +1354,7 @@ class TestTierComparisonSummaryFields:
         )
         assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir) == []
 
-    @pytest.mark.parametrize("cost_key", ["cost_per_completed_task", "cost_per_task"])
+    @pytest.mark.parametrize("cost_key", ["cost_per_completed_task", "cost_per_applicable_task"])
     def test_a_numeric_summary_cost_key_is_one_violation(
         self, tmp_path: Path, cost_key: str
     ) -> None:
@@ -1350,12 +1375,14 @@ class TestTierComparisonSummaryFields:
             tmp_path,
             pricing=PROVISIONAL_PRICING,
             artifacts={
-                "matrix.csv": _summary_matrix_csv({"summary_supervisor_cost_per_task": "0.03"})
+                "matrix.csv": _summary_matrix_csv(
+                    {"summary_supervisor_cost_per_applicable_task": "0.03"}
+                )
             },
         )
         violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
         assert len(violations) == 2, violations
-        assert all("summary_supervisor_cost_per_task" in v for v in violations)
+        assert all("summary_supervisor_cost_per_applicable_task" in v for v in violations)
 
     def test_an_unknown_numeric_key_beside_the_summary_is_still_reported(
         self, tmp_path: Path
@@ -1376,7 +1403,7 @@ class TestTierComparisonSummaryFields:
     def test_no_summary_cost_key_or_column_is_allowlisted(self) -> None:
         cost_columns = [c for c in _summary_csv_columns() if "_cost_" in c]
         assert len(cost_columns) == 2 * len(_SUMMARY_TIERS)
-        for name in ("cost_per_completed_task", "cost_per_task", *cost_columns):
+        for name in ("cost_per_completed_task", "cost_per_applicable_task", *cost_columns):
             assert name not in gate._NON_CURRENCY_NUMERIC_FIELDS
             assert gate._COST_BEARING_NAME_PATTERN.search(name)
 
@@ -1399,9 +1426,12 @@ class TestTierComparisonSummaryFields:
             "invocation_count",
             "task_count",
             "budget_exhausted_task_count",
+            "truncated_tool_call_count",
             "truncated_task_count",
             "none",
             "retry_count",
+            "record_shape_version",
+            "total_prompt_tokens",
         ],
     )
     def test_each_new_json_key_is_load_bearing(
@@ -1422,7 +1452,17 @@ class TestTierComparisonSummaryFields:
         assert all(f".{key} (" in violation for violation in violations), violations
 
     @pytest.mark.parametrize(
-        "column", ["summary_subagent_delegation_none", "summary_supervisor_retry_count"]
+        "column",
+        [
+            "summary_subagent_delegation_none",
+            "summary_supervisor_retry_count",
+            *(
+                f"summary_{tier}_{key}"
+                for tier in _SUMMARY_TIERS
+                for key in ("total_prompt_tokens", "cache_read_tokens", "cache_write_tokens")
+            ),
+            *(f"summary_{tier}_{key}" for tier in _SUMMARY_TIERS for key in _TASK_COUNT_KEYS),
+        ],
     )
     def test_each_new_csv_column_is_load_bearing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, column: str
@@ -1584,3 +1624,188 @@ class TestArmTotals:
         )
         violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
         assert violations and all("arm_cost_total" in v for v in violations), violations
+
+
+# ---------------------------------------------------------------------------
+# Pre-aggregation archives carry non-currency keys only.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="class")
+def provisional_archived_stub_sweep(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """A two-repeat stub sweep with raw archives, under pricing forced provisional."""
+    return _run_provisional_stub_sweep(
+        tmp_path_factory.mktemp("provisional_archived_stub_sweep"), archive_raw=True, repeats=2
+    )
+
+
+def _pre_aggregation_archives(results_dir: Path) -> list[Path]:
+    """The sweep's pre-aggregation archives, asserted present."""
+    archives = sorted((results_dir / "raw" / "pre-aggregation").glob("*.json"))
+    assert archives, "the sweep wrote no pre-aggregation archive"
+    return archives
+
+
+#: Keys a stub sweep's pre-aggregation archive carries as numbers.
+_ARCHIVE_STUB_NUMERIC_KEYS: tuple[str, ...] = ("repeat_index", "read_tokens", "write_tokens")
+
+#: Keys only a live archive carries as numbers; a stub leaves latency unmeasured.
+_ARCHIVE_LIVE_NUMERIC_KEYS: tuple[str, ...] = ("latency_ms", "task_latencies_ms")
+
+
+def _live_shaped_pre_aggregation_archive() -> str:
+    """A pre-aggregation archive with the live-only numeric keys and string-valued task keys."""
+    import json
+
+    return json.dumps(
+        {
+            "record_shape_version": 3,
+            "model_id": "anthropic.claude-opus-5-5",
+            "mode": "live",
+            "call_latency_samples": [{"tier": "supervisor", "latency_ms": 1440.4}],
+            "task_latencies_ms": [5120.0, 6880.5],
+            "correctness_by_task": {"gt-01-investigation-pd01-successor": [1.0, 0.5]},
+            "invocation_attributions": [
+                {
+                    "task_id": "gt-01-investigation-pd01-successor",
+                    "repeat_index": 1,
+                    "latency_ms": 980.2,
+                    "tokens": {"input_tokens": 1200, "output_tokens": 300},
+                    "cache": {"read_tokens": 900, "write_tokens": 0},
+                }
+            ],
+            "task_scores": [
+                {
+                    "task_id": "gt-04-investigation-turn-budget-partial",
+                    "repeat_index": 1,
+                    "budget_exhausted": True,
+                    "budget_exhausted_tier": "supervisor",
+                    "correctness": 0.5,
+                }
+            ],
+        }
+    )
+
+
+class TestPreAggregationArchives:
+    """Under provisional pricing an archive's non-currency keys pass; a currency key still fails."""
+
+    def test_the_archive_carries_each_non_currency_key_as_a_number(
+        self, provisional_archived_stub_sweep: tuple[Path, Path]
+    ) -> None:
+        import json
+
+        _, results_dir = provisional_archived_stub_sweep
+        numeric_keys: set[str] = set()
+        by_task_entries: list[object] = []
+
+        def walk(node: object) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if gate._is_published_currency_value(value):
+                        numeric_keys.add(key)
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        for archive in _pre_aggregation_archives(results_dir):
+            document = json.loads(archive.read_text(encoding="utf-8"))
+            walk(document)
+            by_task_entries.extend(document["correctness_by_task"].values())
+        assert set(_ARCHIVE_STUB_NUMERIC_KEYS) <= numeric_keys
+        assert any(
+            gate._is_published_currency_value(score)
+            for entry in by_task_entries
+            if isinstance(entry, list)
+            for score in entry
+        )
+
+    def test_the_gate_passes_the_archived_sweep_under_provisional_pricing(
+        self, provisional_archived_stub_sweep: tuple[Path, Path]
+    ) -> None:
+        pricing_path, results_dir = provisional_archived_stub_sweep
+        _pre_aggregation_archives(results_dir)
+        assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir) == []
+
+    @pytest.mark.parametrize("key", _ARCHIVE_STUB_NUMERIC_KEYS)
+    def test_each_archive_key_exemption_is_load_bearing(
+        self,
+        provisional_archived_stub_sweep: tuple[Path, Path],
+        monkeypatch: pytest.MonkeyPatch,
+        key: str,
+    ) -> None:
+        pricing_path, results_dir = provisional_archived_stub_sweep
+        monkeypatch.setattr(
+            gate, "_NON_CURRENCY_NUMERIC_FIELDS", gate._NON_CURRENCY_NUMERIC_FIELDS - {key}
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert violations
+        assert all(key in violation for violation in violations), violations
+
+    def test_the_task_keyed_correctness_map_exemption_is_load_bearing(
+        self, provisional_archived_stub_sweep: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pricing_path, results_dir = provisional_archived_stub_sweep
+        monkeypatch.setattr(gate, "_ID_KEYED_NON_CURRENCY_MAPS", frozenset())
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert violations
+        assert all("$.correctness_by_task.gt-" in violation for violation in violations), violations
+
+    def test_a_live_shaped_archive_passes_under_provisional_pricing(self, tmp_path: Path) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"raw/pre-aggregation/arm-0.json": _live_shaped_pre_aggregation_archive()},
+        )
+        assert gate.run_gate(pricing_path=pricing_path, results_dir=results_dir) == []
+
+    @pytest.mark.parametrize("key", _ARCHIVE_LIVE_NUMERIC_KEYS)
+    def test_each_live_archive_key_exemption_is_load_bearing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+    ) -> None:
+        pricing_path, results_dir = _tree(
+            tmp_path,
+            pricing=PROVISIONAL_PRICING,
+            artifacts={"raw/pre-aggregation/arm-0.json": _live_shaped_pre_aggregation_archive()},
+        )
+        monkeypatch.setattr(
+            gate, "_NON_CURRENCY_NUMERIC_FIELDS", gate._NON_CURRENCY_NUMERIC_FIELDS - {key}
+        )
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert violations
+        assert all(key in violation for violation in violations), violations
+
+    @pytest.mark.parametrize(
+        ("planted_key", "plant"),
+        [
+            ("cost_input", lambda doc: doc["invocation_attributions"][0].update(cost_input=0.47)),
+            (
+                "spend",
+                lambda doc: doc["invocation_attributions"][0].update(spend={"read_tokens": 0.47}),
+            ),
+            ("cost_by_task", lambda doc: doc.update(cost_by_task={"gt-01": [0.47]})),
+            (
+                "billing",
+                lambda doc: doc.update(billing={"correctness_by_task": {"gt-01": [0.47]}}),
+            ),
+        ],
+    )
+    def test_a_currency_key_planted_in_the_archive_still_fails(
+        self,
+        provisional_archived_stub_sweep: tuple[Path, Path],
+        tmp_path: Path,
+        planted_key: str,
+        plant: object,
+    ) -> None:
+        import json
+
+        pricing_path, source = provisional_archived_stub_sweep
+        results_dir = _copy_results(source, tmp_path)
+        archive = _pre_aggregation_archives(results_dir)[0]
+        document = json.loads(archive.read_text(encoding="utf-8"))
+        assert callable(plant)
+        plant(document)
+        archive.write_text(json.dumps(document, indent=2), encoding="utf-8")
+        violations = gate.run_gate(pricing_path=pricing_path, results_dir=results_dir)
+        assert [v for v in violations if planted_key in v and "0.47" in v], violations

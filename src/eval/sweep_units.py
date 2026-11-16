@@ -29,6 +29,8 @@ from crm.store.store import Store
 from eval.matrix import (
     ARM_COST_TOTAL_KEY,
     ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
+    RECORD_SHAPE_VERSION,
+    RECORD_SHAPE_VERSION_KEY,
     ArmResult,
     RunProvenance,
 )
@@ -65,6 +67,7 @@ from eval.scoring import (
 from eval.turn_observation import ObservedTurn
 from providers.base import Tuning, validate_tuning
 from providers.capabilities import CapabilityMatrix, Family, Tier
+from providers.prompt_caching import CACHING
 from providers.tier_tuning import TurnTuning
 
 EvalMode = Literal["stub", "live"]
@@ -110,6 +113,13 @@ class ArmRunResult:
     aggregate_score: AggregateScore
 
 
+#: The key naming the owning unit's task on every pre-aggregation per-call entry.
+UNIT_TASK_ID_KEY: Final[str] = "task_id"
+
+#: The key naming the owning unit's repeat on every pre-aggregation per-call entry.
+UNIT_REPEAT_INDEX_KEY: Final[str] = "repeat_index"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRef:
     """One cell of the sweep grid.
@@ -131,6 +141,7 @@ class TaskUnitResult:
 
     Attributes:
         task_id: The golden task's ``id``.
+        repeat_index: The repeat the unit ran in, from 0.
         task_score: The :func:`eval.scoring.score_task` result.
         tier_scores: The :func:`eval.scoring.score_tiers` result.
         turn: The observed turn the scores were computed from.
@@ -138,6 +149,7 @@ class TaskUnitResult:
     """
 
     task_id: str
+    repeat_index: int
     task_score: TaskScore
     tier_scores: TierScores
     turn: ObservedTurn
@@ -280,6 +292,7 @@ def run_task_unit(
     tenant: str,
     family: Family,
     turn_runner: TurnRunner,
+    repeat_index: int,
 ) -> TaskUnitResult:
     """Run, score and meter one golden task.
 
@@ -289,6 +302,7 @@ def run_task_unit(
         tenant: The eval tenant the turn ran in.
         family: The arm's family, recorded on each usage record.
         turn_runner: Produces the task's observed turn.
+        repeat_index: The repeat the unit runs in, from 0, carried onto the result.
 
     Raises:
         ValueError: The task carries no usable ``actor`` block.
@@ -297,9 +311,16 @@ def run_task_unit(
     task_id = _task_id(task)
     pre_turn_values = capture_pre_turn_values(store, task=task, tenant=tenant)
     turn = turn_runner(task, tenant)
-    task_score = score_task(store, task=task, outcome=turn.outcome, pre_turn_values=pre_turn_values)
+    task_score = score_task(
+        store,
+        task=task,
+        outcome=turn.outcome,
+        pre_turn_values=pre_turn_values,
+        repeat_index=repeat_index,
+    )
     return TaskUnitResult(
         task_id=task_id,
+        repeat_index=repeat_index,
         task_score=task_score,
         tier_scores=_tier_scores(task, turn, task_score),
         turn=turn,
@@ -309,23 +330,43 @@ def run_task_unit(
     )
 
 
+def _unit_entries(
+    units: Sequence[TaskUnitResult],
+    records: Callable[[TaskUnitResult], Sequence[InvocationAttribution | ToolCallAttribution]],
+) -> list[dict[str, object]]:
+    """Every unit's records as dicts, each stamped with its unit's task id and repeat index."""
+    return [
+        {
+            **asdict(record),
+            UNIT_TASK_ID_KEY: unit.task_id,
+            UNIT_REPEAT_INDEX_KEY: unit.repeat_index,
+        }
+        for unit in units
+        for record in records(unit)
+    ]
+
+
 def _raw_arm_records_payload(
     *,
     model_id: str,
     mode: EvalMode,
-    attributions: Sequence[InvocationAttribution],
-    tool_calls: Sequence[ToolCallAttribution],
+    units: Sequence[TaskUnitResult],
     task_scores: Sequence[TaskScore],
     correctness_by_task: Mapping[str, Sequence[float]],
     task_latencies_ms: Sequence[float],
     call_samples: Sequence[CallLatencySample],
 ) -> dict[str, object]:
-    """A JSON-safe snapshot of one arm's raw per-run records, taken before aggregation."""
+    """A JSON-safe snapshot of one arm's raw per-run records, taken before aggregation.
+
+    Every ``invocation_attributions`` and ``tool_call_attributions`` entry carries
+    :data:`UNIT_TASK_ID_KEY` and :data:`UNIT_REPEAT_INDEX_KEY` from the unit that produced it.
+    """
     return {
+        RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
         "model_id": model_id,
         "mode": mode,
-        "invocation_attributions": [asdict(a) for a in attributions],
-        "tool_call_attributions": [asdict(t) for t in tool_calls],
+        "invocation_attributions": _unit_entries(units, lambda unit: unit.turn.invocations),
+        "tool_call_attributions": _unit_entries(units, lambda unit: unit.turn.tool_calls),
         "task_scores": [asdict(s) for s in task_scores],
         "correctness_by_task": {
             task_id: list(values) for task_id, values in correctness_by_task.items()
@@ -472,8 +513,7 @@ def assemble_arm(
             _raw_arm_records_payload(
                 model_id=resolved.model.model_id,
                 mode=mode,
-                attributions=all_attributions,
-                tool_calls=all_tool_calls,
+                units=units,
                 task_scores=task_scores,
                 correctness_by_task=correctness_by_task,
                 task_latencies_ms=task_latencies_ms,
@@ -500,6 +540,7 @@ def assemble_arm(
                 delegation_outcome=unit.turn.outcome.denial_outcome,
                 resolved_efforts=unit.turn.resolved_efforts,
                 tool_calls=unit.turn.tool_calls,
+                budget_exhausted_tier=unit.turn.outcome.budget_exhausted_tier,
             )
             for unit in units
         ],
@@ -521,6 +562,7 @@ def assemble_arm(
         price_table_version=price_table_version,
         answer_style_sha256=answer_style_prompt_sha256(),
         prompt_bundle_sha256=next(iter(bundle_digests), None),
+        prompt_caching=CACHING[arm_spec.family],
     )
     arm_result = ArmResult(
         provenance=provenance,
@@ -560,6 +602,8 @@ __all__ = [
     "TaskRef",
     "TaskUnitResult",
     "TurnRunner",
+    "UNIT_REPEAT_INDEX_KEY",
+    "UNIT_TASK_ID_KEY",
     "arm_tuning",
     "arm_turn_tuning",
     "assemble_arm",

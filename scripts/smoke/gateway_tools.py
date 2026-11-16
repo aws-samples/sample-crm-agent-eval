@@ -58,7 +58,15 @@ from typing import Any, Final, Protocol
 
 import jwt
 from boto3.dynamodb.types import TypeDeserializer
-from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, open_https, run_main
+from scripts.smoke.harness import (
+    DEFER,
+    CheckResult,
+    SmokeContext,
+    aws_error_detail,
+    exception_detail,
+    open_https,
+    run_main,
+)
 from scripts.smoke.mfa_user import BareMfaUser, LiveBareMfaUserProvisioner
 from scripts.smoke.tenant import (
     SmokeTenant,
@@ -444,7 +452,7 @@ def _content_envelope(result: McpResult) -> Mapping[str, Any] | None:
             continue
         try:
             parsed = json.loads(text)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if isinstance(parsed, Mapping) and "statusCode" in parsed:
             return parsed
@@ -1099,7 +1107,7 @@ def _check_interceptor_denial_logged(
                 resource=RESOURCE_CLASS,
                 check=check,
                 status="fail",
-                detail=f"reading the interceptor log group raised {type(exc).__name__}: {exc}",
+                detail=aws_error_detail("reading the interceptor log group", exc),
             )
         denials = [m for m in messages if any(e in m for e in INTERCEPTOR_DENIAL_EVENTS)]
         if any(_message_level(m) in {"WARNING", "WARN"} for m in denials):
@@ -1404,7 +1412,7 @@ def token_genuinely_expired_check(
             resource=resource,
             check=check,
             status="fail",
-            detail=f"could not verify the token's claims: {type(exc).__name__}: {exc}",
+            detail=f"could not verify the token's claims: {exception_detail(exc)}",
         )
     exp = claims.get("exp")
     iat = claims.get("iat")
@@ -1460,7 +1468,7 @@ def underscoped_token_lacks_gateway_scope_check(
             resource=resource,
             check=check,
             status="fail",
-            detail=f"could not verify the token's claims: {type(exc).__name__}: {exc}",
+            detail=f"could not verify the token's claims: {exception_detail(exc)}",
         )
     scopes = str(claims.get("scope") or "").split()
     if not scopes:
@@ -1634,8 +1642,9 @@ class LiveServicePrincipalProvisioner:
             )
         except Exception as exc:  # noqa: BLE001 - re-raised as the refusal to proceed
             raise RuntimeError(
-                f"could not read the existing reps row for {rep_id!r} ({type(exc).__name__}: "
-                f"{exc}); refusing to overwrite a row this run could not restore"
+                f"could not read the existing reps row for {rep_id!r} "
+                f"({aws_error_detail('dynamodb:GetItem', exc)}); refusing to overwrite a row this "
+                "run could not restore"
             ) from exc
         item = response.get("Item")
         return dict(item) if isinstance(item, Mapping) else None
@@ -1697,7 +1706,7 @@ class LiveServicePrincipalProvisioner:
                 resource="service_principal",
                 check="reps_row_deleted",
                 status="fail",
-                detail=f"could not delete the seeded reps row: {type(exc).__name__}: {exc}",
+                detail=(f"could not delete the seeded reps row: {exception_detail(exc)}"),
             )
 
     def _restore_prior_row(self, rep_id: str, prior: dict[str, Any]) -> CheckResult:
@@ -1709,7 +1718,7 @@ class LiveServicePrincipalProvisioner:
             restored = client.get_item(**key, ConsistentRead=True).get("Item")
             error = "" if restored == prior else "a consistent re-read differs from the snapshot"
         except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
-            error = f"{type(exc).__name__}: {exc}"
+            error = exception_detail(exc)
         if not error:
             return CheckResult(
                 resource="service_principal",
@@ -1744,7 +1753,7 @@ class LiveServicePrincipalProvisioner:
                 resource="smoke_tenant",
                 check="tenant_left_clean",
                 status="fail",
-                detail=f"teardown of {smoke_tenant.tenant!r} failed: {type(exc).__name__}: {exc}",
+                detail=(f"teardown of {smoke_tenant.tenant!r} failed: {exception_detail(exc)}"),
             )
 
 
@@ -1959,7 +1968,7 @@ def checks(
         except Exception as exc:  # noqa: BLE001 - surfaced through the refusal check's detail
             expired_reason = (
                 "expired token (minting the to-be-expired machine token failed: "
-                f"{type(exc).__name__}: {exc})"
+                f"{exception_detail(exc)})"
             )
 
     return _then_denial_log(
@@ -2008,7 +2017,7 @@ def _provisioned_checks(
             except Exception as exc:  # noqa: BLE001 - surfaced as one actionable failing check
                 underscoped_error = (
                     "could not mint a real end-user access token for the underscoped-token "
-                    f"check: {type(exc).__name__}: {exc}"
+                    f"check: {exception_detail(exc)}"
                 )
         try:
             fixture = provisioner.provision()
@@ -2020,7 +2029,7 @@ def _provisioned_checks(
                     status="fail",
                     detail=(
                         "could not seed the service principal's book and mint its token: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{exception_detail(exc)}"
                     ),
                 )
             )

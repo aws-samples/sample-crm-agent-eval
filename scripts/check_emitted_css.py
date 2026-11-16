@@ -314,7 +314,7 @@ def build_stylesheet(content_globs: list[str] | None) -> str | None:
             timeout=300,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return None
     return result.stdout if result.returncode == 0 and result.stdout.strip() else None
 

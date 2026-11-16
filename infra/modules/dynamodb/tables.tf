@@ -651,6 +651,12 @@ resource "aws_dynamodb_table" "reps" {
     enabled = true
   }
 
+  # Only conversation-history items carry `expires_at`.
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
   tags = {
     "data-classification" = var.data_classification
   }

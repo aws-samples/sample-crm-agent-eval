@@ -13,14 +13,22 @@ import pytest
 from moto import mock_aws
 
 import eval.sweep_units as sweep_units
-from agents.tier_attribution import CacheCounts, InvocationAttribution, TokenCounts
+from agents.tier_attribution import (
+    CacheCounts,
+    InvocationAttribution,
+    TokenCounts,
+    ToolCallAttribution,
+)
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from crm.user_settings import save_settings
 from eval import harness
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
 from eval.metrics import Exclusion, ExclusionCategory
 from eval.scoring import ObservedToolArguments, ToolCall, TurnOutcome
 from eval.sweep_units import (
+    UNIT_REPEAT_INDEX_KEY,
+    UNIT_TASK_ID_KEY,
     ArmSpec,
     TaskUnitResult,
     arm_turn_tuning,
@@ -32,7 +40,8 @@ from eval.sweep_units import (
 )
 from eval.turn_observation import ObservedTurn
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
-from providers.capabilities import load_capability_matrix
+from providers.capabilities import Tier, load_capability_matrix
+from providers.prompt_caching import CACHING
 from providers.stub import StubProvider
 from providers.tier_tuning import TierRequest, TurnTuning
 
@@ -80,7 +89,12 @@ def _turn(
 
 def _unit(store: Store, task: dict[str, object], turn: ObservedTurn) -> TaskUnitResult:
     return run_task_unit(
-        store=store, task=task, tenant=TENANT, family="anthropic", turn_runner=lambda _t, _n: turn
+        store=store,
+        task=task,
+        tenant=TENANT,
+        family="anthropic",
+        turn_runner=lambda _t, _n: turn,
+        repeat_index=0,
     )
 
 
@@ -224,10 +238,16 @@ def test_run_task_unit_scores_meters_and_tier_scores_one_turn(store: Store) -> N
         return _turn(stream_calls=2)
 
     unit = run_task_unit(
-        store=store, task=task, tenant=TENANT, family="anthropic", turn_runner=runner
+        store=store,
+        task=task,
+        tenant=TENANT,
+        family="anthropic",
+        turn_runner=runner,
+        repeat_index=3,
     )
     assert seen == [task]
     assert unit.task_id == task["id"]
+    assert unit.repeat_index == 3
     assert unit.task_score.task_id == task["id"]
     assert unit.tier_scores.task_id == task["id"]
     assert len(unit.usage_records) == 2
@@ -424,3 +444,176 @@ def test_the_bound_is_per_unit_so_another_turns_slack_cannot_absorb_a_surplus(
     assert sum(len(u.turn.invocations) for u in units) == sum(u.turn.stream_calls for u in units)
     with pytest.raises(AssertionError, match="task unit .* double-recorded usage"):
         _assemble(units, provider_stream_calls=6)
+
+
+# --- per-call ids, exhaustion tier and caching provenance -------------------------------------
+
+
+def _tool_turn(*, exhausted_tier: Tier | None = None) -> ObservedTurn:
+    base = _turn(stream_calls=2)
+    return ObservedTurn(
+        outcome=TurnOutcome(
+            tenant=TENANT,
+            tool_calls=base.outcome.tool_calls,
+            denial_outcome="data",
+            budget_exhausted=exhausted_tier is not None,
+            budget_exhausted_tier=exhausted_tier,
+        ),
+        tool_arguments=base.tool_arguments,
+        invocations=base.invocations,
+        tool_calls=(
+            ToolCallAttribution(
+                tool_name="search_accounts",
+                role="supervisor",
+                latency_ms=None,
+                outcome_kind="data",
+                truncated=False,
+            ),
+        ),
+        stream_calls=base.stream_calls,
+    )
+
+
+def _unit_at(
+    store: Store, task: dict[str, object], repeat_index: int, turn: ObservedTurn
+) -> TaskUnitResult:
+    return run_task_unit(
+        store=store,
+        task=task,
+        tenant=TENANT,
+        family="anthropic",
+        turn_runner=lambda _t, _n: turn,
+        repeat_index=repeat_index,
+    )
+
+
+def _captured_payload(units: list[TaskUnitResult]) -> dict[str, object]:
+    written: list[dict[str, object]] = []
+    _assemble(units, raw_records_writer=lambda _arm, _model, payload: written.append(payload))
+    (payload,) = written
+    return payload
+
+
+def test_every_pre_aggregation_entry_names_its_units_task_and_repeat(store: Store) -> None:
+    first, second = _golden(2)
+    units = [
+        _unit_at(store, first, 0, _tool_turn()),
+        _unit_at(store, second, 0, _tool_turn()),
+        _unit_at(store, first, 1, _tool_turn()),
+        _unit_at(store, second, 1, _tool_turn()),
+    ]
+    payload = _captured_payload(units)
+    expected = [
+        (str(first["id"]), 0),
+        (str(second["id"]), 0),
+        (str(first["id"]), 1),
+        (str(second["id"]), 1),
+    ]
+    for key, per_unit in (("invocation_attributions", 2), ("tool_call_attributions", 1)):
+        entries = payload[key]
+        assert isinstance(entries, list)
+        assert [(e[UNIT_TASK_ID_KEY], e[UNIT_REPEAT_INDEX_KEY]) for e in entries] == [
+            ids for ids in expected for _ in range(per_unit)
+        ], key
+
+
+def test_the_pre_aggregation_payload_carries_the_record_shape_version(store: Store) -> None:
+    payload = _captured_payload([_unit_at(store, _golden(1)[0], 0, _tool_turn())])
+    assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION
+
+
+def test_the_per_call_entries_keep_every_attribution_field(store: Store) -> None:
+    unit = _unit_at(store, _golden(1)[0], 0, _tool_turn())
+    payload = _captured_payload([unit])
+    entries = payload["invocation_attributions"]
+    assert isinstance(entries, list)
+    stripped = [
+        {k: v for k, v in e.items() if k not in (UNIT_TASK_ID_KEY, UNIT_REPEAT_INDEX_KEY)}
+        for e in entries
+    ]
+    assert (
+        stripped
+        == [
+            {
+                "tier": "supervisor",
+                "role": "supervisor",
+                "model_id": MATRIX.model_for("anthropic", "supervisor").model_id,
+                "tokens": {"input_tokens": 10, "output_tokens": 2},
+                "cache": {"read_tokens": 0, "write_tokens": 0},
+                "latency_ms": None,
+            }
+        ]
+        * 2
+    )
+
+
+@pytest.mark.parametrize("tier", ["supervisor", "subagent", "tool"])
+def test_the_exhaustion_tier_is_counted_at_that_tier_only(store: Store, tier: Tier) -> None:
+    first, second = _golden(2)
+    units = [
+        _unit_at(store, first, 0, _tool_turn(exhausted_tier=tier)),
+        _unit_at(store, second, 0, _tool_turn()),
+    ]
+    by_tier = _assemble(units).arm_result.tier_task_metrics_fields["by_tier"]
+    assert {name: entry["budget_exhausted_task_count"] for name, entry in by_tier.items()} == {
+        name: 1 if name == tier else 0 for name in ("supervisor", "subagent", "tool")
+    }
+
+
+@pytest.mark.parametrize("family", ["anthropic", "openai"])
+def test_provenance_names_the_arms_caching_method(store: Store, family: str) -> None:
+    arm_spec = ArmSpec(family=family)  # type: ignore[arg-type]
+    unit = run_task_unit(
+        store=store,
+        task=_golden(1)[0],
+        tenant=TENANT,
+        family=arm_spec.family,
+        turn_runner=lambda _t, _n: ObservedTurn(outcome=TurnOutcome(tenant=TENANT)),
+        repeat_index=0,
+    )
+    provenance = _assemble([unit], arm_spec=arm_spec).arm_result.provenance
+    assert provenance.prompt_caching == CACHING[arm_spec.family]
+    assert provenance.to_report_fields()["prompt_caching"] == CACHING[arm_spec.family]
+
+
+def test_each_task_score_carries_its_units_repeat_and_exhaustion_tier(store: Store) -> None:
+    first, second = _golden(2)
+    units = [
+        _unit_at(store, first, 0, _tool_turn(exhausted_tier="tool")),
+        _unit_at(store, second, 0, _tool_turn()),
+        _unit_at(store, first, 1, _tool_turn()),
+        _unit_at(store, second, 1, _tool_turn(exhausted_tier="subagent")),
+    ]
+    expected = [
+        (str(first["id"]), 0, "tool"),
+        (str(second["id"]), 0, None),
+        (str(first["id"]), 1, None),
+        (str(second["id"]), 1, "subagent"),
+    ]
+    reported = _assemble(units).arm_result.task_score_fields
+    assert [
+        (s["task_id"], s["repeat_index"], s["budget_exhausted_tier"]) for s in reported
+    ] == expected
+    raw = _captured_payload(units)["task_scores"]
+    assert isinstance(raw, list)
+    assert [(s["task_id"], s["repeat_index"], s["budget_exhausted_tier"]) for s in raw] == expected
+
+
+def test_a_raw_archive_re_render_keeps_each_task_scores_repeat_and_tier(
+    store: Store, tmp_path: Path
+) -> None:
+    from eval.matrix import archive_raw_run, load_raw_archives
+
+    task = _golden(1)[0]
+    units = [
+        _unit_at(store, task, 0, _tool_turn(exhausted_tier="supervisor")),
+        _unit_at(store, task, 1, _tool_turn()),
+    ]
+    archive_raw_run(_assemble(units).arm_result, tmp_path)
+    (reloaded,) = load_raw_archives(tmp_path)
+    assert [
+        (s["repeat_index"], s["budget_exhausted_tier"]) for s in reloaded.task_score_fields
+    ] == [
+        (0, "supervisor"),
+        (1, None),
+    ]

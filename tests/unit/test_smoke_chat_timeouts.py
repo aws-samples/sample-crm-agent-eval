@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke import chat_timeouts as module
 from scripts.smoke.harness import CheckResult, context_for_test
 
@@ -211,3 +212,50 @@ def test_the_configured_values_equal_the_iac() -> None:
     relay_origin = cdn[cdn.index('origin_id                = "agent-relay-origin"') :]
     read = re.search(r"origin_read_timeout\s*=\s*(\d+)", relay_origin)
     assert read is not None and int(read.group(1)) == module.RELAY_ORIGIN_READ_TIMEOUT_SECONDS
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+class _Denied:
+    """Every operation raises an `AccessDenied` whose message carries a planted caller ARN."""
+
+    def __getattr__(self, name: str) -> Any:
+        def _raise(**_: Any) -> Any:
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} denied"}},
+                name,
+            )
+
+        return _raise
+
+
+def test_aws_error_details_name_the_operation_and_code_never_the_message(zip_path: Path) -> None:
+    ctx = context_for_test(
+        outputs=_OUTPUTS,
+        clients={
+            "lambda": _Denied(),
+            "cloudfront": _Denied(),
+            "bedrock-agentcore-control": _Denied(),
+        },
+    )
+    rows = {r.check: r for r in module.checks(ctx, agent_source_zip=zip_path)}
+    expected = {
+        "relay_timeout": "lambda:GetFunctionConfiguration failed (AccessDenied)",
+        "chat_target_timeout": "lambda:GetFunctionConfiguration failed (AccessDenied)",
+        "relay_origin_read_timeout": "cloudfront:GetDistributionConfig failed (AccessDenied)",
+        "runtime_image_is_the_built_one": (
+            "bedrock-agentcore-control:GetAgentRuntime failed (AccessDenied)"
+        ),
+    }
+    for check, text in expected.items():
+        assert rows[check].status == "fail"
+        assert text in rows[check].detail
+        assert _PLANTED_ARN not in rows[check].detail
+
+
+def test_an_ecr_error_detail_names_the_code_never_the_message() -> None:
+    ctx = context_for_test(outputs=_OUTPUTS, clients={"ecr": _Denied()})
+    row = module._ecr_row(ctx, repository="crm-agent-eval-agent", tag="sha-1")
+    assert row.status == "fail"
+    assert row.detail == "ecr:DescribeImages failed (AccessDenied)"

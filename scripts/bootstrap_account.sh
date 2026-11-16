@@ -102,8 +102,8 @@ fi
 [[ -n "$PROFILE" ]] || refuse "--profile is required; nothing was applied"
 [[ -n "$REGION" ]] || refuse "--region is required; nothing was applied"
 
-PYTHON="${REPO_ROOT}/.venv/bin/python3"
-[[ -x "$PYTHON" ]] || PYTHON="python3"
+PYTHON="$("${SCRIPT_DIR}/repo_python.sh" --print)" \
+    || refuse "no interpreter for the repository's Python scripts (see above); nothing was applied"
 
 REGION_CHECK_RC=0
 REGION_CHECK_ERR="$("$PYTHON" scripts/region_map.py az-ids --region "$REGION" 2>&1 >/dev/null)" \

@@ -2,8 +2,9 @@
 """Pins the AgentCore runtime image's interpreter and pip to the same versions CI uses.
 
 One interpreter version across the `Dockerfile` base tag, `.python-version` and the
-`.gitlab-ci.yml` image tag; one pip version across the `Dockerfile` pin and `.gitlab-ci.yml`'s
-`PIP_VERSION`. The `Dockerfile` must install that pip before `-r requirements.txt`, and install the
+`.gitlab-ci.yml` global and `frontend` job image tags; one pip version across the `Dockerfile` pin
+and `.gitlab-ci.yml`'s `PIP_VERSION`; the `frontend` job's `FRONTEND_NODE_VERSION` equal to
+`frontend/.nvmrc`. The `Dockerfile` must install that pip before `-r requirements.txt`, and install the
 lock with `--no-deps`. `pin_drift` takes the repository root so each check is proved red against a
 mutated copy.
 """
@@ -20,7 +21,8 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-PINNED_FILES = ("Dockerfile", ".python-version", ".gitlab-ci.yml")
+PINNED_FILES = ("Dockerfile", ".python-version", ".gitlab-ci.yml", "frontend/.nvmrc")
+FRONTEND_JOB = "frontend"
 
 _FROM = re.compile(r"^FROM\s+(?P<args>.*)$", re.M)
 _BASE_TAG = re.compile(r"public\.ecr\.aws/docker/library/python:(?P<version>[^\s-]+)-slim\b")
@@ -79,6 +81,28 @@ def pin_drift(root: Path) -> list[str]:
             f".gitlab-ci.yml image {ci_image['version']} != .python-version {python_version}"
         )
 
+    frontend = ci.get(FRONTEND_JOB)
+    if not isinstance(frontend, dict):
+        errors.append(f".gitlab-ci.yml has no {FRONTEND_JOB} job")
+    else:
+        frontend_image = _CI_IMAGE.match(str(frontend.get("image", "")))
+        if frontend_image is None:
+            errors.append(
+                f".gitlab-ci.yml {FRONTEND_JOB} image {frontend.get('image')!r} "
+                "is not python:<version>-slim"
+            )
+        elif frontend_image["version"] != python_version:
+            errors.append(
+                f".gitlab-ci.yml {FRONTEND_JOB} image {frontend_image['version']} "
+                f"!= .python-version {python_version}"
+            )
+        nvmrc = (root / "frontend" / ".nvmrc").read_text(encoding="utf-8").strip()
+        node = str((frontend.get("variables") or {}).get("FRONTEND_NODE_VERSION", ""))
+        if node != nvmrc:
+            errors.append(
+                f".gitlab-ci.yml FRONTEND_NODE_VERSION {node!r} != frontend/.nvmrc {nvmrc}"
+            )
+
     pip_pins = _PIP_PIN.findall(dockerfile)
     requirements_installs = list(_REQUIREMENTS_INSTALL.finditer(dockerfile))
     if len(pip_pins) != 1:
@@ -125,6 +149,10 @@ def _python_version(root: Path) -> str:
     return (root / ".python-version").read_text(encoding="utf-8").strip()
 
 
+def _nvmrc(root: Path) -> str:
+    return (root / "frontend" / ".nvmrc").read_text(encoding="utf-8").strip()
+
+
 def _ci_pip_version(root: Path) -> str:
     ci = yaml.safe_load((root / ".gitlab-ci.yml").read_text(encoding="utf-8"))
     return next(iter(_ci_pip_versions(ci)))
@@ -167,6 +195,34 @@ _MUTATIONS: dict[str, tuple[Callable[[Path], object], str]] = {
         lambda r: _replace(r / "Dockerfile", f"pip=={_ci_pip_version(r)}", "pip"),
         "0 pip==<version> installs",
     ),
+    "ci-frontend-image-moved": (
+        lambda r: _replace(
+            r / ".gitlab-ci.yml",
+            f"  image: python:{_python_version(r)}-slim",
+            "  image: python:3.13.0-slim",
+        ),
+        "frontend image 3.13.0 != .python-version",
+    ),
+    "ci-frontend-image-node": (
+        lambda r: _replace(
+            r / ".gitlab-ci.yml",
+            f"  image: python:{_python_version(r)}-slim",
+            "  image: node:26.13.1-slim",
+        ),
+        "is not python:<version>-slim",
+    ),
+    "ci-frontend-node-moved": (
+        lambda r: _replace(
+            r / ".gitlab-ci.yml",
+            f'FRONTEND_NODE_VERSION: "{_nvmrc(r)}"',
+            'FRONTEND_NODE_VERSION: "26.0.0"',
+        ),
+        "FRONTEND_NODE_VERSION '26.0.0' != frontend/.nvmrc",
+    ),
+    "nvmrc-moved": (
+        lambda r: (r / "frontend" / ".nvmrc").write_text("26.0.0\n", encoding="utf-8"),
+        "!= frontend/.nvmrc 26.0.0",
+    ),
     "ci-pip-moved": (
         lambda r: _replace(
             r / ".gitlab-ci.yml", f'PIP_VERSION: "{_ci_pip_version(r)}"', 'PIP_VERSION: "25.2"'
@@ -186,6 +242,7 @@ _MUTATIONS: dict[str, tuple[Callable[[Path], object], str]] = {
 @pytest.mark.parametrize("mutation", sorted(_MUTATIONS))
 def test_each_pin_drift_is_reported(mutation: str, tmp_path: Path) -> None:
     for name in PINNED_FILES:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(REPO_ROOT / name, tmp_path / name)
     assert pin_drift(tmp_path) == []
 

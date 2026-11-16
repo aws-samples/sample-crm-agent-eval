@@ -347,6 +347,7 @@ def test_every_arm_provenance_carries_the_fr_9_12_fields_and_no_temperature(stor
         "price_table_version",
         "answer_style_sha256",  # the answer-style prompt hash
         "prompt_bundle_sha256",  # the whole prompt bundle's hash
+        "prompt_caching",  # the arm family's prompt-caching method
     }
     assert set(provenance_fields) == expected_keys
     assert provenance_fields["mode"] == "stub"

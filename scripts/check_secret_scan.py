@@ -150,7 +150,7 @@ def _parents_are_present_directories(source: Path, rel: str) -> bool:
         current = current / part
         try:
             mode = current.lstat().st_mode
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError, NotADirectoryError:
             return False
         if stat.S_ISLNK(mode):
             raise SecretScanError(
@@ -211,7 +211,7 @@ def materialise(source: Path, paths: list[str], dest: Path) -> int:
         origin = source / rel
         try:
             mode = origin.lstat().st_mode
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError, NotADirectoryError:
             continue
         if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
             raise SecretScanError(

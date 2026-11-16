@@ -70,7 +70,7 @@ fi
 
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 if [ ! -x "${PYTHON_BIN}" ]; then
-  PYTHON_BIN="python3"
+  PYTHON_BIN="$("${SCRIPT_DIR}/repo_python.sh" --print)" || exit 2
 fi
 
 if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then

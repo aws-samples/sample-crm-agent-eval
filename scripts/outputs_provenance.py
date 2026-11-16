@@ -78,7 +78,7 @@ def _git(*args: str) -> tuple[int, str]:
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return 1, ""
     return completed.returncode, completed.stdout
 
@@ -139,7 +139,7 @@ def read_provenance(document: object) -> dict[str, Any] | None:
 def _load(path: Path) -> dict[str, Any] | None:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return None
     return loaded if isinstance(loaded, dict) else None
 

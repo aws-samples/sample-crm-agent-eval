@@ -51,7 +51,7 @@ baseline](../../../docs/security-baseline.md#h-7). Modules named here: [`api`](.
 | `vpc_subnet_ids` | yes | `module.vpc.lambda_subnet_ids`; at least two. |
 | `vpc_security_group_ids` | yes | `module.vpc.lambda_security_group_ids`; at least one. |
 | `eni_function_code_deny_policy_arn` | yes | `module.eni_function_code_deny.policy_arn`; a customer-managed policy ARN. |
-| `runtime` | no (`python3.13`) | |
+| `runtime` | no (`python3.14`) | |
 | `timeout_seconds` | no (`30`) | |
 | `memory_size_mb` | no (`256`) | |
 | `environment_variables` | no (`{}`) | Plaintext only; secrets are resolved at runtime from Secrets Manager or Parameter Store. |
@@ -130,7 +130,7 @@ no `Resource = "*"`, no `LeadingKeys` on an `application_code` table).
 ## Validation
 
 `cd infra && terraform validate` exercises the module through the root. It also validates
-standalone; `versions.tf` pins the same `hashicorp/aws` 6.71.0 as the root:
+standalone; `versions.tf` pins the same `hashicorp/aws` 6.72.0 as the root:
 
 ```bash
 cd infra/modules/lambda_action

@@ -26,7 +26,7 @@ env:
   # sudo drops the environment, so each `sudo apt-get` also sets this inline.
   DEBIAN_FRONTEND: "noninteractive"
   # Installed into each job's .venv before the lock; equal to `.gitlab-ci.yml`'s.
-  PIP_VERSION: "26.2.2"
+  PIP_VERSION: "26.3"
 
 jobs:
   verify:
@@ -52,7 +52,7 @@ jobs:
       AWS_DEFAULT_REGION: "us-east-1"
       # Exact Node release for the relay; its major must equal the relay Lambda runtime, and it
       # equals `.gitlab-ci.yml`'s NODE_VERSION.
-      NODE_VERSION: "24.22.1"
+      NODE_VERSION: "24.22.3"
 
     steps:
       - name: Checkout
@@ -123,7 +123,7 @@ jobs:
       - name: Set up pinned Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          terraform_version: 1.17.0
+          terraform_version: 1.17.2
           # tests/unit/_terraform_fixture.py parses the real binary's stdout, not the wrapper's.
           terraform_wrapper: false
 
@@ -326,6 +326,20 @@ jobs:
       - name: TypeScript-executing contracts (the frontend's pinned Node)
         working-directory: .
         run: .venv/bin/python -m pytest tests/integration/test_envelope_groups_contract.py tests/integration/test_eval_envelopes_contract.py
+
+      # The bundled relay and the real Runtime handle the same reconnect bodies.
+      - name: SPA-relay-Runtime reconnect contract (the frontend's pinned Node)
+        working-directory: .
+        run: .venv/bin/python -m pytest tests/integration/test_resume_contract.py
+
+      # The tier-comparison UI contract rewrites the fixture the frontend unit tests read.
+      - name: Tier-comparison UI contract
+        working-directory: .
+        run: .venv/bin/python -m pytest tests/integration/test_tier_comparison_ui_contract.py
+
+      - name: Tier-comparison fixture matches the committed copy
+        working-directory: .
+        run: git diff --exit-code -- frontend/src/pages/evals/__fixtures__/tierComparison.json
 
       # src/types/generated/ is gitignored, so types are generated before anything consumes them.
       - name: Generate types from the Python toolspec

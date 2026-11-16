@@ -241,7 +241,7 @@ def python_segments(text: str) -> list[tuple[int, str, str]]:
     try:
         tree = ast.parse(text)
         tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
-    except (SyntaxError, tokenize.TokenError, ValueError):
+    except SyntaxError, tokenize.TokenError, ValueError:
         return hash_segments(text)
     docstrings: set[tuple[int, int]] = set()
     for node in ast.walk(tree):
