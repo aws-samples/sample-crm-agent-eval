@@ -35,13 +35,22 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Final
 
 from scripts import proc_run
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    aws_error_code,
+    aws_error_detail,
+    exception_detail,
+    run_main,
+)
 from scripts.smoke.runtime_network_posture import (
     DeclaredDeny,
     DeclaredDenyState,
@@ -79,6 +88,9 @@ CliRunner = Callable[[Sequence[str]], "tuple[int, str, str]"]
 
 #: How the AWS CLI reports an operation it does not model.
 _CLI_UNSUPPORTED_MARKER: Final[str] = "invalid choice"
+
+#: The AWS error code in an AWS CLI `An error occurred (<code>)` stderr line.
+_CLI_ERROR_CODE: Final[re.Pattern[str]] = re.compile(r"An error occurred \(([A-Za-z0-9.]+)\)")
 
 #: The error code an unlisted principal's `InvokeAgentRuntime` must be refused with.
 ACCESS_DENIED_CODE: Final[str] = "AccessDeniedException"
@@ -131,7 +143,7 @@ def _caller_role_name(caller_arn: str) -> str:
 
 
 def _refusal_result(exc: BaseException, *, runtime_arn: str, role: str) -> CheckResult:
-    """Classify the unlisted caller's refused `InvokeAgentRuntime`; the detail quotes the message.
+    """Classify the unlisted caller's refused `InvokeAgentRuntime`; the detail names the code only.
 
     Only an `AccessDeniedException` from an explicit deny in this Runtime's resource-based policy
     passes. Any other `AccessDeniedException` (an implicit deny, an identity-policy, SCP or
@@ -139,10 +151,8 @@ def _refusal_result(exc: BaseException, *, runtime_arn: str, role: str) -> Check
     """
     from scripts.smoke.runtime_invoke import is_explicit_inbound_deny
 
-    error = getattr(exc, "response", {}).get("Error", {})
-    code = str(error.get("Code", type(exc).__name__))
-    message = str(error.get("Message", exc))
-    observed = f"InvokeAgentRuntime as {role!r} -> {code}: {message!r}"
+    code = aws_error_code(exc)
+    observed = f"InvokeAgentRuntime as {role!r} -> {code}"
     passed = is_explicit_inbound_deny(exc, runtime_arn=runtime_arn)
     if passed:
         suffix = OUTSIDE_VPC_BOUND
@@ -219,13 +229,22 @@ def _unlisted_principal_results(
     verdict."""
     try:
         caller = str(ctx.client("sts").get_caller_identity()["Arn"])
+    except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
+        yield CheckResult(
+            resource=runtime_arn,
+            check="caller_is_not_a_runtime_invoker",
+            status="fail",
+            detail=f"could not establish the caller: {aws_error_detail('sts:GetCallerIdentity', exc)}",
+        )
+        return
+    try:
         invokers = _invoker_role_names()
     except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
         yield CheckResult(
             resource=runtime_arn,
             check="caller_is_not_a_runtime_invoker",
             status="fail",
-            detail=f"could not establish the caller or the invoker list: {type(exc).__name__}: {exc}",
+            detail=f"could not read the invoker list: {exception_detail(exc)}",
         )
         return
     role = _caller_role_name(caller)
@@ -339,6 +358,16 @@ class _PolicyReadUnsupportedError(Exception):
     """Neither botocore nor the AWS CLI supports `get-resource-policy`; the message says which."""
 
 
+class _PolicyCliReadError(Exception):
+    """The AWS CLI policy read exited non-zero; `response` carries the parsed AWS error code only."""
+
+    def __init__(self, returncode: int, stderr: str) -> None:
+        match = _CLI_ERROR_CODE.search(stderr)
+        code = match.group(1) if match else f"CliExit{returncode}"
+        super().__init__(f"aws CLI exit {returncode}")
+        self.response: dict[str, dict[str, str]] = {"Error": {"Code": code}}
+
+
 def _read_policy_text(ctx: SmokeContext, client: Any, arn: str, runner: CliRunner) -> str:
     """The policy document text, from botocore when it models the operation, else from the CLI.
 
@@ -360,7 +389,7 @@ def _read_policy_text(ctx: SmokeContext, client: Any, arn: str, runner: CliRunne
                 "neither botocore nor the installed aws CLI supports "
                 f"bedrock-agentcore-control get-resource-policy ({err.strip()[:160]})"
             )
-        raise RuntimeError(f"aws CLI exit {code}: {err.strip()[:240]}")
+        raise _PolicyCliReadError(code, err)
     return str(json.loads(out)["policy"])
 
 
@@ -370,13 +399,23 @@ def _principal_set_results(
     """One row per resource policy: its Allow principals equal exactly the invoker role ARNs."""
     try:
         account = str(ctx.client("sts").get_caller_identity()["Account"])
+    except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
+        yield CheckResult(
+            resource=runtime_arn,
+            check=PRINCIPAL_SET_CHECK,
+            status="fail",
+            detail="could not derive the invoker role ARNs: "
+            + aws_error_detail("sts:GetCallerIdentity", exc),
+        )
+        return
+    try:
         expected = {f"arn:aws:iam::{account}:role/{name}" for name in _invoker_role_names()}
     except Exception as exc:  # noqa: BLE001 - a failing row, not a crash
         yield CheckResult(
             resource=runtime_arn,
             check=PRINCIPAL_SET_CHECK,
             status="fail",
-            detail=f"could not derive the invoker role ARNs: {type(exc).__name__}: {exc}",
+            detail=f"could not derive the invoker role ARNs: {exception_detail(exc)}",
         )
         return
     client = ctx.client("bedrock-agentcore-control")
@@ -399,7 +438,8 @@ def _principal_set_results(
                 resource=arn,
                 check=PRINCIPAL_SET_CHECK,
                 status="fail",
-                detail=f"the resource policy could not be read: {type(exc).__name__}: {exc}",
+                detail="the resource policy could not be read: "
+                + aws_error_detail("bedrock-agentcore-control:GetResourcePolicy", exc),
             )
             continue
         exact = bool(expected) and principals == expected and not problems
@@ -438,7 +478,7 @@ def checks(
             check="terraform_output_present",
             status="fail",
             detail=(
-                f"required Terraform output 'agentcore_runtime_arn' is absent ({exc}); the "
+                f"required Terraform output 'agentcore_runtime_arn' is absent ({exception_detail(exc)}); the "
                 "Runtime to describe cannot be identified. A missing output is a failure, not "
                 "a skipped resource class"
             ),

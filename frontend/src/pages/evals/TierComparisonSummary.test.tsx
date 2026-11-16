@@ -28,6 +28,30 @@ function fixtureTable(name: FixtureCase): EvalTierComparisonTable {
   return FIXTURE[name].tier_comparison_table;
 }
 
+/** The row labels of every tier, in order. */
+const ROW_LABELS: readonly string[] = [
+  "Model",
+  "Effort",
+  "Task completion rate",
+  "Task completion over repeats",
+  "Task accuracy",
+  "Cost per completed task",
+  "P50 latency per completed task (ms)",
+  "P95 latency per completed task (ms)",
+  "Model invocations",
+  "Long-context invocations",
+  "Total input tokens",
+  "Cache read tokens",
+  "Cache write tokens",
+  "Uncached input tokens",
+  "Total output tokens",
+  "Cost per applicable task",
+  "Self-corrected retries",
+  "Budget-exhausted tasks",
+  "Truncated tool calls",
+  "Truncated tasks",
+];
+
 const POLL_MS = 5;
 
 const fakeAuth: AuthContextValue = {
@@ -121,6 +145,19 @@ describe("TierComparisonSummary — verbatim cells", () => {
       "ToolCall",
     ]);
   });
+
+  it.each<FixtureCase>(["multi_arm", "single_arm"])(
+    "lists every tier's rows of the %s fixture in the fixed order, P50 before P95, with no delegation rows",
+    (name) => {
+      render(<TierComparisonSummary table={fixtureTable(name)} />);
+
+      for (const tier of ["supervisor", "subagent", "tool"]) {
+        const labels = rowLabels(screen.getByTestId(`tier-comparison-table-${tier}`));
+        expect(labels, tier).toEqual([...ROW_LABELS]);
+        expect(labels.filter((label) => label.startsWith("Delegation outcome")), tier).toEqual([]);
+      }
+    },
+  );
 
   it("carries the fixture's em dash, withheld, not measured and not applicable cells unchanged", () => {
     render(<TierComparisonSummary table={fixtureTable("multi_arm")} />);

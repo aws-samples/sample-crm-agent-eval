@@ -16,6 +16,7 @@ import pytest
 from eval import harness
 from eval.matrix import (
     ArmResult,
+    RecordShapeRefused,
     arm_from_report_fields,
     build_matrix_result,
     render_csv,
@@ -33,7 +34,7 @@ from eval.metrics import (
     not_measured_latency_metrics,
 )
 from eval.scoring import SCORED_TIERS, TierScore, TierScores
-from tests.unit.test_matrix import _sample_arm
+from tests.unit.test_matrix import _archivable_arm, _sample_arm
 
 
 def _row(
@@ -163,6 +164,9 @@ def test_an_empty_arm_still_reports_every_tier() -> None:
     assert list(fields) == list(SCORED_TIERS)
     assert fields["supervisor"] == {
         "input_tokens": 0,
+        "total_prompt_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "output_tokens": 0,
         "cost_total": 0.0,
         "long_context_invocation_count": 0,
@@ -182,7 +186,7 @@ def test_the_report_key_is_tier_summary() -> None:
 
 def _arm_with_summary(*, withhold_cost: bool = True) -> ArmResult:
     return dataclasses.replace(
-        _sample_arm(), tier_summary_fields=_summary_fields(withhold_cost=withhold_cost)
+        _archivable_arm(), tier_summary_fields=_summary_fields(withhold_cost=withhold_cost)
     )
 
 
@@ -251,14 +255,15 @@ def test_the_summary_round_trips_through_a_raw_archive() -> None:
     assert rebuilt.tier_summary_fields == json.loads(json.dumps(arm.tier_summary_fields))
 
 
-def test_an_archive_without_a_summary_rebuilds_an_empty_one() -> None:
-    fields = _sample_arm().to_report_fields()
+def test_an_archive_without_a_summary_is_refused() -> None:
+    fields = _arm_with_summary().to_report_fields()
     del fields["tier_summary"]
-    assert arm_from_report_fields(fields).tier_summary_fields == {}
+    with pytest.raises(RecordShapeRefused, match="missing required field tier_summary$"):
+        arm_from_report_fields(fields)
 
 
 def test_an_archive_with_a_non_object_summary_is_refused() -> None:
-    fields = _sample_arm().to_report_fields()
+    fields = _arm_with_summary().to_report_fields()
     fields["tier_summary"] = ["supervisor"]
     with pytest.raises(ValueError, match="'tier_summary' is not an object"):
         arm_from_report_fields(fields)

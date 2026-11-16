@@ -10,7 +10,8 @@ and execs this module. This module implements three checks:
    :func:`iter_published_artifacts`) plus ``README.md`` when ``--readme-file`` is supplied. In a
    structured artifact whose schema this repo generates (:data:`_ENUMERABLE_SCHEMA_RELPATHS`) a
    numeric field is a violation unless its key is a known non-currency field
-   (:data:`_NON_CURRENCY_NUMERIC_FIELDS`). Elsewhere the checks are currency-shape and known-key
+   (:data:`_NON_CURRENCY_NUMERIC_FIELDS`) or an entry of an id-keyed non-currency map
+   (:data:`_ID_KEYED_NON_CURRENCY_MAPS`). Elsewhere the checks are currency-shape and known-key
    detection (:data:`_CURRENCY_SHAPE_PATTERN`, :data:`_CURRENCY_FIELD_NAMES`).
 2. The same, on the rendered eval dashboard source (``--frontend-dir``;
    :func:`find_currency_rendering_in_frontend`).
@@ -430,12 +431,16 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         "unscored_task_count",
         "total_excluded",
         "dataset_seed",
+        "record_shape_version",
         # Token usage.
         "input_tokens",
         "output_tokens",
         "cache_read_tokens",
         "cache_write_tokens",
         "cache_min_checkpoint_tokens",
+        "prompt_tokens",
+        "total_prompt_tokens",
+        "uncached_input_tokens",
         # Reliability counters.
         "cold_start",
         "retry",
@@ -496,6 +501,7 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         "invocation_count",
         "task_count",
         "budget_exhausted_task_count",
+        "truncated_tool_call_count",
         "truncated_task_count",
         "none",
         *(
@@ -511,20 +517,38 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
                 "latency_sample_count",
                 "invocation_count",
                 "input_tokens",
+                "total_prompt_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "uncached_input_tokens",
                 "output_tokens",
             )
         ),
-        "summary_supervisor_budget_exhausted_task_count",
+        *(
+            f"summary_{tier}_{key}"
+            for tier in ("supervisor", "subagent", "tool")
+            for key in (
+                "budget_exhausted_task_count",
+                "truncated_tool_call_count",
+                "truncated_task_count",
+            )
+        ),
         *(
             f"summary_subagent_delegation_{kind}"
             for kind in ("data", "no_match", "denied", "tool_failure", "none")
         ),
-        "summary_tool_truncated_task_count",
         # Self-corrected retries.
         "retry_count",
         *(f"summary_{tier}_retry_count" for tier in ("supervisor", "subagent", "tool")),
         # Task completion over repeats: task counts, repeat count and rate.
         "completed",
+        # Pre-aggregation archive: per-call latency and cache tokens, per-task latencies, and the
+        # repeat a call or score belongs to.
+        "latency_ms",
+        "read_tokens",
+        "write_tokens",
+        "task_latencies_ms",
+        "repeat_index",
         *(
             f"{prefix}_{tier}_completion_over_repeats_{suffix}"
             for prefix in ("tier", "summary")
@@ -533,6 +557,10 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         ),
     }
 )
+
+#: Maps keyed by an id (a task id) whose numeric entries are judged by the map's own name, since the
+#: entry's key is data rather than a field name.
+_ID_KEYED_NON_CURRENCY_MAPS: frozenset[str] = frozenset({"correctness_by_task"})
 
 
 def _numeric_field_violation(
@@ -549,7 +577,8 @@ def _numeric_field_violation(
     A recognised cost name on ``key`` or on any of its ``ancestors`` (the enclosing JSON keys,
     outermost first) is reported as one, so a :data:`_NON_CURRENCY_NUMERIC_FIELDS` name exempts a
     value only outside every cost-bearing container. With ``invert_burden``, any other key not in
-    :data:`_NON_CURRENCY_NUMERIC_FIELDS` is reported as an unrecognised numeric field.
+    :data:`_NON_CURRENCY_NUMERIC_FIELDS`, and not an entry of an
+    :data:`_ID_KEYED_NON_CURRENCY_MAPS` map, is reported as an unrecognised numeric field.
     """
     if _COST_BEARING_NAME_PATTERN.search(key) is not None:
         return (
@@ -565,6 +594,8 @@ def _numeric_field_violation(
             f"{cost_bearing_ancestor!r} while the price table is provisional"
         )
     if not invert_burden or key in _NON_CURRENCY_NUMERIC_FIELDS:
+        return None
+    if ancestors and ancestors[-1] in _ID_KEYED_NON_CURRENCY_MAPS:
         return None
     return (
         f"{source}: numeric field {path} ({value!r}) is not a known non-currency field, so it "

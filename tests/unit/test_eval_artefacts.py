@@ -35,6 +35,7 @@ from eval.artefacts import (
     download_disposition,
     validate_artefact_key,
 )
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
 from eval.runs import job_row_id
 from eval.trigger import EVAL_STATE_MACHINE_ARN_ENV_VAR
 
@@ -463,7 +464,7 @@ def _tier_record(summary: object) -> runs.RunRecord:
         mode="stub",
         status="completed",
         started_at="2026-11-06T00:00:00+00:00",
-        matrix_report={"tier_comparison": summary},
+        matrix_report={RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "tier_comparison": summary},
     )
 
 
@@ -483,7 +484,9 @@ def test_a_summary_the_formatter_refuses_is_omitted_and_logged_with_its_reason(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level("INFO")
-    payload = _tier_record({"tiers": {}, "notes": []}).to_payload()
+    payload = _tier_record(
+        {RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "tiers": {}, "notes": []}
+    ).to_payload()
     assert "tier_comparison_table" not in payload
     assert _unavailable_lines(caplog) == [
         {
@@ -504,7 +507,14 @@ def test_a_formatter_bug_is_not_swallowed(
     monkeypatch.setattr(runs, "tier_comparison_table", _broken)
     caplog.set_level("INFO")
     with pytest.raises(bug):
-        _tier_record({"columns": [], "tiers": {}, "notes": []}).to_payload()
+        _tier_record(
+            {
+                RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
+                "columns": [],
+                "tiers": {},
+                "notes": [],
+            }
+        ).to_payload()
     assert _unavailable_lines(caplog) == []
 
 
@@ -512,6 +522,7 @@ def _stored_summary() -> dict[str, Any]:
     from eval.matrix import build_matrix_result, tier_comparison
 
     stored: dict[str, Any] = json.loads(json.dumps(tier_comparison(build_matrix_result([]))))
+    assert stored[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION
     return stored
 
 
@@ -530,7 +541,18 @@ def test_a_stored_entry_with_unjoinable_lists_is_refused_as_malformed(
 
     summary = _stored_summary()
     summary["columns"] = [{"label": "anthropic", "mode": "stub"}]
-    entry: dict[str, Any] = {"model_ids": ["m"], "efforts": ["medium"], field: value}
+    entry: dict[str, Any] = {
+        "model_ids": ["m"],
+        "efforts": ["medium"],
+        "cost_per_applicable_task": None,
+        "total_prompt_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "budget_exhausted_task_count": 0,
+        "truncated_tool_call_count": 0,
+        "truncated_task_count": 0,
+        field: value,
+    }
     summary["tiers"] = {tier: [dict(entry)] for tier in ("supervisor", "subagent", "tool")}
     with pytest.raises(ValueError, match=reason):
         tier_comparison_table(summary)

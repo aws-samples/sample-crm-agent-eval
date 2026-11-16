@@ -864,6 +864,7 @@ def test_truncated_and_budget_exhausted_are_carried_into_the_task_score(store: S
         tool_calls=(ToolCall("search_opportunities"),),
         truncated=True,
         budget_exhausted=True,
+        budget_exhausted_tier="supervisor",
     )
 
     score = score_task(store, task=task, outcome=outcome)

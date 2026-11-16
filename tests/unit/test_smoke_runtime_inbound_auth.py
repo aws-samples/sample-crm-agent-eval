@@ -370,10 +370,11 @@ class TestAnUnlistedPrincipalIsDenied:
         assert row.status == "fail"
         assert ACCESS_DENIED_CODE in row.detail
 
-    def test_the_passing_row_quotes_the_explicit_deny_message(self) -> None:
+    def test_the_passing_row_names_the_code_and_not_the_deny_message(self) -> None:
         row = _by_check(_run(_COMPLIANT_RESPONSE))["unlisted_principal_denied_invoking_runtime"]
         assert row.status == "pass"
-        assert repr(_EXPLICIT_RESOURCE_DENY) in row.detail
+        assert f"-> {ACCESS_DENIED_CODE}" in row.detail
+        assert _EXPLICIT_RESOURCE_DENY not in row.detail
 
     def test_an_implicit_deny_is_a_failure_not_a_pass(self) -> None:
         """A missing identity grant refuses the call before the resource policy is read."""
@@ -384,7 +385,7 @@ class TestAnUnlistedPrincipalIsDenied:
             )
         )["unlisted_principal_denied_invoking_runtime"]
         assert row.status == "fail"
-        assert repr(_IMPLICIT_DENY) in row.detail
+        assert _IMPLICIT_DENY not in row.detail
         assert row.detail.endswith(NOT_RESOURCE_POLICY_DENY)
         assert OUTSIDE_VPC_BOUND not in row.detail
 
@@ -406,7 +407,7 @@ class TestAnUnlistedPrincipalIsDenied:
             _run(_COMPLIANT_RESPONSE, data_plane=_FakeDataPlane(ACCESS_DENIED_CODE, message))
         )["unlisted_principal_denied_invoking_runtime"]
         assert row.status == "fail"
-        assert repr(message) in row.detail
+        assert _OPERATOR_ARN not in row.detail
         assert row.detail.endswith(NOT_RESOURCE_POLICY_DENY)
 
     def test_a_resource_policy_deny_naming_another_runtime_fails(self) -> None:
@@ -436,7 +437,7 @@ class TestAnUnlistedPrincipalIsDenied:
         ]
         assert row.status == "fail"
         assert "TimeoutError" in row.detail
-        assert "read timed out" in row.detail
+        assert "read timed out" not in row.detail
 
     @pytest.mark.parametrize(
         "role", ["crm-agent-eval-agent-relay-role", "crm-agent-eval-chat-target-role"]
@@ -720,7 +721,7 @@ class TestTheCliFallback:
         cli = _FakeCli({_RUNTIME: denied, _ENDPOINT: (0, "not json", "")})
         rows = self._rows(cli)
         assert [r.status for r in rows] == ["fail", "fail"]
-        assert "AccessDeniedException" in rows[0].detail
+        assert "GetResourcePolicy failed (AccessDeniedException)" in rows[0].detail
 
     def test_the_argv_carries_the_resolved_profile_and_region_and_both_arns(self) -> None:
         cli = _FakeCli({_RUNTIME: _cli_ok(_INVOKER_ARNS), _ENDPOINT: _cli_ok(_INVOKER_ARNS)})
@@ -819,3 +820,64 @@ class TestEveryAllowIsAwsOnly:
         deny = {"Effect": "Deny", "Action": "*", "Resource": "*", "NotPrincipal": {"AWS": "x"}}
         rows = _principal_rows({_RUNTIME: _policy_with(deny), _ENDPOINT: _policy(_INVOKER_ARNS)})
         assert [r.status for r in rows] == ["pass", "pass"]
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(code: str, operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": f"User: {_PLANTED_ARN} denied"}}, operation
+    )
+
+
+class _RaisingSts:
+    def get_caller_identity(self) -> dict[str, str]:
+        raise _planted("AccessDenied", "GetCallerIdentity")
+
+
+class TestNoAwsErrorMessageInDetails:
+    """No row's detail carries an AWS error message; each names the operation and the code."""
+
+    def test_a_refused_invoke_names_the_code_not_the_message(self) -> None:
+        message = f"User: {_PLANTED_ARN} is not authorized with an explicit deny"
+        rows = _run(_COMPLIANT_RESPONSE, data_plane=_FakeDataPlane(ACCESS_DENIED_CODE, message))
+        row = _by_check(rows)["unlisted_principal_denied_invoking_runtime"]
+        assert f"-> {ACCESS_DENIED_CODE}" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_caller_read_names_the_code_not_the_message(self) -> None:
+        ctx = context_for_test(
+            outputs=_OUTPUTS,
+            clients={
+                "bedrock-agentcore-control": _FakeControlPlane(_COMPLIANT_RESPONSE),
+                "bedrock-agentcore": _FakeDataPlane(),
+                "sts": _RaisingSts(),
+            },
+        )
+        rows = [
+            r
+            for r in checks(ctx, cli_runner=_FakeCli())
+            if r.check in {"caller_is_not_a_runtime_invoker", PRINCIPAL_SET_CHECK}
+        ]
+        assert [r.status for r in rows] == ["fail", "fail"]
+        for row in rows:
+            assert "sts:GetCallerIdentity failed (AccessDenied)" in row.detail
+            assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_botocore_policy_read_names_the_code_not_the_message(self) -> None:
+        planted = _planted("AccessDeniedException", "GetResourcePolicy")
+        rows = _principal_rows({_RUNTIME: planted, _ENDPOINT: planted})
+        for row in rows:
+            assert row.status == "fail"
+            assert "GetResourcePolicy failed (AccessDeniedException)" in row.detail
+            assert _PLANTED_ARN not in row.detail
+
+    def test_a_failed_cli_policy_read_names_the_code_not_the_stderr(self) -> None:
+        stderr = f"An error occurred (AccessDeniedException) when calling X: User: {_PLANTED_ARN}"
+        cli = _FakeCli({_RUNTIME: (254, "", stderr), _ENDPOINT: (254, "", "boom " + _PLANTED_ARN)})
+        rows = [r for r in _run(_COMPLIANT_RESPONSE, cli=cli) if r.check == PRINCIPAL_SET_CHECK]
+        assert [r.status for r in rows] == ["fail", "fail"]
+        assert "GetResourcePolicy failed (AccessDeniedException)" in rows[0].detail
+        assert "GetResourcePolicy failed (CliExit254)" in rows[1].detail
+        assert all(_PLANTED_ARN not in r.detail for r in rows)

@@ -45,6 +45,7 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    aws_error_detail,
     error_code,
     run_main,
 )
@@ -272,7 +273,7 @@ def check_resource_policy(
             resource=function_name,
             check=check,
             status="fail",
-            detail=f"get_policy: {reason or type(exc).__name__}: {exc}",
+            detail=aws_error_detail("lambda:GetPolicy", exc) + (f": {reason}" if reason else ""),
         )
     problems, grants = policy_violations(
         document, gateway_role_arn=gateway_role_arn, gateway_arn=gateway_arn, account_id=account_id

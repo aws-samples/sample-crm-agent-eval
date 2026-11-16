@@ -15,7 +15,7 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Final
 
-from scripts.smoke.harness import CheckResult, SmokeContext, run_main
+from scripts.smoke.harness import CheckResult, SmokeContext, aws_error_detail, run_main
 
 from crm.store.schema import TABLE_NAMES, GlobalSecondaryIndex, table_schema
 
@@ -236,7 +236,7 @@ def _check_gsi_queryable(
             resource=table_name,
             check=check_name,
             status="fail",
-            detail=f"query against GSI {gsi.name!r} raised: {exc}",
+            detail=f"{aws_error_detail('dynamodb:Query', exc)} against GSI {gsi.name!r}",
         )
     return CheckResult(resource=table_name, check=check_name, status="pass")
 
@@ -268,7 +268,7 @@ def checks(ctx: SmokeContext) -> Iterable[CheckResult]:
                     resource=physical_name,
                     check="describe_table",
                     status="fail",
-                    detail=f"describe_table raised: {exc}",
+                    detail=aws_error_detail("dynamodb:DescribeTable", exc),
                 )
             )
             continue

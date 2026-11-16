@@ -27,7 +27,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    MissingTerraformOutputError,
+    SmokeContext,
+    aws_error_detail,
+    run_main,
+)
 
 LAYER: Final[int] = 4
 RESOURCE_CLASS: Final[str] = "access_log_delivery"
@@ -116,7 +123,7 @@ def _bucket_log_target(ctx: SmokeContext, source_bucket: str) -> tuple[str, str]
     try:
         response = ctx.client("s3").get_bucket_logging(Bucket=source_bucket)
     except Exception as exc:  # noqa: BLE001 - reported per destination, never aborts the run
-        return f"{type(exc).__name__}: {exc}"
+        return aws_error_detail("s3:GetBucketLogging", exc)
     enabled = response.get("LoggingEnabled")
     if not enabled:
         return (
@@ -131,7 +138,7 @@ def _distribution_log_target(ctx: SmokeContext, distribution_id: str) -> tuple[s
     try:
         response = ctx.client("cloudfront").get_distribution_config(Id=distribution_id)
     except Exception as exc:  # noqa: BLE001 - reported per destination, never aborts the run
-        return f"{type(exc).__name__}: {exc}"
+        return aws_error_detail("cloudfront:GetDistributionConfig", exc)
     config: Any = response.get("DistributionConfig") or {}
     logging_block: Any = config.get("Logging") or {}
     if not logging_block.get("Enabled"):
@@ -160,7 +167,7 @@ def _check_target(ctx: SmokeContext, destination: LogDestination, bucket: str) -
     if destination.source_bucket_output is not None:
         try:
             source = ctx.outputs.require_str(destination.source_bucket_output)
-        except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+        except MissingTerraformOutputError as exc:
             return _fail(
                 resource,
                 CHECK_TARGET,
@@ -183,7 +190,7 @@ def _check_target(ctx: SmokeContext, destination: LogDestination, bucket: str) -
             raise RuntimeError("source_distribution_output is unset; __post_init__ enforces it")
         try:
             source = ctx.outputs.require_str(destination.source_distribution_output)
-        except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+        except MissingTerraformOutputError as exc:
             return _fail(
                 resource,
                 CHECK_TARGET,
@@ -236,7 +243,7 @@ def _delivered_object_count(ctx: SmokeContext, bucket: str, prefix: str) -> int 
     try:
         response = ctx.client("s3").list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
     except Exception as exc:  # noqa: BLE001 - reported per destination, never aborts the run
-        return f"{type(exc).__name__}: {exc}"
+        return aws_error_detail("s3:ListObjectsV2", exc)
     return int(response.get("KeyCount", 0))
 
 
@@ -285,7 +292,7 @@ def checks(ctx: SmokeContext) -> Sequence[CheckResult]:
         resource = f"{destination.output_name}:{destination.prefix}"
         try:
             bucket = ctx.outputs.require_str(destination.output_name)
-        except Exception as exc:  # noqa: BLE001 - a missing output is a reportable failure
+        except MissingTerraformOutputError as exc:
             results.append(
                 _fail(
                     resource,

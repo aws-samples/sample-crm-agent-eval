@@ -22,6 +22,7 @@ from typing import Any
 import anyio
 import httpx2
 import pytest
+from botocore.exceptions import ClientError
 from scripts import proc_run
 from scripts.smoke import mcp_client_compat as module
 from scripts.smoke.harness import CheckResult, InsecureSchemeError, context_for_test
@@ -881,3 +882,48 @@ def test_http_status_of_does_not_follow_a_context_only_chain() -> None:
     assert module._http_status_of(raised) is None
     group = ExceptionGroup("task group", [raised])
     assert module._http_status_of(group) is None
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}}, operation
+    )
+
+
+class _DeniedService(_FakeService):
+    def provision(self) -> Any:
+        raise _planted("GetSecretValue")
+
+    def cleanup(self) -> Iterable[CheckResult]:
+        self.cleaned = True
+        raise _planted("DeleteItem")
+
+
+class _DeniedUser(_FakeUser):
+    def provision(self) -> str:
+        raise _planted("AdminCreateUser")
+
+
+def test_aws_failures_name_the_code_never_the_message(
+    loopback: tuple[_FakeDeployment, str],
+) -> None:
+    rows = _run(loopback, service=_DeniedService(), user=_DeniedUser())
+    expected = {
+        "g1_service_principal_provisioned": "GetSecretValue failed (AccessDeniedException)",
+        "g2_user_provisioned": "AdminCreateUser failed (AccessDeniedException)",
+        "principal_cleanup": "DeleteItem failed (AccessDeniedException)",
+    }
+    for check, text in expected.items():
+        assert rows[check].status == "fail"
+        assert text in rows[check].detail
+        assert _PLANTED_ARN not in rows[check].detail
+
+
+def test_an_aws_error_inside_a_group_names_the_code_never_the_message() -> None:
+    group = ExceptionGroup("tasks", [_planted("InvokeAgentRuntime")])
+    detail = module._describe(group)
+    assert "InvokeAgentRuntime failed (AccessDeniedException)" in detail
+    assert _PLANTED_ARN not in detail

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import IO, Any, Final, cast
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 from eval.verification import (
     COVERAGE_CHECK as COVERAGE_CHECK,
@@ -305,6 +306,42 @@ def error_code(exc: BaseException) -> str:
         return ""
     code = error.get("Code")
     return code if isinstance(code, str) else ""
+
+
+def aws_error_code(exc: BaseException) -> str:
+    """Return the AWS error code of `exc`, or its class name when it carries none. Never the message."""
+    return error_code(exc) or type(exc).__name__
+
+
+def aws_error_detail(operation: str, exc: BaseException) -> str:
+    """Return `"<operation> failed (<aws_error_code(exc)>)"`, a detail carrying no error message."""
+    return f"{operation} failed ({aws_error_code(exc)})"
+
+
+def _aws_error_in_chain(exc: BaseException) -> ClientError | BotoCoreError | None:
+    """Return the first `ClientError`/`BotoCoreError` in `exc`'s cause/context chain, else `None`."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, (ClientError, BotoCoreError)):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def exception_detail(exc: BaseException, operation: str | None = None) -> str:
+    """Describe `exc` for a check detail; an AWS error in its chain yields its code, never a message.
+
+    `operation` names the AWS call when the caller knows it; otherwise a `ClientError`'s own
+    operation name is used.
+    """
+    aws_exc = _aws_error_in_chain(exc)
+    if aws_exc is None:
+        return f"{type(exc).__name__}: {exc}"
+    if operation is None:
+        operation = getattr(aws_exc, "operation_name", None) or "an AWS call"
+    return f"{type(exc).__name__}: {aws_error_detail(operation, aws_exc)}"
 
 
 def key_policy_for_simulation(policy_text: str, key_arn: str) -> str:
@@ -628,7 +665,8 @@ def assert_target_matches_outputs(ctx: SmokeContext) -> tuple[str, ...]:
     except Exception as exc:  # noqa: BLE001 - an unusable credential is a warning, not a wrong target
         unasserted.append(
             f"{TARGET_UNASSERTED_WARNING_PREFIX}the account half could not be checked "
-            f"({type(exc).__name__}: {exc}), so nothing verified which account this run reads. "
+            f"({exception_detail(exc, 'sts:GetCallerIdentity')}), so nothing verified which "
+            "account this run reads. "
             "Proceeding: a credential failure is not a wrong target."
         )
     return tuple(unasserted)
@@ -740,7 +778,7 @@ def _resolve_expectation(
         return expected(ctx)
     except Exception as exc:  # noqa: BLE001 - reported in the check's detail, never swallowed
         return UnderivableCheckCount(
-            reason=f"its expected_check_count deriver raised {type(exc).__name__}: {exc}"
+            reason=f"its expected_check_count deriver raised {exception_detail(exc)}"
         )
 
 
@@ -825,7 +863,7 @@ def run_main(
                 resource=resource_class,
                 check="checks",
                 status="fail",
-                detail=f"{type(exc).__name__}: {exc}",
+                detail=exception_detail(exc),
             )
         )
 

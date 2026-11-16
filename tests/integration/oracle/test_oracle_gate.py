@@ -463,7 +463,12 @@ def _run_scripted(
             )
 
         unit = run_task_unit(
-            store=store, task=task, tenant=tenant, family=_ARM.family, turn_runner=_turn_runner
+            store=store,
+            task=task,
+            tenant=tenant,
+            family=_ARM.family,
+            turn_runner=_turn_runner,
+            repeat_index=0,
         )
         if evidence is not None:
             evidence.extend(evidence_problems(source, task, dispatched, _PLANTED))

@@ -11,7 +11,7 @@ The project's own virtualenv is mandatory: every `make` target invokes `.venv/bi
 `.venv/bin/ruff` and `.venv/bin/python` by path, and a system `python3` has no `pytest`.
 
 ```bash
-python3.13 -m venv .venv                   # the interpreter whose version matches .python-version
+python3.14 -m venv .venv                   # the interpreter whose version matches .python-version
 # On a version mismatch this prints "wrong interpreter" and installs no Python packages.
 { [ "$(.venv/bin/python --version)" = "Python $(cat .python-version)" ] || { echo "wrong interpreter" >&2; false; }; } &&
   .venv/bin/pip install --no-input --no-deps -r requirements.txt &&
@@ -39,9 +39,9 @@ git config core.hooksPath githooks                      # or: pre-commit install
   cask `drawio`, whose CLI is `drawio`), using `drawio -x -f svg --embed-svg-images --theme light`;
   see [`docs/figures/README.md`](figures/README.md).
 - Security-relevant pins: `cryptography` 50.0.2, `PyJWT` 2.15.1, `urllib3` 2.8.0 and
-  `pytest` 9.1.1 (`requirements.txt`); `vite` 8.3.6 and `tailwindcss` 4.3.5 (`frontend/package.json`;
+  `pytest` 9.1.1 (`requirements.txt`); `vite` 8.3.8 and `tailwindcss` 4.3.5 (`frontend/package.json`;
   Tailwind 4 needs Safari 16.4, Chrome 111 or Firefox 128, see [`frontend/README.md`](../frontend/README.md)); `hashicorp/aws`
-  6.71.0 (exact constraint) and `hashicorp/null` 3.3.2 (lock file only; no version constraint), in
+  6.72.0 (exact constraint) and `hashicorp/null` 3.3.2 (lock file only; no version constraint), in
   `infra/.terraform.lock.hcl`.
 
 ## Running tests
@@ -189,7 +189,7 @@ for each deferred control.
 | `check_gsi_projection_parity` | every Terraform GSI's projected attributes match the schema's declared projection |
 | `check_handler_grant_coverage` | each action Lambda's DynamoDB, KMS and log grants match the calls its handler code reaches, in both directions |
 | `check_payload_validation_coverage` | every path that persists a proposal payload validates it first |
-| `check_lambda_zip_imports` | each built Lambda zip, by phase: `closure` (handler imports resolve inside the zip), `vendored_record` (vendored `RECORD` files match the zip contents), `wheel_platform` (Linux x86_64, CPython 3.13 or `abi3` tags), `marker_requires` (dependency markers evaluated for the Lambda environment), `isolated_import` (the handler imports in an isolated interpreter), `source_parity` (first-party files match `src/`), and `tracked_provenance` (first-party files match tracked git content) |
+| `check_lambda_zip_imports` | each built Lambda zip, by phase: `closure` (handler imports resolve inside the zip), `vendored_record` (vendored `RECORD` files match the zip contents), `wheel_platform` (Linux x86_64, CPython 3.14 or `abi3` tags), `marker_requires` (dependency markers evaluated for the Lambda environment), `isolated_import` (the handler imports in an isolated interpreter), `source_parity` (first-party files match `src/`), and `tracked_provenance` (first-party files match tracked git content) |
 | `check_lambda_adapter_isolation` | no Lambda handler reaches a vendor-SDK model adapter: `import_time` (no adapter import on any handler's import path) and `stub_literal` (`eval.trigger` takes only an allowlist of names from `eval.harness`, references no `eval.live`, `providers.factory` or `eval.sweep_units`, and only `submit_sweep` takes a mode-selecting parameter) |
 | `verify_terraform_plan_with_kms_absent` | `lambda_action`'s KMS grant count comes from an input variable, so the module still plans once the key is gone; `[SKIP]` without `terraform` |
 | `check_sse_schema_parity` | every generated SSE event consumer matches `src/agents/event_schema.py` |

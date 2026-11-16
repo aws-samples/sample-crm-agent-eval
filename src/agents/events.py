@@ -11,12 +11,13 @@ fields). ``usage`` and ``completed`` may carry the turn's cost and resolved tier
 
 An exhausted turn budget ends the stream with a terminal ``error`` event whose ``error_kind`` is
 ``"budget_exhausted"``. An oversized tool result is truncated at a record boundary and marked with
-:data:`TRUNCATION_MARKER`.
+:data:`TRUNCATION_MARKER`; :func:`bound_tool_output` is the one bound every dispatch path applies.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Final, Literal, TypedDict, get_args
 
@@ -52,6 +53,9 @@ TRUNCATION_MARKER: Final[str] = "__truncated__"
 
 #: The tool-result payload byte ceiling before truncation applies.
 TOOL_RESULT_BYTE_CEILING: Final[int] = 32_768
+
+#: The payload key a bounded tool result sets to ``True`` to report it was truncated.
+TOOL_OUTPUT_TRUNCATED_KEY: Final[str] = "truncated"
 
 
 class CostLine(TypedDict):
@@ -335,6 +339,72 @@ def truncate_tool_output(
     return kept, truncated
 
 
+def _repr_size(value: object) -> int:
+    """The UTF-8 length of ``value``'s ``repr``, the measure :func:`truncate_tool_output` uses."""
+    return len(repr(value).encode("utf-8"))
+
+
+def record_list_field(container: Mapping[str, object]) -> tuple[str, list[object]] | None:
+    """Return the list to trim at a record boundary: ``items`` if a list, else the largest list.
+
+    The largest is the non-empty list value with the greatest ``repr`` size. Returns ``None`` when
+    ``container`` holds no such list.
+    """
+    items = container.get("items")
+    if isinstance(items, list):
+        return "items", items
+    lists = [(key, value) for key, value in container.items() if isinstance(value, list) and value]
+    if not lists:
+        return None
+    return max(lists, key=lambda pair: _repr_size(pair[1]))
+
+
+def bound_tool_output(
+    raw: Mapping[str, object], *, byte_ceiling: int = TOOL_RESULT_BYTE_CEILING
+) -> tuple[dict[str, object], bool]:
+    """Bound one tool result to ``byte_ceiling`` bytes by trimming its record list.
+
+    The container is ``raw["body"]`` when that is a dict, else ``raw``; its record list is chosen
+    by :func:`record_list_field`. When the container's ``repr`` exceeds ``byte_ceiling``, the list
+    is cut at a record boundary, :data:`TRUNCATION_MARKER` is appended to it and
+    :data:`TOOL_OUTPUT_TRUNCATED_KEY` is set to ``True`` in the container, so the bounded container
+    stays within ``byte_ceiling`` (when its other fields alone fit). Non-dict list entries are not
+    kept in a trimmed list.
+
+    Returns:
+        ``(bounded, True)`` when trimmed; otherwise ``(raw, False)``, with ``raw`` itself returned
+        when it is a dict. A container over the ceiling with no list to trim is returned
+        unchanged with ``False``.
+    """
+    unchanged = raw if isinstance(raw, dict) else dict(raw)
+    body = raw.get("body")
+    container: Mapping[str, object] = body if isinstance(body, dict) else raw
+    if _repr_size(container) <= byte_ceiling:
+        return unchanged, False
+    record_list = record_list_field(container)
+    if record_list is None:
+        return unchanged, False
+    field_name, records = record_list
+    marker: dict[str, object] = {TRUNCATION_MARKER: True}
+
+    def _with(kept: list[dict[str, object]]) -> dict[str, object]:
+        return {**container, field_name: [*kept, marker], TOOL_OUTPUT_TRUNCATED_KEY: True}
+
+    room = max(byte_ceiling - _repr_size(_with([])), 0)
+    kept, _ = truncate_tool_output(
+        [record for record in records if isinstance(record, dict)], byte_ceiling=room
+    )
+    if kept and kept[-1] == marker:
+        kept.pop()
+    bounded = _with(kept)
+    while kept and _repr_size(bounded) > byte_ceiling:
+        kept.pop()
+        bounded = _with(kept)
+    if isinstance(body, dict):
+        return {**raw, "body": bounded}, True
+    return bounded, True
+
+
 def budget_exhausted_event(*, partial_work: str, error_message: str) -> AgentEvent:
     """Build the terminal event a turn emits when its budget is exhausted.
 
@@ -356,6 +426,7 @@ def budget_exhausted_event(*, partial_work: str, error_message: str) -> AgentEve
 
 __all__ = [
     "EVENT_KINDS",
+    "TOOL_OUTPUT_TRUNCATED_KEY",
     "TOOL_RESULT_BYTE_CEILING",
     "TRUNCATION_MARKER",
     "AgentEvent",
@@ -363,6 +434,8 @@ __all__ = [
     "ErrorKind",
     "EventKind",
     "ResolvedTierInfo",
+    "bound_tool_output",
     "budget_exhausted_event",
+    "record_list_field",
     "truncate_tool_output",
 ]

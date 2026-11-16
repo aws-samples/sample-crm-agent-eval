@@ -15,11 +15,13 @@ without another event.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
+import threading
 import time
-from collections.abc import AsyncGenerator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
 from typing import Any, Final
 
 from starlette.applications import Starlette
@@ -36,7 +38,9 @@ from agents.cancellation import (
 )
 from agents.conversation_history import (
     ConversationHistoryStore,
+    DynamoDbConversationHistory,
     HistoryTurn,
+    HistoryWriteConflict,
     InMemoryConversationHistory,
 )
 from agents.events import AgentEvent, ErrorKind
@@ -82,7 +86,7 @@ from crm.errors import (
     ValidationFailed,
 )
 from crm.handlers._common import ok
-from crm.store.store import Store
+from crm.store.store import Store, bounded_store
 from providers.base import ModelProvider
 from providers.capabilities import CapabilityMatrix, Family, load_capability_matrix
 from providers.sdk_loggers import quiet_sdk_loggers
@@ -141,12 +145,47 @@ def _is_page_context_validation(exc: ValidationFailed) -> bool:
 #: Seconds a chat turn's stream may go without an event before a ``heartbeat`` event is emitted.
 HEARTBEAT_INTERVAL_SECONDS: Final[float] = 20.0
 
+#: Payload field marking a reconnect to the session's last turn; only the JSON value ``true``
+#: counts.
+_RESUME_KEY: Final[str] = "resume"
+
+#: Seconds a turn waits for its history read, and for its history write before ``completed``, after
+#: which it proceeds without them.
+HISTORY_READ_DEADLINE_SECONDS: Final[float] = 5.0
+HISTORY_WRITE_DEADLINE_SECONDS: Final[float] = 8.0
+
 #: Process-local session event store, shared across requests.
 _session_store = InMemorySessionStore()
 #: Process-local cooperative cancellation markers, read between agent steps.
 _cancellation_store: CancellationStore = InMemoryCancellationStore()
-#: Process-local per-session conversation history, scoped to ``(rep_id, tenant)``.
-_history_store: ConversationHistoryStore = InMemoryConversationHistory()
+#: Environment variable selecting the conversation-history backend, and its accepted values.
+_HISTORY_STORE_ENV_VAR: Final[str] = "CONVERSATION_HISTORY_STORE"
+_MEMORY_HISTORY_STORE: Final[str] = "memory"
+_DYNAMODB_HISTORY_STORE: Final[str] = "dynamodb"
+
+
+def build_history_store() -> ConversationHistoryStore:
+    """Return the conversation-history store ``CONVERSATION_HISTORY_STORE`` selects.
+
+    ``dynamodb`` builds a :class:`agents.conversation_history.DynamoDbConversationHistory` over
+    :func:`crm.store.store.bounded_store` with ``CRM_TABLE_PREFIX``; unset, empty or ``memory`` builds a
+    process-local :class:`agents.conversation_history.InMemoryConversationHistory`.
+
+    Raises:
+        RuntimeError: ``CONVERSATION_HISTORY_STORE`` names any other value.
+    """
+    selected = os.environ.get(_HISTORY_STORE_ENV_VAR, "").strip().lower() or _MEMORY_HISTORY_STORE
+    if selected == _MEMORY_HISTORY_STORE:
+        return InMemoryConversationHistory()
+    if selected == _DYNAMODB_HISTORY_STORE:
+        return DynamoDbConversationHistory(
+            bounded_store(table_prefix=os.environ.get("CRM_TABLE_PREFIX", ""))
+        )
+    raise RuntimeError(f"unrecognised {_HISTORY_STORE_ENV_VAR} value: {selected!r}")
+
+
+#: Per-session conversation history, scoped to ``(rep_id, tenant)``; built once at import.
+_history_store: ConversationHistoryStore = build_history_store()
 _matrix: CapabilityMatrix | None = None
 #: Provider selection state: one process-wide stub, and one cached live adapter per family.
 _stub_provider: ModelProvider | None = None
@@ -309,6 +348,9 @@ def _history_messages(session_id: str, identity: Identity) -> list[dict[str, obj
     except ScopeDenied:
         logger.info(json.dumps({"event": "history_read_denied"}))
         return []
+    except CrmError as exc:
+        logger.warning(json.dumps({"event": "history_read_failed", "reason": type(exc).__name__}))
+        return []
     messages: list[dict[str, object]] = []
     for turn in turns:
         messages.append({"role": "user", "content": turn.prompt})
@@ -319,7 +361,8 @@ def _history_messages(session_id: str, identity: Identity) -> list[dict[str, obj
 def _record_history(invocation: RuntimeInvocation, *, answer: str) -> None:
     """Record this turn's ``(prompt, answer)`` for the session, scoped to the caller's identity.
 
-    Nothing is recorded when the ``session_id`` belongs to a different principal.
+    Nothing is recorded when the ``session_id`` belongs to a different principal. A failed write is
+    logged with its error kind only and never raised, so the turn's answer is still delivered.
     """
     try:
         _history_store.record_turn(
@@ -330,6 +373,26 @@ def _record_history(invocation: RuntimeInvocation, *, answer: str) -> None:
         )
     except ScopeDenied:
         logger.info(json.dumps({"event": "history_write_denied"}))
+    except HistoryWriteConflict:
+        logger.warning(json.dumps({"event": "history_write_conflict"}))
+    except CrmError as exc:
+        logger.warning(json.dumps({"event": "history_write_failed", "reason": type(exc).__name__}))
+
+
+async def _bounded_history_call(
+    call: Callable[[], object], *, deadline: float, failed_event: str
+) -> bool:
+    """Run ``call`` on a worker thread, waiting at most ``deadline`` seconds.
+
+    Returns ``True`` when ``call`` finished in time. A timeout is logged as ``failed_event`` with
+    reason ``TimeoutError`` and returns ``False``; ``call`` may still finish in the background.
+    """
+    try:
+        await asyncio.wait_for(asyncio.to_thread(call), timeout=deadline)
+    except TimeoutError:
+        logger.warning(json.dumps({"event": failed_event, "reason": "TimeoutError"}))
+        return False
+    return True
 
 
 async def _agent_events_for_turn(
@@ -345,12 +408,20 @@ async def _agent_events_for_turn(
     Supplies the identity-bound :func:`agents.tool_dispatch.production_dispatch`, the decoded
     per-tier ``tuning``, the per-family ``providers`` resolver (a single :class:`ModelProvider` is
     used for every family), :data:`agents.budget.CHAT_BUDGET`, and the session's prior turns, then
-    re-yields the driver's events. On a terminal ``completed`` event the turn's
-    ``(prompt, answer)`` is recorded to history, unless the turn was cancelled.
+    re-yields the driver's events. The turn's ``(prompt, answer)`` is recorded to history before
+    its text-bearing ``completed`` event is yielded, unless the turn was cancelled. History calls
+    run on a worker thread, bounded by :data:`HISTORY_READ_DEADLINE_SECONDS` and
+    :data:`HISTORY_WRITE_DEADLINE_SECONDS`, so heartbeats keep flowing and a slow store delays
+    the answer by at most the deadline.
     """
     records = TurnRecords()
-    history_messages = _history_messages(invocation.session_id, invocation.identity)
-    final_answer: str | None = None
+    read: list[list[dict[str, object]]] = []
+    await _bounded_history_call(
+        lambda: read.append(_history_messages(invocation.session_id, invocation.identity)),
+        deadline=HISTORY_READ_DEADLINE_SECONDS,
+        failed_event="history_read_failed",
+    )
+    history_messages = read[0] if read else []
     async for event in drive_turn(
         prompt=invocation.prompt,
         session_id=invocation.session_id,
@@ -365,12 +436,17 @@ async def _agent_events_for_turn(
         max_rounds=max_rounds,
         cancellation=cancellation,
     ):
-        if event.kind == "completed" and event.text is not None:
-            final_answer = None if is_cancellation_event(event) else event.text
+        if (
+            event.kind == "completed"
+            and event.text is not None
+            and not is_cancellation_event(event)
+        ):
+            await _bounded_history_call(
+                functools.partial(_record_history, invocation, answer=event.text),
+                deadline=HISTORY_WRITE_DEADLINE_SECONDS,
+                failed_event="history_write_failed",
+            )
         yield event
-
-    if final_answer is not None:
-        _record_history(invocation, answer=final_answer)
 
 
 async def _next_event(agen: AsyncGenerator[AgentEvent]) -> AgentEvent | None:
@@ -413,11 +489,39 @@ def _sync_agent_events(
                 return
             yield event
     finally:
-        if pending is not None and not pending.done():
-            pending.cancel()
-            loop.run_until_complete(asyncio.gather(pending, return_exceptions=True))
-        loop.run_until_complete(agen.aclose())
-        loop.close()
+        _close_turn_loop(loop, agen, pending)
+
+
+def _close_turn_loop(
+    loop: asyncio.AbstractEventLoop,
+    agen: AsyncGenerator[AgentEvent],
+    pending: asyncio.Task[AgentEvent | None] | None,
+) -> None:
+    """Cancel ``pending``, close ``agen`` and every async generator still open on ``loop``, then
+    close ``loop``.
+
+    When the calling thread is already running another event loop, the cleanup runs on a helper
+    thread, because ``loop`` cannot be driven from inside a running loop.
+    """
+
+    def close() -> None:
+        try:
+            if pending is not None and not pending.done():
+                pending.cancel()
+                loop.run_until_complete(asyncio.gather(pending, return_exceptions=True))
+            loop.run_until_complete(agen.aclose())
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        close()
+        return
+    closer = threading.Thread(target=close, name="turn-loop-close")
+    closer.start()
+    closer.join()
 
 
 async def ping(_request: Request) -> Response:
@@ -1096,12 +1200,15 @@ async def invocations(request: Request) -> Response:
 
     resume_from_raw = payload.get("resume_from", 0)
     resume_from = int(resume_from_raw) if isinstance(resume_from_raw, int | str) else 0
+    resume = payload.get(_RESUME_KEY) is True
 
     events = _sync_agent_events(invocation, providers, matrix=matrix, cancellation=cancellation)
 
     def _sse_body() -> Iterator[bytes]:
         try:
-            for line in run_turn(invocation, events, store=_session_store, resume_from=resume_from):
+            for line in run_turn(
+                invocation, events, store=_session_store, resume_from=resume_from, resume=resume
+            ):
                 yield line.encode("utf-8")
         except Exception:
             # Headers are already sent, so the failure is reported as a terminal `error` event.

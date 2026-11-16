@@ -59,7 +59,7 @@ def _run_start_script(start_script: Path) -> bool:
             timeout=_START_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError, subprocess.TimeoutExpired:
         return False
     return result.returncode == 0
 

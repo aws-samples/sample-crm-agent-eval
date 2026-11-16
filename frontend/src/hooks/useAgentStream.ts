@@ -16,9 +16,10 @@
  *
  * ## Reconnection
  *
- * `POST /agent/{arn}` is idempotent per `session_id`: resuming re-POSTs the same `session_id` with
- * `resume_from` set to the count of events already applied, and the server replays only events
- * recorded after that point. A genuine I/O failure — the initial `fetch` rejecting, the response
+ * `POST /agent/{arn}` is idempotent per `session_id`: a reconnect, automatic or through
+ * {@link UseAgentStreamResult.reconnect}, re-POSTs the same `session_id` with `resume: true` and `resume_from` set to the count of events already applied, and
+ * the server replays only events recorded after that point. A follow-up turn never sends `resume`, so
+ * it always runs as a new turn. A genuine I/O failure — the initial `fetch` rejecting, the response
  * arriving non-OK or bodyless, or `read()` throwing mid-stream — triggers an automatic reconnect, up
  * to `maxReconnectAttempts` times with linear backoff, surfaced via `connectionState`. A stream that
  * ends cleanly (`done: true`) without a terminal `completed`/`error` event is closed, not reconnected.
@@ -504,6 +505,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
             : { page_context: promptRef.current.pageContext }),
           session_id: currentSessionId,
           resume_from: eventCountRef.current,
+          resume: true,
         },
         currentSessionId,
         attempt + 1,
@@ -569,6 +571,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
           : { page_context: promptRef.current.pageContext }),
         session_id: sessionId,
         resume_from: eventCountRef.current,
+        resume: true,
       },
       sessionId,
       0,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts import region_map
 from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.runtime_network_posture import (
@@ -715,6 +716,29 @@ def test_an_unreadable_status_is_one_failing_row() -> None:
     )
     rows = list(checks(ctx))
     assert [(r.check, r.status) for r in rows] == [("runtime_ready", "fail")]
+
+
+def test_an_aws_status_read_error_names_the_code_never_the_message() -> None:
+    planted_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+    class _Denied(_FakeControlPlane):
+        def get_agent_runtime_endpoint(self, **_: Any) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": f"User: {planted_arn}"}},
+                "GetAgentRuntimeEndpoint",
+            )
+
+    ctx = context_for_test(
+        outputs=_OUTPUTS,
+        clients={
+            "bedrock-agentcore-control": _Denied(_COMPLIANT_RUNTIME, _ALLOW_ONLY_POLICY),
+            "ec2": _FakeEc2(),
+        },
+    )
+    [row] = list(checks(ctx))
+    assert row.status == "fail"
+    assert "GetAgentRuntimeEndpoint failed (AccessDeniedException)" in row.detail
+    assert planted_arn not in row.detail
 
 
 class _RawResponse:

@@ -46,7 +46,10 @@ from typing import Any, Final, Literal, Protocol
 from scripts.smoke.harness import (
     CheckResult,
     SmokeContext,
+    aws_error_code,
+    aws_error_detail,
     error_code,
+    exception_detail,
     run_main,
     smoke_client_config,
 )
@@ -364,7 +367,7 @@ def _delete_self_signup_user(admin_idp: Any, *, user_pool_id: str, username: str
             status="fail",
             detail=(
                 f"could not confirm deletion of {username!r}: "
-                f"{error_code(exc) or type(exc).__name__}: {exc}"
+                f"{aws_error_detail('cognito-idp:AdminDeleteUser/AdminGetUser', exc)}"
             ),
         )
 
@@ -761,7 +764,7 @@ class LiveSmokeUserProvisioner:
             try:
                 idp.admin_get_user(UserPoolId=self._user_pool_id(), Username=username)
             except Exception as exc:  # noqa: BLE001 - the expected outcome is an exception
-                if "UserNotFoundException" not in f"{type(exc).__name__}: {exc}":
+                if aws_error_code(exc) != "UserNotFoundException":
                     raise
                 yield CheckResult(
                     resource="smoke_user",
@@ -781,7 +784,8 @@ class LiveSmokeUserProvisioner:
                 resource="smoke_user",
                 check="cognito_user_deleted",
                 status="fail",
-                detail=f"could not confirm smoke user deletion: {type(exc).__name__}: {exc}",
+                detail="could not confirm smoke user deletion: "
+                + exception_detail(exc, "cognito-idp:AdminDeleteUser/AdminGetUser"),
             )
 
     def _cleanup_reps_row(self) -> Iterable[CheckResult]:
@@ -806,7 +810,7 @@ class LiveSmokeUserProvisioner:
                 resource="smoke_user",
                 check="reps_row_deleted",
                 status="fail",
-                detail=f"could not delete the smoke reps row: {type(exc).__name__}: {exc}",
+                detail=f"could not delete the smoke reps row: {exception_detail(exc)}",
             )
 
     def _cleanup_tenant(self) -> Iterable[CheckResult]:
@@ -838,7 +842,7 @@ class LiveSmokeUserProvisioner:
                 resource="smoke_tenant",
                 check="tenant_left_clean",
                 status="fail",
-                detail=f"teardown of {smoke_tenant.tenant!r} failed: {type(exc).__name__}: {exc}",
+                detail=f"teardown of {smoke_tenant.tenant!r} failed: {exception_detail(exc)}",
             )
 
 
@@ -1037,7 +1041,7 @@ def _check_token_revocation_enabled(idp: Any, *, user_pool_id: str, client_id: s
             resource="spa_client",
             check="token_revocation_enabled",
             status="fail",
-            detail=f"describe_user_pool_client failed: {error_code(exc) or type(exc).__name__}",
+            detail=f"describe_user_pool_client failed: {aws_error_code(exc)}",
         )
     client = described.get("UserPoolClient") if isinstance(described, Mapping) else None
     enabled = client.get("EnableTokenRevocation") if isinstance(client, Mapping) else None
@@ -1119,9 +1123,7 @@ def _hosted_ui_logout_checks(
         described = idp.describe_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id)
         registered = list((described.get("UserPoolClient") or {}).get("LogoutURLs") or [])
     except Exception as exc:  # noqa: BLE001 - reported on both rows
-        yield from _all(
-            "fail", f"describe_user_pool_client failed: {error_code(exc) or type(exc).__name__}"
-        )
+        yield from _all("fail", f"describe_user_pool_client failed: {aws_error_code(exc)}")
         return
     if not registered:
         yield from _all("fail", "the SPA client registers no LogoutURLs")
@@ -1136,7 +1138,7 @@ def _hosted_ui_logout_checks(
         except Exception as exc:  # noqa: BLE001 - an unreachable endpoint verified nothing
             yield from _all(
                 "defer",
-                f"GET {base} raised {type(exc).__name__}: {exc}",
+                f"GET {base} raised {exception_detail(exc)}",
                 "hosted_ui_unreachable",
             )
             return
@@ -1180,7 +1182,7 @@ def _check_revoked_refresh_token_refused(
             resource="spa_client",
             check=check,
             status="fail",
-            detail=f"RevokeToken failed: {error_code(exc) or type(exc).__name__}",
+            detail=f"RevokeToken failed: {aws_error_code(exc)}",
         )
     try:
         idp.initiate_auth(
@@ -1306,7 +1308,8 @@ def checks(
             resource="id_token",
             check="authenticate",
             status="fail",
-            detail=f"authentication failed for {username!r}: {exc}",
+            detail=f"authentication failed for {username!r}: "
+            + exception_detail(exc, "cognito-idp:AdminInitiateAuth"),
         )
         return
 
@@ -1330,7 +1333,7 @@ def checks(
             resource="id_token",
             check="decode",
             status="fail",
-            detail=f"could not decode issued ID token: {exc}",
+            detail=f"could not decode issued ID token: {exception_detail(exc)}",
         )
         return
 
@@ -1378,7 +1381,7 @@ def _provisioned_token_checks(
                 status="fail",
                 detail=(
                     "could not provision an MFA-enrolled smoke user and issue a token: "
-                    f"{type(exc).__name__}: {exc}"
+                    f"{exception_detail(exc)}"
                 ),
             )
             return
@@ -1390,7 +1393,7 @@ def _provisioned_token_checks(
                 resource="id_token",
                 check="issue_and_decode",
                 status="fail",
-                detail=f"could not decode the issued ID token: {type(exc).__name__}: {exc}",
+                detail=f"could not decode the issued ID token: {exception_detail(exc)}",
             )
             return
 

@@ -16,7 +16,7 @@ variable "handler" {
 variable "runtime" {
   description = "Lambda runtime identifier."
   type        = string
-  default     = "python3.13"
+  default     = "python3.14"
 }
 
 variable "source_code_hash" {

@@ -64,11 +64,16 @@ _ENV_ADOPTED_VALUE = "bearer-from-env"
 RUNTIME_HOST = f"bedrock-runtime.{REGION}.amazonaws.com"
 MODEL = "global.anthropic.claude-haiku-5-5"
 
-#: The Bedrock fallback variables, written out independently of the module's own tuple.
-BEDROCK_FALLBACK_ENV_VARS = (
+#: The refused SDK variables, written out independently of the module's own tuple.
+REFUSED_ENV_VARS = (
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_BEDROCK_BASE_URL",
     "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+)
+#: A header block in the ``ANTHROPIC_CUSTOM_HEADERS`` format: one ``Name: value`` per line.
+_INJECTED_HEADERS = (
+    "X-Probe-Injected: yes\ntraceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 )
 QUIETED_LOGGERS = (
     "anthropic",
@@ -113,7 +118,7 @@ class _StaticSession:
 def _offline_aws_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterator[None]:
     """Pin a fake static credential chain and clear every SDK fallback variable."""
     for name in (
-        *BEDROCK_FALLBACK_ENV_VARS,
+        *REFUSED_ENV_VARS,
         "AWS_PROFILE",
         "AWS_DEFAULT_PROFILE",
         "AWS_SESSION_TOKEN",
@@ -131,7 +136,7 @@ def _offline_aws_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterator
 @pytest.fixture
 def anthropic_session(monkeypatch: pytest.MonkeyPatch) -> _StaticSession:
     """Replace the Anthropic SDK's cached boto3 session with a counting fake."""
-    from anthropic.lib.bedrock import _auth
+    from anthropic.lib.aws import _auth
 
     session = _StaticSession()
     monkeypatch.setattr(_auth, "_get_session", lambda **_: session)
@@ -337,7 +342,7 @@ def _build_openai_kwargs() -> object:
     )
 
 
-@pytest.mark.parametrize("name", BEDROCK_FALLBACK_ENV_VARS)
+@pytest.mark.parametrize("name", REFUSED_ENV_VARS)
 @pytest.mark.parametrize("build", [_build_anthropic_kwargs, _build_openai_kwargs])
 def test_forbidden_env_var_refuses_client_build_even_when_empty(
     monkeypatch: pytest.MonkeyPatch, name: str, build: Callable[[], object]
@@ -360,6 +365,45 @@ def test_control_anthropic_sdk_really_adopts_the_bearer_env_var(
     with pytest.raises(CredentialPolicyError) as raised:
         assert_runtime_client(client, region=REGION)
     assert raised.value.source == "api_key"
+
+
+def test_custom_headers_env_var_refuses_anthropic_client_so_no_header_reaches_the_wire(
+    monkeypatch: pytest.MonkeyPatch, anthropic_session: _StaticSession
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", _INJECTED_HEADERS)
+    handler, seen = _sequence(httpx2.Response(200, json=_MESSAGE_JSON))
+    with pytest.raises(CredentialPolicyError) as raised:
+        _anthropic(httpx2.MockTransport(handler))
+    assert raised.value.source == "ANTHROPIC_CUSTOM_HEADERS"
+    assert seen == []
+
+
+def test_control_anthropic_sdk_really_sends_env_custom_headers(
+    monkeypatch: pytest.MonkeyPatch, anthropic_session: _StaticSession
+) -> None:
+    handler, seen = _sequence(httpx2.Response(200, json=_MESSAGE_JSON))
+    kwargs = anthropic_client_kwargs(
+        region=REGION, http_client=build_http_client(transport=httpx2.MockTransport(handler))
+    )
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", _INJECTED_HEADERS)
+    client = AsyncAnthropicBedrock(**kwargs)
+
+    async def go() -> None:
+        with recording_attempts():
+            await _create_message(client)
+
+    asyncio.run(go())
+    assert seen[0].headers["x-probe-injected"] == "yes"
+    assert seen[0].headers["traceparent"].startswith("00-")
+    with pytest.raises(CredentialPolicyError) as raised:
+        assert_runtime_client(client, region=REGION)
+    assert raised.value.source == "default_headers"
+
+
+def test_anthropic_client_with_only_the_transport_headers_passes_the_header_check() -> None:
+    client = _anthropic(httpx2.MockTransport(lambda _: httpx2.Response(200)))
+    assert dict(client._custom_headers) == {"Connection": "keep-alive"}
+    assert_runtime_client(client, region=REGION)
 
 
 def test_control_openai_sdk_really_defaults_to_bedrock_mantle() -> None:
@@ -1331,7 +1375,7 @@ def test_openai_sdk_surfaces_an_empty_chain_as_openai_error_caused_by_the_policy
 def test_anthropic_sdk_surfaces_an_empty_chain_as_a_bare_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from anthropic.lib.bedrock import _auth
+    from anthropic.lib.aws import _auth
 
     monkeypatch.setattr(_auth, "_get_session", lambda **_: _Empty())
     handler, seen = _sequence(httpx2.Response(200, json=_MESSAGE_JSON))
@@ -1341,7 +1385,9 @@ def test_anthropic_sdk_surfaces_an_empty_chain_as_a_bare_runtime_error(
         with recording_attempts():
             await _create_message(client)
 
-    with pytest.raises(RuntimeError, match="could not resolve credentials") as raised:
+    with pytest.raises(
+        RuntimeError, match="Could not resolve AWS credentials from session"
+    ) as raised:
         asyncio.run(go())
     assert type(raised.value) is RuntimeError
     assert credential_policy_cause(raised.value) is None
@@ -1352,7 +1398,7 @@ def test_anthropic_sdk_surfaces_an_empty_chain_as_a_bare_runtime_error(
 def test_require_credentials_refuses_an_empty_chain_before_any_request(
     monkeypatch: pytest.MonkeyPatch, family: str
 ) -> None:
-    from anthropic.lib.bedrock import _auth
+    from anthropic.lib.aws import _auth
 
     monkeypatch.setattr(_auth, "_get_session", lambda **_: _Empty())
     anthropic_handler, anthropic_seen = _sequence(httpx2.Response(200, json=_MESSAGE_JSON))

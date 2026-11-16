@@ -1379,3 +1379,64 @@ def test_the_live_entry_point_supplies_the_logout_probe() -> None:
 
     source = inspect.getsource(cognito_claims.main)
     assert "logout_probe=_live_logout_probe" in source
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted_error(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": f"{_PLANTED_ARN} is not authorized",
+            }
+        },
+        operation,
+    )
+
+
+def test_a_self_signup_cleanup_aws_error_carries_its_code_but_never_its_message() -> None:
+    client, stubber = _idp_client()
+    _add_pool(stubber, _compliant_pool())
+    stubber.add_client_error(
+        "admin_delete_user",
+        service_error_code="AccessDeniedException",
+        service_message=f"{_PLANTED_ARN} is not authorized",
+        expected_params={"UserPoolId": _USER_POOL_ID, "Username": ANY},
+    )
+    with stubber:
+        ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": client})
+        results = list(checks(ctx, signup_client=_FakeSignUpClient()))
+    row = {r.check: r for r in results}["self_signup_user_deleted"]
+    assert row.status == "fail"
+    assert "failed (AccessDeniedException)" in row.detail
+    assert not [r for r in results if _PLANTED_ARN in r.detail]
+
+
+def test_a_live_cleanup_aws_error_carries_its_code_but_never_its_message() -> None:
+    idp, stubber = _idp_client()
+    ctx = context_for_test(outputs=_outputs(), clients={"cognito-idp": idp})
+    provisioner = LiveSmokeUserProvisioner(ctx)
+    provisioner._username = _PROVISIONED_REP  # noqa: SLF001 - exercising cleanup in isolation
+    stubber.add_client_error(
+        "admin_delete_user",
+        service_error_code="AccessDeniedException",
+        service_message=f"{_PLANTED_ARN} is not authorized",
+    )
+    with stubber:
+        results = list(provisioner._cleanup_cognito_user())  # noqa: SLF001
+    assert results[0].status == "fail"
+    assert "failed (AccessDeniedException)" in results[0].detail
+    assert _PLANTED_ARN not in results[0].detail
+
+
+def test_a_provisioning_aws_error_carries_its_code_but_never_its_message() -> None:
+    error = RuntimeError("provisioning failed")
+    error.__cause__ = _planted_error("AdminCreateUser")
+    provisioner = _FakeProvisioner(provision_error=error)
+    results = _checks_with_provisioner(provisioner, queue_revocation=False)
+    row = {r.check: r for r in results}["issue_and_decode"]
+    assert row.status == "fail"
+    assert "failed (AccessDeniedException)" in row.detail
+    assert not [r for r in results if _PLANTED_ARN in r.detail]

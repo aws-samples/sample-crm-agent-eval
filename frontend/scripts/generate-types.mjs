@@ -41,23 +41,15 @@ function writeFileAtomic(path, contents, encoding) {
 }
 
 function runPythonExporter() {
-  const venvPython = resolve(repoRoot, ".venv", "bin", "python3");
-  const pythonBin = existsExecutable(venvPython) ? venvPython : "python3";
+  const pythonBin = execFileSync(resolve(repoRoot, "scripts", "repo_python.sh"), ["--print"], {
+    encoding: "utf-8",
+  }).trim();
   const raw = execFileSync(pythonBin, [resolve(__dirname, "export_tool_schemas.py")], {
     cwd: repoRoot,
     encoding: "utf-8",
     maxBuffer: 10 * 1024 * 1024,
   });
   return JSON.parse(raw);
-}
-
-function existsExecutable(path) {
-  try {
-    execFileSync("test", ["-x", path]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function main() {

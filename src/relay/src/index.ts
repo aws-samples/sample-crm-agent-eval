@@ -277,6 +277,7 @@ export async function streamTurn(
         ...(body.pageContext === undefined ? {} : { pageContext: body.pageContext }),
         ...(body.tuning === undefined ? {} : { tuning: body.tuning }),
         ...(body.resumeFrom === undefined ? {} : { resumeFrom: body.resumeFrom }),
+        ...(body.resume === true ? { resume: true as const } : {}),
       });
     } catch (error) {
       // A Runtime client-side rejection is a 400; every other pre-stream failure is a 502.

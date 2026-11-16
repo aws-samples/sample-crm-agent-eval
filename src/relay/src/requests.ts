@@ -31,6 +31,8 @@ export interface TurnBody {
   readonly pageContext?: unknown;
   readonly tuning?: unknown;
   readonly resumeFrom?: number;
+  /** Present only when the body's `resume` is exactly the JSON boolean `true`. */
+  readonly resume?: true;
 }
 
 /**
@@ -69,6 +71,7 @@ export function decodeBody(event: LambdaFunctionURLEvent): TurnBody | undefined 
     return undefined;
   }
   const resumeFrom = typeof body["resume_from"] === "number" ? body["resume_from"] : undefined;
+  const resume = body["resume"] === true;
   return {
     prompt,
     sessionId,
@@ -77,6 +80,7 @@ export function decodeBody(event: LambdaFunctionURLEvent): TurnBody | undefined 
       : { pageContext: stripIdentityChannels(body["page_context"]) }),
     ...(body["tuning"] === undefined ? {} : { tuning: stripIdentityChannels(body["tuning"]) }),
     ...(resumeFrom === undefined ? {} : { resumeFrom }),
+    ...(resume ? { resume: true as const } : {}),
   };
 }
 

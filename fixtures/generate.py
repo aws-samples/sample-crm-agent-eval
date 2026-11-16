@@ -599,6 +599,75 @@ PD04_OPPORTUNITY_INDEX: Final[int] = 16
 PD05_OPPORTUNITY_INDEX: Final[int] = 56
 PD07_OPPORTUNITY_INDEX: Final[int] = 88
 
+#: PD-08's activity count on ``opp-0000``, above one default ``list_activities`` page of 50.
+PD08_ACTIVITY_COUNT: Final[int] = 55
+
+#: PD-08's activity bodies by kind, each long enough that 50 of them exceed the tool-result bound.
+PD08_ACTIVITY_BODIES: Final[dict[str, tuple[str, ...]]] = {
+    "call": (
+        "Check-in call with the infrastructure team. They walked through the current rollout "
+        "plan, asked for a revised sizing estimate for the second region, and raised questions "
+        "about the support tiers and response times. Agreed to send the updated estimate and a "
+        "summary of the support options before the next weekly sync. "
+        "They also mentioned a planned internal reorganisation that may change who signs off.",
+        "Short call with procurement to confirm the paperwork sequence. They want the security "
+        "questionnaire and the data processing addendum reviewed in parallel, and asked whether "
+        "the pricing proposal can be held for another quarter while budget approvals complete. "
+        "Promised a written answer on the hold period and the renewal terms by end of week, "
+        "copied to the account owner.",
+    ),
+    "email": (
+        "Sent the follow-up pack after the workshop: architecture notes, the draft success plan, "
+        "the reference customer list and the answers to the open security questions. Asked the "
+        "team to flag anything missing before the review board meets, and offered a session to "
+        "go through the migration timeline in more detail. "
+        "No reply yet; a reminder is scheduled for the start of next week if nothing arrives, "
+        "with a call as the fallback.",
+        "Replied to the operations lead's questions on monitoring and alerting integration, with "
+        "links to the relevant guides and a short description of how the pilot environment was "
+        "configured. Offered to set up a working session with our solutions engineer. "
+        "They accepted and proposed two slots next week; the earlier one is now on both calendars, "
+        "with an agenda to follow.",
+    ),
+    "meeting": (
+        "Working session with the platform and security teams. Reviewed the pilot results, the "
+        "open findings from their internal review and the proposed phased rollout. The security "
+        "team wants evidence of the access-review process before sign-off; the platform team is "
+        "ready to proceed with the first phase once that is cleared. "
+        "Action items were assigned on both sides and captured in the shared plan, "
+        "with the access-review evidence due first.",
+        "Quarterly review with the account's leadership. Covered adoption so far, the roadmap "
+        "items they care about most, and the commercial timeline. They asked for a written "
+        "summary of the next steps and a named contact for escalation during the rollout. "
+        "The summary was drafted the same day and sent to the account team for a final check, "
+        "and the escalation contact was confirmed by email afterwards.",
+    ),
+    "note": (
+        "Internal note: engagement remains steady and the technical evaluation is on track, but "
+        "the decision sits with a committee that meets monthly, so timing depends on getting the "
+        "remaining security documents to them before the next meeting. No change to the plan. "
+        "Revisit after the committee meets, and confirm "
+        "beforehand that the security documents reached the committee secretary in time.",
+        "Internal note: the account asked for a comparison against their incumbent tooling. "
+        "Prepared a short summary of the differences in deployment model, support coverage and "
+        "pricing structure, and shared it with the team for review before sending. "
+        "The team suggested adding two customer references in the same industry before it goes out, "
+        "which delays sending by a few days.",
+    ),
+    "stage_change": (
+        "Stage reviewed after the evaluation checkpoint. The criteria agreed at the start of the "
+        "evaluation have mostly been met; the outstanding items are the security review and the "
+        "procurement paperwork, so the stage stays as recorded until both are complete. "
+        "The account team agreed with that reading and will revisit it at the next checkpoint, "
+        "with the security review outcome as the first agenda item.",
+        "Pipeline review: confirmed the stage, the forecast value and the target close date with "
+        "the account team. No change recorded; the next checkpoint is after the security review "
+        "board has met and returned its findings. "
+        "Risks noted: committee timing and the remaining security documentation, both "
+        "tracked in the shared plan with owners and dates agreed by the account team.",
+    ),
+}
+
 #: PD-06's contacts (both under ``acct-0024``) and their shared name.
 PD06_CONTACT_INDICES: Final[tuple[int, ...]] = (77, 78)
 PD06_SHARED_NAME: Final[str] = "Sam Rivera"
@@ -834,12 +903,58 @@ def _plant_pd07_clean_multi_step_write_target(tenant: str, corpus: GeneratedCorp
     opportunity["stage"] = "Qualification"
 
 
+def _plant_pd08_activity_history_larger_than_one_page(tenant: str, corpus: GeneratedCorpus) -> None:
+    """PD-08: ``opp-0000`` gains 55 activities, so one default page of 50 exceeds the bound.
+
+    The activities are appended after the base corpus with ids ``act-defect-pd08-00`` …
+    ``act-defect-pd08-54``, drawn from their own seeded generator, and dated between the
+    opportunity's creation and its recorded ``last_touch``, so no other record changes.
+    """
+    rng = random.Random(f"{SEED}-pd08")  # noqa: S311  # nosec B311  # seeded for deterministic fixtures, not security
+    opportunity = _index_by_id(corpus.opportunities, "opportunity_id")[_tenant_id(tenant, "opp", 0)]
+    created_at = datetime.strptime(str(opportunity["created_at"]), "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=UTC
+    )
+    last_touch = datetime.strptime(str(opportunity["last_touch"]), "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=UTC
+    )
+    span_days = max((last_touch - created_at).days, 0)
+    offsets = sorted(rng.randint(0, span_days) for _ in range(PD08_ACTIVITY_COUNT))
+    subjects = {
+        "call": "Check-in call",
+        "email": "Follow-up email",
+        "meeting": "Working session",
+        "note": "Internal note",
+        "stage_change": "Stage reviewed",
+    }
+    for index, offset in enumerate(offsets):
+        kind = rng.choice(ACTIVITY_KINDS)
+        occurred_at = _iso(created_at + timedelta(days=offset))
+        corpus.activities.append(
+            _stamped(
+                {
+                    "activity_id": scoped_id(tenant, f"act-defect-pd08-{index:02d}"),
+                    "account_id": str(opportunity["account_id"]),
+                    "opportunity_id": str(opportunity["opportunity_id"]),
+                    "kind": kind,
+                    "subject": subjects[kind],
+                    "occurred_at": occurred_at,
+                    "body": rng.choice(PD08_ACTIVITY_BODIES[kind]),
+                },
+                tenant=tenant,
+                created_at=occurred_at,
+                created_by=str(opportunity["owner_rep_id"]),
+            )
+        )
+
+
 def _apply_planted_defects(tenant: str, corpus: GeneratedCorpus) -> None:
     """Apply every planted defect to an already-generated corpus, in a fixed order.
 
     Each defect mutates a disjoint set of records: PD-01 ``acct-0000``'s contacts and
     ``opp-0000``; PD-02 ``opp-0001``; PD-03 contacts under ``acct-0002`` and ``acct-0004``; PD-04
-    ``opp-0016``; PD-05 ``opp-0056``; PD-06 contacts under ``acct-0024``; PD-07 ``opp-0088``.
+    ``opp-0016``; PD-05 ``opp-0056``; PD-06 contacts under ``acct-0024``; PD-07 ``opp-0088``;
+    PD-08 adds activities on ``opp-0000`` and changes no existing record.
     """
     _plant_pd01_departed_primary_contact_successor(tenant, corpus)
     _plant_pd02_stale_forecast_after_stage_regression(tenant, corpus)
@@ -848,6 +963,7 @@ def _apply_planted_defects(tenant: str, corpus: GeneratedCorpus) -> None:
     _plant_pd05_report_only_speculation(tenant, corpus)
     _plant_pd06_same_named_contacts_one_account(tenant, corpus)
     _plant_pd07_clean_multi_step_write_target(tenant, corpus)
+    _plant_pd08_activity_history_larger_than_one_page(tenant, corpus)
 
 
 def generate_dataset(tenant: str) -> GeneratedCorpus:

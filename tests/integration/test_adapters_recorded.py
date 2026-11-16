@@ -17,7 +17,7 @@ from typing import Any
 import anthropic
 import httpx2
 import pytest
-from anthropic.lib.bedrock import _auth
+from anthropic.lib.aws import _auth
 from botocore.credentials import Credentials
 
 from eval.live import is_retryable_error

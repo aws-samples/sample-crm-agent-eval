@@ -42,8 +42,8 @@ def _load_gate() -> ModuleType:
 gate = _load_gate()
 
 
-LINUX_WHEEL = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: false\nTag: cp313-cp313-manylinux2014_x86_64\n"
-DARWIN_WHEEL = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: false\nTag: cp313-cp313-macosx_11_0_arm64\n"
+LINUX_WHEEL = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: false\nTag: cp314-cp314-manylinux2014_x86_64\n"
+DARWIN_WHEEL = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: false\nTag: cp314-cp314-macosx_11_0_arm64\n"
 PURE_WHEEL = "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
 
 
@@ -279,15 +279,15 @@ def test_a_linux_wheel_tag_and_a_pure_python_tag_both_pass(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     "members",
     [
-        {"vendormod-1.0.dist-info/WHEEL": LINUX_WHEEL.replace("cp313-cp313", "cp312-cp312")},
-        {"ext/__init__.py": "", "ext/ext.cpython-312-x86_64-linux-gnu.so": "\x00binary"},
+        {"vendormod-1.0.dist-info/WHEEL": LINUX_WHEEL.replace("cp314-cp314", "cp313-cp313")},
+        {"ext/__init__.py": "", "ext/ext.cpython-313-x86_64-linux-gnu.so": "\x00binary"},
     ],
-    ids=["cp312_wheel_tag", "cpython_312_extension"],
+    ids=["cp313_wheel_tag", "cpython_313_extension"],
 )
 def test_an_artifact_built_for_the_previous_runtime_minor_version_fails(
     tmp_path: Path, members: dict[str, str]
 ) -> None:
-    """A cp312 wheel tag or a cpython-312 extension does not load on the python3.13 runtime."""
+    """A cp313 wheel tag or a cpython-313 extension does not load on the python3.14 runtime."""
     zip_members = {
         "crm/__init__.py": "",
         "crm/handlers/__init__.py": "",
@@ -297,7 +297,7 @@ def test_an_artifact_built_for_the_previous_runtime_minor_version_fails(
     result = gate.check_zip(
         SYNTHETIC_SPEC, _write_zip(tmp_path / "synthetic.zip", zip_members), source_root=None
     )
-    assert any("cp312" in v or "CPython 312, not 313" in v for v in result.violations), (
+    assert any("cp313" in v or "CPython 313, not 314" in v for v in result.violations), (
         result.violations
     )
 
@@ -308,7 +308,7 @@ def test_a_darwin_extension_module_filename_fails(tmp_path: Path) -> None:
         "crm/handlers/__init__.py": "",
         "crm/handlers/synthetic.py": "def handler(event, context):\n    return None\n",
         "ext/__init__.py": "",
-        "ext/ext.cpython-313-darwin.so": "\x00binary",
+        "ext/ext.cpython-314-darwin.so": "\x00binary",
     }
     result = gate.check_zip(
         SYNTHETIC_SPEC, _write_zip(tmp_path / "synthetic.zip", members), source_root=None
@@ -316,18 +316,18 @@ def test_a_darwin_extension_module_filename_fails(tmp_path: Path) -> None:
     assert any("not x86_64 Linux" in v for v in result.violations), result.violations
 
 
-def test_a_cpython_314_extension_module_fails(tmp_path: Path) -> None:
+def test_a_cpython_315_extension_module_fails(tmp_path: Path) -> None:
     members = {
         "crm/__init__.py": "",
         "crm/handlers/__init__.py": "",
         "crm/handlers/synthetic.py": "def handler(event, context):\n    return None\n",
         "ext/__init__.py": "",
-        "ext/ext.cpython-314-x86_64-linux-gnu.so": "\x00binary",
+        "ext/ext.cpython-315-x86_64-linux-gnu.so": "\x00binary",
     }
     result = gate.check_zip(
         SYNTHETIC_SPEC, _write_zip(tmp_path / "synthetic.zip", members), source_root=None
     )
-    assert any("targets CPython 314" in v for v in result.violations), result.violations
+    assert any("targets CPython 315" in v for v in result.violations), result.violations
 
 
 def test_a_wheel_with_no_tag_line_is_a_violation_rather_than_a_pass(tmp_path: Path) -> None:
@@ -381,8 +381,8 @@ def test_a_partially_built_directory_always_fails(tmp_path: Path) -> None:
 #: correctly-built zip legitimately drops — a `../../bin/` console script and a `__pycache__` entry).
 COMPILED_RECORD = (
     "vendormod/__init__.py,sha256=aaa,10\n"
-    "vendormod/vendormod.cpython-313-x86_64-linux-gnu.so,sha256=bbb,20\n"
-    "vendormod/__pycache__/__init__.cpython-313.pyc,,\n"
+    "vendormod/vendormod.cpython-314-x86_64-linux-gnu.so,sha256=bbb,20\n"
+    "vendormod/__pycache__/__init__.cpython-314.pyc,,\n"
     "../../bin/vendorcli,sha256=ccc,30\n"
     "vendormod-1.0.dist-info/WHEEL,sha256=ddd,40\n"
     "vendormod-1.0.dist-info/RECORD,,\n"
@@ -409,7 +409,7 @@ def _compiled_vendor_zip(path: Path, *, body: bool, extension: bool) -> Path:
     if body:
         members["vendormod/__init__.py"] = "VALUE = 1\n"
     if extension:
-        members["vendormod/vendormod.cpython-313-x86_64-linux-gnu.so"] = "\x00binary"
+        members["vendormod/vendormod.cpython-314-x86_64-linux-gnu.so"] = "\x00binary"
     return _write_zip(path, members)
 
 
@@ -444,7 +444,7 @@ def test_a_vendored_distribution_missing_only_its_compiled_leaf_fails(tmp_path: 
     """A distribution missing only its compiled `.so`, with its pure-Python body kept, fails."""
     path = _compiled_vendor_zip(tmp_path / "synthetic.zip", body=True, extension=False)
     result = gate.check_zip(SYNTHETIC_SPEC, path, source_root=None)
-    assert any("vendormod.cpython-313-x86_64-linux-gnu.so" in v for v in result.violations), (
+    assert any("vendormod.cpython-314-x86_64-linux-gnu.so" in v for v in result.violations), (
         result.violations
     )
 
@@ -504,19 +504,19 @@ def test_the_real_zip_with_a_vendored_distribution_stripped_fails(
 
 def test_the_marker_environment_is_the_lambda_runtime_and_not_the_build_host() -> None:
     """Markers are evaluated against the Lambda runtime's environment, not the build host's."""
-    assert gate.LAMBDA_MARKER_ENVIRONMENT["python_version"] == "3.13"
+    assert gate.LAMBDA_MARKER_ENVIRONMENT["python_version"] == "3.14"
     assert gate.LAMBDA_MARKER_ENVIRONMENT["sys_platform"] == "linux"
     assert gate.LAMBDA_MARKER_ENVIRONMENT["platform_machine"] == "x86_64"
-    assert gate.TARGET_PYTHON_VERSION == (3, 13)
+    assert gate.TARGET_PYTHON_VERSION == (3, 14)
 
 
 @pytest.mark.parametrize(
     ("marker", "required"),
     [
         ("", True),
-        ('; python_version < "3.14"', True),
-        ('; python_version >= "3.14"', False),
-        ('; python_version < "3.13"', False),
+        ('; python_version < "3.15"', True),
+        ('; python_version >= "3.15"', False),
+        ('; python_version < "3.14"', False),
         ('; python_version < "3.9"', False),
         ('; sys_platform == "linux"', True),
         ('; sys_platform == "win32"', False),
@@ -560,11 +560,11 @@ def test_a_requirement_the_lambda_runtime_provides_is_not_reported_missing() -> 
 
 
 def test_a_zip_missing_a_marker_required_distribution_fails(tmp_path: Path) -> None:
-    """A zip missing a distribution required under the 3.13 target's markers fails."""
+    """A zip missing a distribution required under the 3.14 target's markers fails."""
     path = _handler_zip(
         tmp_path / "synthetic.zip",
         vendor=True,
-        requires=('typing-extensions>=4.4.0; python_version < "3.14"',),
+        requires=('typing-extensions>=4.4.0; python_version < "3.15"',),
     )
     result = gate.check_zip(SYNTHETIC_SPEC, path, source_root=None)
     assert result.violations, "a marker-required distribution absent from the zip must fail"
@@ -572,7 +572,7 @@ def test_a_zip_missing_a_marker_required_distribution_fails(tmp_path: Path) -> N
         "typing-extensions" in v and "required by vendored 'vendormod'" in v
         for v in result.violations
     ), result.violations
-    assert any("python_version=3.13" in v for v in result.violations), result.violations
+    assert any("python_version=3.14" in v for v in result.violations), result.violations
     # The host's own interpreter satisfies the import, so only the marker phase sees the gap.
     assert result.isolated_import_status.startswith("pass")
 
@@ -580,12 +580,12 @@ def test_a_zip_missing_a_marker_required_distribution_fails(tmp_path: Path) -> N
 def test_a_zip_whose_marker_does_not_apply_to_the_target_does_not_false_fail(
     tmp_path: Path,
 ) -> None:
-    """A dependency whose marker does not apply to the 3.13 Lambda target is not required."""
+    """A dependency whose marker does not apply to the 3.14 Lambda target is not required."""
     path = _handler_zip(
         tmp_path / "synthetic.zip",
         vendor=True,
         requires=(
-            'futuremod>=1.0; python_version >= "3.14"',
+            'futuremod>=1.0; python_version >= "3.15"',
             'windowsmod>=1.0; sys_platform == "win32"',
             'armmod>=1.0; platform_machine == "aarch64"',
             'extrasmod>=1.0; extra == "docs"',
@@ -601,7 +601,7 @@ def test_a_satisfied_marker_requirement_present_in_the_zip_passes(tmp_path: Path
     path = _handler_zip(
         tmp_path / "synthetic.zip",
         vendor=True,
-        requires=('typing-extensions>=4.4.0; python_version < "3.13"',),
+        requires=('typing-extensions>=4.4.0; python_version < "3.14"',),
     )
     with zipfile.ZipFile(path, "a") as archive:
         archive.writestr("typing_extensions.py", "TYPE = 1\n")
@@ -638,7 +638,7 @@ def test_an_unparseable_requires_dist_is_a_violation_rather_than_a_silent_skip(
     assert any("unparseable Requires-Dist" in v for v in result.violations), result.violations
 
 
-def test_the_real_referencing_metadata_needs_no_typing_extensions_on_the_313_target() -> None:
+def test_the_real_referencing_metadata_needs_no_typing_extensions_on_the_314_target() -> None:
     """`referencing`'s installed METADATA gates `typing-extensions` below 3.13, so the target
     does not require it.
 
@@ -759,12 +759,14 @@ def test_the_embedded_referencing_reproduction_matches_the_real_vendored_module(
             assert line in real, line
 
 
-def test_the_same_zip_passes_on_the_313_build_host_which_is_why_the_outage_shipped(
+def test_the_same_zip_passes_on_a_non_target_build_host_which_is_why_the_outage_shipped(
     tmp_path: Path,
 ) -> None:
-    """Without a 3.13 interpreter the same zip imports cleanly and reports a host status."""
+    """Without a target interpreter the same zip imports cleanly and reports a host status."""
     if sys.version_info[:2] == gate.TARGET_PYTHON_VERSION:
-        pytest.skip("this host is itself CPython 3.13, so there is no non-target host to contrast")
+        pytest.skip(
+            "this host is itself the target CPython, so there is no non-target host to contrast"
+        )
     path = _pep696_zip(tmp_path / "pep696.zip", vendor_typing_extensions=False)
     result = _isolated_import_only(path, NO_TARGET_INTERPRETER)
     assert result.isolated_import_status == (
@@ -824,29 +826,29 @@ def test_the_print_target_python_mode_agrees_with_discovery(
 def test_the_discovery_order_is_env_override_then_path_then_uv_then_pyenv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(gate.TARGET_PYTHON_ENV_VAR, "/nonexistent/python3.13")
+    monkeypatch.setenv(gate.TARGET_PYTHON_ENV_VAR, "/nonexistent/python3.14")
     sources = [source for source, _ in gate._discovery_candidates()]
     assert sources == [
         f"env:{gate.TARGET_PYTHON_ENV_VAR}",
-        "PATH:python3.13",
-        "uv python find 3.13",
-        "pyenv which python3.13",
+        "PATH:python3.14",
+        "uv python find 3.14",
+        "pyenv which python3.14",
     ]
 
 
 def test_an_interpreter_reporting_another_minor_version_is_rejected_not_used(
     tmp_path: Path,
 ) -> None:
-    """A candidate reporting CPython 3.12 is rejected as a target candidate for the 3.13 runtime."""
-    fake = tmp_path / "python3.12"
+    """A candidate reporting CPython 3.13 is rejected as a target candidate for the 3.14 runtime."""
+    fake = tmp_path / "python3.13"
     fake.write_text(
-        '#!/bin/sh\necho \'{"version": [3, 12], "stdlib": ["/x", "/x", "/x/lib-dynload"]}\'\n',
+        '#!/bin/sh\necho \'{"version": [3, 13], "stdlib": ["/x", "/x", "/x/lib-dynload"]}\'\n',
         encoding="utf-8",
     )
     fake.chmod(0o755)
     stdlib, description = gate._probe_interpreter(str(fake))
     assert stdlib is None
-    assert "is CPython 3.12, not the target 3.13" in description
+    assert "is CPython 3.13, not the target 3.14" in description
 
 
 def test_the_host_interpreter_is_accepted_only_when_it_is_the_target_version() -> None:
@@ -856,7 +858,7 @@ def test_the_host_interpreter_is_accepted_only_when_it_is_the_target_version() -
 
 
 def test_a_candidate_that_cannot_be_executed_is_rejected_with_a_reason() -> None:
-    stdlib, description = gate._probe_interpreter("/nonexistent/python3.13")
+    stdlib, description = gate._probe_interpreter("/nonexistent/python3.14")
     assert stdlib is None
     assert "could not be executed" in description
 
@@ -864,18 +866,18 @@ def test_a_candidate_that_cannot_be_executed_is_rejected_with_a_reason() -> None
 def test_no_discoverable_interpreter_keeps_the_non_target_status_and_names_what_was_tried(
     tmp_path: Path,
 ) -> None:
-    """With no discoverable 3.13 the phase still passes, keeps a non-target status, and names the
+    """With no discoverable 3.14 the phase still passes, keeps a non-target status, and names the
     candidates tried."""
     if sys.version_info[:2] == gate.TARGET_PYTHON_VERSION:
-        pytest.skip("this host is itself CPython 3.13, which discovery always accepts")
+        pytest.skip("this host is itself the target CPython, which discovery always accepts")
     result = _isolated_import_only(
         _handler_zip(tmp_path / "synthetic.zip", vendor=True),
-        gate.InterpreterDiscovery(None, ("env:PYTHON313: not found", "PATH:python3.13: not found")),
+        gate.InterpreterDiscovery(None, ("env:PYTHON314: not found", "PATH:python3.14: not found")),
     )
     assert result.violations == []
     assert "target_python" not in result.isolated_import_status
     note = " ".join(result.notes)
-    assert "PATH:python3.13: not found" in note
+    assert "PATH:python3.14: not found" in note
     assert gate.TARGET_PYTHON_ENV_VAR in note
 
 
@@ -899,7 +901,7 @@ def test_a_skipped_isolated_import_is_counted_as_skipped_and_never_as_executed(
         _handler_zip(tmp_path / "synthetic.zip", vendor=True),
         {"rpds_py-2026.6.3": ["a_top_level_no_build_host_provides"]},
         result,
-        discovery=gate.InterpreterDiscovery(None, ("env:PYTHON313: not found",)),
+        discovery=gate.InterpreterDiscovery(None, ("env:PYTHON314: not found",)),
     )
     assert result.isolated_import_status == "skip"
     assert result.violations == []
@@ -976,7 +978,7 @@ def test_the_reports_json_states_both_the_host_and_the_target_python_version(
     # compare against; the report fields under test are independent of it.
     status, report = gate.run(tmp_path, require_zips=True, source_root=None)
     assert status == 0, report
-    assert report["target_python_version"] == "3.13"
+    assert report["target_python_version"] == "3.14"
     assert report["host_python_version"] == f"{sys.version_info[0]}.{sys.version_info[1]}"
     assert isinstance(report["marker_environment"], dict)
 
@@ -995,8 +997,8 @@ def test_the_missing_required_distributions_mode_names_what_the_target_still_nee
         _metadata(
             "requirer",
             "1.0",
-            'typing-extensions>=4.4.0; python_version < "3.14"',
-            'futuremod>=1.0; python_version >= "3.14"',
+            'typing-extensions>=4.4.0; python_version < "3.15"',
+            'futuremod>=1.0; python_version >= "3.15"',
         ),
         encoding="utf-8",
     )
@@ -1455,7 +1457,7 @@ def test_bytecode_caches_are_not_compared_since_the_build_never_ships_them(
     tmp_path: Path,
 ) -> None:
     """`package_lambdas.sh` excludes `__pycache__`/`*.pyc`, so their absence is not staleness."""
-    with_cache = {**_PARITY_FILES, "crm/handlers/__pycache__/synthetic.cpython-313.pyc": "x"}
+    with_cache = {**_PARITY_FILES, "crm/handlers/__pycache__/synthetic.cpython-314.pyc": "x"}
 
     assert _parity_violations(tmp_path, zip_files=_PARITY_FILES, source_files=with_cache) == []
 

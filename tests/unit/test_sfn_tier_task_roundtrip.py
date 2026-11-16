@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
+from crm.errors import ValidationFailed
 from eval.sfn_handlers import _unit_fields, unit_from_row
 from eval.sweep_units import ArmSpec, TaskUnitResult
 from providers.capabilities import Family
@@ -24,7 +26,10 @@ def _stored_rows(units: list[TaskUnitResult]) -> list[Row]:
 
 
 def _from_rows(rows: list[Row], family: Family) -> list[TaskUnitResult]:
-    return [unit_from_row(row, task=_TASK, arm_spec=ArmSpec(family=family)) for row in rows]
+    return [
+        unit_from_row(row, task=_TASK, arm_spec=ArmSpec(family=family), repeat_index=0)
+        for row in rows
+    ]
 
 
 def _tier_task_metrics(units: list[TaskUnitResult], family: Family, mode: str) -> object:
@@ -75,3 +80,40 @@ def test_a_field_lost_in_storage_breaks_the_equality(mutate: Callable[[Row], Row
     in_process = _tier_task_metrics(units, "anthropic", "live")
     rows = [mutate(row) for row in _stored_rows(units)]
     assert _tier_task_metrics(_from_rows(rows, "anthropic"), "anthropic", "live") != in_process
+
+
+def _exhausted_at_subagent(units: list[TaskUnitResult]) -> list[TaskUnitResult]:
+    first, *rest = units
+    outcome = dataclasses.replace(
+        first.turn.outcome, budget_exhausted=True, budget_exhausted_tier="subagent"
+    )
+    return [
+        dataclasses.replace(first, turn=dataclasses.replace(first.turn, outcome=outcome)),
+        *rest,
+    ]
+
+
+def test_the_exhaustion_tier_survives_storage_into_the_tier_task_metrics() -> None:
+    units = _exhausted_at_subagent(units_for("anthropic"))
+    via_rows = _tier_task_metrics(_from_rows(_stored_rows(units), "anthropic"), "anthropic", "live")
+    assert via_rows == _tier_task_metrics(units, "anthropic", "live")
+    assert isinstance(via_rows, dict)
+    assert via_rows["by_tier"]["subagent"]["budget_exhausted_task_count"] == 1
+
+
+def test_a_lost_exhaustion_tier_breaks_the_stored_row() -> None:
+    units = _exhausted_at_subagent(units_for("anthropic"))
+    row = _stored_rows(units)[0]
+    outcome = json.loads(row["outcome"])
+    outcome["budget_exhausted_tier"] = None
+    with pytest.raises(ValidationFailed, match="unreadable"):
+        _from_rows([{**row, "outcome": json.dumps(outcome)}], "anthropic")
+
+
+@pytest.mark.parametrize("repeat_index", [0, 3])
+def test_a_stored_unit_takes_its_repeat_from_the_ref(repeat_index: int) -> None:
+    (row, *_rest) = _stored_rows(units_for("anthropic"))
+    unit = unit_from_row(
+        row, task=_TASK, arm_spec=ArmSpec(family="anthropic"), repeat_index=repeat_index
+    )
+    assert unit.repeat_index == repeat_index

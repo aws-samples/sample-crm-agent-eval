@@ -47,6 +47,7 @@ from crm.store.store import Store
 from crm.toolspec.definitions import BY_NAME as TOOLS_BY_NAME
 from crm.toolspec.validation import arguments_conform
 from eval.tenancy import tenant_for_run
+from providers.capabilities import Tier
 
 #: Sentinel in a golden task's ``expected_field_changes[i].id`` meaning "locate the row by
 #: (table, distinguishing field)" rather than a pre-known id.
@@ -167,6 +168,8 @@ class TurnOutcome:
             :class:`crm.errors.ScopeDenied.missing_scope`; ``None`` for every other outcome.
         budget_exhausted: Whether the turn ended via :func:`agents.events.budget_exhausted_event`
             rather than completing.
+        budget_exhausted_tier: The tier that ran the turn out of budget; set exactly when
+            ``budget_exhausted`` is ``True``.
         truncated: Whether any dispatched tool call's raw output reported truncation this turn
             (:func:`eval.harness._tool_output_reports_truncation`).
         truncation_disclosed: Whether the turn surfaced a truncation notice, via
@@ -184,9 +187,19 @@ class TurnOutcome:
     denial_outcome: str | None = None
     denial_missing_scope: str | None = None
     budget_exhausted: bool = False
+    budget_exhausted_tier: Tier | None = None
     truncated: bool = False
     truncation_disclosed: bool = False
     observed_outcomes: frozenset[str] = field(default_factory=frozenset)
+
+    def __post_init__(self) -> None:
+        """Raise ``ValueError`` unless ``budget_exhausted_tier`` is set iff ``budget_exhausted``."""
+        if self.budget_exhausted != (self.budget_exhausted_tier is not None):
+            raise ValueError(
+                "budget_exhausted_tier must be set exactly when budget_exhausted is true, got "
+                f"budget_exhausted={self.budget_exhausted!r}, "
+                f"budget_exhausted_tier={self.budget_exhausted_tier!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +239,9 @@ class TaskScore:
             :func:`_check_tool_call_correctness`).
         truncated: Copied from the scored :class:`TurnOutcome`.
         budget_exhausted: Copied from the scored :class:`TurnOutcome`.
+        budget_exhausted_tier: Copied from the scored :class:`TurnOutcome`; set exactly when
+            ``budget_exhausted`` is ``True``.
+        repeat_index: The sweep repeat the scored turn ran in, from 0.
         assertion_results: Every individual assertion checked.
     """
 
@@ -237,7 +253,20 @@ class TaskScore:
     tool_call_correct: bool | None
     truncated: bool = False
     budget_exhausted: bool = False
+    budget_exhausted_tier: Tier | None = None
+    repeat_index: int = 0
     assertion_results: tuple[AssertionResult, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        """Raise ``ValueError`` on an inconsistent exhaustion tier or a negative repeat index."""
+        if self.budget_exhausted != (self.budget_exhausted_tier is not None):
+            raise ValueError(
+                "budget_exhausted_tier must be set exactly when budget_exhausted is true, got "
+                f"budget_exhausted={self.budget_exhausted!r}, "
+                f"budget_exhausted_tier={self.budget_exhausted_tier!r}"
+            )
+        if isinstance(self.repeat_index, bool) or self.repeat_index < 0:
+            raise ValueError(f"repeat_index must be a non-negative int, got {self.repeat_index!r}")
 
     def to_report_fields(self) -> dict[str, object]:
         """Render this score as a flat, JSON-safe mapping for a result artifact.
@@ -253,6 +282,8 @@ class TaskScore:
             "tool_call_correct": self.tool_call_correct,
             "truncated": self.truncated,
             "budget_exhausted": self.budget_exhausted,
+            "budget_exhausted_tier": self.budget_exhausted_tier,
+            "repeat_index": self.repeat_index,
             "assertion_results": [
                 {
                     "name": result.name,
@@ -1171,6 +1202,7 @@ def score_task(
     task: Mapping[str, Any],
     outcome: TurnOutcome,
     pre_turn_values: Mapping[tuple[str, str, str], object] | None = None,
+    repeat_index: int = 0,
 ) -> TaskScore:
     """Score one golden task against one turn's observed outcome.
 
@@ -1301,6 +1333,8 @@ def score_task(
         tool_call_correct=tool_call_result.passed,
         truncated=outcome.truncated,
         budget_exhausted=outcome.budget_exhausted,
+        budget_exhausted_tier=outcome.budget_exhausted_tier,
+        repeat_index=repeat_index,
         assertion_results=tuple(results),
     )
 

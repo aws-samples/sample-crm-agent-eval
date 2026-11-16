@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,9 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     _write_stub(bin_dir, responses)
+    python_shim = bin_dir / "python3"
+    python_shim.unlink(missing_ok=True)
+    python_shim.symlink_to(sys.executable)
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}")
     env.pop("AWS_REGION", None)
     env.pop("AWS_PROFILE", None)
@@ -369,6 +373,7 @@ def _scratch_preflight(tmp_path: Path, map_text: str | None) -> Path:
     """A two-script repo copy whose `infra/regions.json` is `map_text` (absent when None)."""
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh")
     (root / "infra").mkdir()
     for name in ("preflight_adopted_vpc.sh", "region_map.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, root / "scripts" / name)

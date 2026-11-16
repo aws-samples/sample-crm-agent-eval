@@ -9,7 +9,7 @@
  * assertions fail if a tool drops out of coverage.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -18,8 +18,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..", "..");
 
 function runPythonExporter(): Record<string, string[]> {
-  const venvPython = resolve(repoRoot, ".venv", "bin", "python3");
-  const pythonBin = existsSync(venvPython) ? venvPython : "python3";
+  const pythonBin = execFileSync(resolve(repoRoot, "scripts", "repo_python.sh"), ["--print"], {
+    encoding: "utf-8",
+  }).trim();
   const raw = execFileSync(
     pythonBin,
     [resolve(repoRoot, "frontend", "scripts", "export_response_shapes.py")],

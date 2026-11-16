@@ -51,10 +51,16 @@ _KEYED_ENVIRON_METHODS = frozenset({"get", "pop", "setdefault", "__getitem__", "
 
 #: Modules on the Anthropic Bedrock client's construction, request and signing path. ``_mantle``
 #: is excluded: ``AnthropicBedrockMantle`` is never constructed, and its endpoint is refused.
+#: ``anthropic.lib._env`` builds the client's default headers and ``anthropic.lib.aws._auth``
+#: signs its requests; both sit outside the ``bedrock`` package.
 ANTHROPIC_SCAN_PACKAGES: tuple[tuple[str, frozenset[str]], ...] = (
     ("anthropic.lib.bedrock", frozenset({"_mantle"})),
 )
-ANTHROPIC_SCAN_MODULES: tuple[str, ...] = ("anthropic._base_client",)
+ANTHROPIC_SCAN_MODULES: tuple[str, ...] = (
+    "anthropic._base_client",
+    "anthropic.lib._env",
+    "anthropic.lib.aws._auth",
+)
 
 #: Modules on the OpenAI Bedrock client's construction, request and signing path.
 OPENAI_SCAN_MODULES: tuple[str, ...] = (
@@ -86,7 +92,11 @@ OPENAI_PROVIDER_GATED_READS = frozenset(
 #: Read on every OpenAI client; it verifies inbound webhooks and never authenticates a request.
 OPENAI_WEBHOOK_READS = frozenset({"OPENAI_WEBHOOK_SECRET"})
 
-ANTHROPIC_ENV_READS = REGION_READS | {"AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL"}
+ANTHROPIC_ENV_READS = REGION_READS | {
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+}
 OPENAI_ENV_READS = (
     REGION_READS
     | {"AWS_BEARER_TOKEN_BEDROCK", "AWS_BEDROCK_BASE_URL"}

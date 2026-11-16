@@ -130,7 +130,7 @@ module "lambda_action_sweep_control" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "eval.sfn_handlers.sweep_control_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = local.eval_lambda_zip
   source_code_hash       = filebase64sha256(local.eval_lambda_zip)
 
@@ -230,7 +230,7 @@ module "lambda_action_sweep_task" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "eval.sfn_handlers.sweep_task_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = local.eval_lambda_zip
   source_code_hash       = filebase64sha256(local.eval_lambda_zip)
 

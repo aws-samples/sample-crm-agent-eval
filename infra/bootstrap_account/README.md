@@ -85,7 +85,7 @@ terraform init -backend=false -input=false -plugin-dir=../.terraform/providers
 terraform validate
 ```
 
-`.terraform.lock.hcl` carries the same `hashicorp/aws` 6.71.0 entry as `infra/.terraform.lock.hcl`.
+`.terraform.lock.hcl` carries the same `hashicorp/aws` 6.72.0 entry as `infra/.terraform.lock.hcl`.
 
 ## Common failures
 
@@ -107,7 +107,7 @@ terraform validate
 
 ## Destroy and the account setting
 
-The `hashicorp/aws` 6.71.0 schema for `aws_api_gateway_account` has no `reset_on_delete` argument
+The `hashicorp/aws` 6.72.0 schema for `aws_api_gateway_account` has no `reset_on_delete` argument
 (checked with `terraform providers schema -json`). The provider's v6 upgrade guide says destroy now
 always resets the API Gateway account settings, so `--destroy` clears the account+region
 `cloudwatchRoleArn`. Any other workload's API Gateway logging in that account and region stops with

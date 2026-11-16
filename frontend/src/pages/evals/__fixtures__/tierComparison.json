@@ -42,12 +42,12 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
@@ -62,17 +62,32 @@
               "—"
             ],
             [
-              "Input tokens",
-              "100",
+              "Total input tokens",
+              "160",
               "100"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "50",
+              "50"
+            ],
+            [
+              "Cache write tokens",
               "10",
               "10"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "100",
+              "40"
+            ],
+            [
+              "Total output tokens",
+              "10",
+              "10"
+            ],
+            [
+              "Cost per applicable task",
               "withheld",
               "withheld"
             ],
@@ -83,6 +98,16 @@
             ],
             [
               "Budget-exhausted tasks",
+              "1",
+              "1"
+            ],
+            [
+              "Truncated tool calls",
+              "0",
+              "0"
+            ],
+            [
+              "Truncated tasks",
               "0",
               "0"
             ]
@@ -123,12 +148,12 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
@@ -143,17 +168,32 @@
               "—"
             ],
             [
-              "Input tokens",
-              "200",
+              "Total input tokens",
+              "320",
               "200"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "100",
+              "100"
+            ],
+            [
+              "Cache write tokens",
               "20",
               "20"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "200",
+              "80"
+            ],
+            [
+              "Total output tokens",
+              "20",
+              "20"
+            ],
+            [
+              "Cost per applicable task",
               "withheld",
               "withheld"
             ],
@@ -163,29 +203,19 @@
               "—"
             ],
             [
-              "Delegation outcome: data",
-              "2",
-              "0"
-            ],
-            [
-              "Delegation outcome: no_match",
+              "Budget-exhausted tasks",
               "0",
               "0"
             ],
             [
-              "Delegation outcome: denied",
-              "1",
-              "0"
+              "Truncated tool calls",
+              "not applicable",
+              "not applicable"
             ],
             [
-              "Delegation outcome: tool_failure",
-              "0",
-              "0"
-            ],
-            [
-              "Delegation outcome: none",
-              "1",
-              "4"
+              "Truncated tasks",
+              "not applicable",
+              "not applicable"
             ]
           ]
         },
@@ -224,12 +254,12 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured",
               "not measured"
             ],
@@ -244,17 +274,32 @@
               "—"
             ],
             [
-              "Input tokens",
-              "300",
+              "Total input tokens",
+              "480",
               "300"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "150",
+              "150"
+            ],
+            [
+              "Cache write tokens",
               "30",
               "30"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "300",
+              "120"
+            ],
+            [
+              "Total output tokens",
+              "30",
+              "30"
+            ],
+            [
+              "Cost per applicable task",
               "withheld",
               "withheld"
             ],
@@ -264,18 +309,28 @@
               "not applicable"
             ],
             [
-              "Truncated tasks",
+              "Budget-exhausted tasks",
               "0",
               "0"
+            ],
+            [
+              "Truncated tool calls",
+              "2",
+              "2"
+            ],
+            [
+              "Truncated tasks",
+              "2",
+              "2"
             ]
           ]
         }
       ],
       "notes": [
-        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per task, all tasks divides the same total by every task the arm ran. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there.",
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both truncation rows are not applicable there.",
         "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
         "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
-        "Input tokens are each family's own reported count and are not like-for-like across families (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
+        "Total input tokens sums, per model call, the whole prompt the call sent, counted the same way for both families: the provider's reported input plus cache read and cache write tokens for Anthropic, whose reported input excludes them, and the reported input for OpenAI, whose reported input includes them, or that call's cache read plus cache write tokens where they exceed it. Cache read tokens and Cache write tokens sum the tier's tokens served from and written to the prompt cache. Uncached input tokens is Total input tokens minus Cache read tokens minus Cache write tokens, so in every column Total input tokens = Cache read tokens + Cache write tokens + Uncached input tokens exactly. Total output tokens sums the tier's output tokens, reasoning tokens included. The per-model tables below keep each family's own reported input count (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
         "Stub-mode columns ran the deterministic stub provider: no live model was invoked, so latency is not measured there.",
         "Cost cells read withheld where the price table is marked provisional."
       ]
@@ -317,11 +372,11 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured"
             ],
             [
@@ -333,15 +388,27 @@
               "—"
             ],
             [
-              "Input tokens",
-              "100"
+              "Total input tokens",
+              "160"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "50"
+            ],
+            [
+              "Cache write tokens",
               "10"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "100"
+            ],
+            [
+              "Total output tokens",
+              "10"
+            ],
+            [
+              "Cost per applicable task",
               "withheld"
             ],
             [
@@ -350,6 +417,14 @@
             ],
             [
               "Budget-exhausted tasks",
+              "1"
+            ],
+            [
+              "Truncated tool calls",
+              "0"
+            ],
+            [
+              "Truncated tasks",
               "0"
             ]
           ]
@@ -383,11 +458,11 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured"
             ],
             [
@@ -399,15 +474,27 @@
               "—"
             ],
             [
-              "Input tokens",
-              "200"
+              "Total input tokens",
+              "320"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "100"
+            ],
+            [
+              "Cache write tokens",
               "20"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "200"
+            ],
+            [
+              "Total output tokens",
+              "20"
+            ],
+            [
+              "Cost per applicable task",
               "withheld"
             ],
             [
@@ -415,24 +502,16 @@
               "0"
             ],
             [
-              "Delegation outcome: data",
-              "1"
-            ],
-            [
-              "Delegation outcome: no_match",
+              "Budget-exhausted tasks",
               "0"
             ],
             [
-              "Delegation outcome: denied",
-              "0"
+              "Truncated tool calls",
+              "not applicable"
             ],
             [
-              "Delegation outcome: tool_failure",
-              "0"
-            ],
-            [
-              "Delegation outcome: none",
-              "0"
+              "Truncated tasks",
+              "not applicable"
             ]
           ]
         },
@@ -465,11 +544,11 @@
               "withheld"
             ],
             [
-              "P95 latency per completed task (ms)",
+              "P50 latency per completed task (ms)",
               "not measured"
             ],
             [
-              "P50 latency per completed task (ms)",
+              "P95 latency per completed task (ms)",
               "not measured"
             ],
             [
@@ -481,15 +560,27 @@
               "—"
             ],
             [
-              "Input tokens",
-              "300"
+              "Total input tokens",
+              "480"
             ],
             [
-              "Output tokens",
+              "Cache read tokens",
+              "150"
+            ],
+            [
+              "Cache write tokens",
               "30"
             ],
             [
-              "Cost per task, all tasks",
+              "Uncached input tokens",
+              "300"
+            ],
+            [
+              "Total output tokens",
+              "30"
+            ],
+            [
+              "Cost per applicable task",
               "withheld"
             ],
             [
@@ -497,17 +588,25 @@
               "not applicable"
             ],
             [
-              "Truncated tasks",
+              "Budget-exhausted tasks",
               "0"
+            ],
+            [
+              "Truncated tool calls",
+              "2"
+            ],
+            [
+              "Truncated tasks",
+              "2"
             ]
           ]
         }
       ],
       "notes": [
-        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per task, all tasks divides the same total by every task the arm ran. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there.",
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both truncation rows are not applicable there.",
         "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
         "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
-        "Input tokens are each family's own reported count and are not like-for-like across families (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
+        "Total input tokens sums, per model call, the whole prompt the call sent, counted the same way for both families: the provider's reported input plus cache read and cache write tokens for Anthropic, whose reported input excludes them, and the reported input for OpenAI, whose reported input includes them, or that call's cache read plus cache write tokens where they exceed it. Cache read tokens and Cache write tokens sum the tier's tokens served from and written to the prompt cache. Uncached input tokens is Total input tokens minus Cache read tokens minus Cache write tokens, so in every column Total input tokens = Cache read tokens + Cache write tokens + Uncached input tokens exactly. Total output tokens sums the tier's output tokens, reasoning tokens included. The per-model tables below keep each family's own reported input count (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
         "Stub-mode columns ran the deterministic stub provider: no live model was invoked, so latency is not measured there.",
         "Cost cells read withheld where the price table is marked provisional."
       ]

@@ -20,6 +20,10 @@ appear only when the arm's metrics carry them.
 :attr:`RunProvenance.runtime_identifier` is rendered unredacted and may be a full runtime ARN;
 ``results/raw/`` is gitignored. ``python3 -m eval.matrix`` re-renders the three top-level
 artifacts from the raw archives (:func:`load_raw_archives`, :func:`arm_from_report_fields`).
+
+Every arm report, ``matrix.json`` and ``tier_comparison`` block leads with
+:data:`RECORD_SHAPE_VERSION_KEY`; readers raise :class:`RecordShapeRefused` for any other record
+shape or a missing required field, and the CLI then exits 2 without writing a file.
 """
 
 from __future__ import annotations
@@ -44,6 +48,43 @@ class StubMatrixOverwriteRefused(RuntimeError):  # noqa: N818
     """An all-stub matrix was about to be written into :data:`TRACKED_RESULTS_DIR`."""
 
 
+#: Key of the record shape version, the first key of every arm report, ``matrix.json`` and
+#: ``tier_comparison`` block.
+RECORD_SHAPE_VERSION_KEY: Final[str] = "record_shape_version"
+
+#: The record shape this module writes and the only one its readers accept.
+RECORD_SHAPE_VERSION: Final[int] = 3
+
+
+class RecordShapeRefused(ValueError):  # noqa: N818
+    """A stored record is not :data:`RECORD_SHAPE_VERSION`, or lacks a required field."""
+
+
+def require_record_shape(fields: Mapping[str, object], *, subject: str) -> None:
+    """Raise :class:`RecordShapeRefused` unless ``fields`` carries :data:`RECORD_SHAPE_VERSION`.
+
+    Args:
+        fields: The stored record's top-level mapping.
+        subject: What the record is, named first in the error message.
+
+    Raises:
+        RecordShapeRefused: The version key is absent or carries any other value.
+    """
+    found = fields.get(RECORD_SHAPE_VERSION_KEY)
+    if type(found) is int and found == RECORD_SHAPE_VERSION:
+        return
+    found_text = "absent" if RECORD_SHAPE_VERSION_KEY not in fields else repr(found)
+    raise RecordShapeRefused(
+        f"{subject}: record shape {found_text}, required {RECORD_SHAPE_VERSION} — recorded in an "
+        "earlier format; not rendered"
+    )
+
+
+def _missing_field(subject: str, path: str) -> RecordShapeRefused:
+    """The :class:`RecordShapeRefused` for a required field absent from a stored record."""
+    return RecordShapeRefused(f"{subject}: missing required field {path}")
+
+
 @dataclass(frozen=True, slots=True)
 class RunProvenance:
     """Reproducibility provenance for one sweep arm's results.
@@ -64,12 +105,10 @@ class RunProvenance:
             (:func:`agents.answer_style.answer_style_prompt_sha256`), which ``turn_driver``
             prepends on every turn.
         prompt_bundle_sha256: SHA-256 of the prompt bundle every task unit of this arm ran with
-            (:func:`agents.prompt_bundle.prompt_bundle_sha256`), or ``None`` when the archive
-            carries none.
-        legacy_temperature: The ``temperature`` a past archive recorded, carried through as read.
-            Meaningful only when ``records_legacy_temperature`` is set.
-        records_legacy_temperature: Whether the archive this provenance was read from carried a
-            ``temperature`` key. New runs never set it.
+            (:func:`agents.prompt_bundle.prompt_bundle_sha256`), or ``None`` when the arm ran no
+            task unit.
+        prompt_caching: The prompt-caching method this arm's family ran with
+            (``providers.prompt_caching.CACHING[<family>]``). Required, keyword-only.
     """
 
     mode: str
@@ -82,39 +121,29 @@ class RunProvenance:
     price_table_version: str
     answer_style_sha256: str
     prompt_bundle_sha256: str | None = None
-    legacy_temperature: float | None = None
-    records_legacy_temperature: bool = False
+    prompt_caching: str = field(kw_only=True)
 
     def to_report_fields(self) -> dict[str, object]:
-        """Render this provenance as a flat, JSON-safe mapping in a fixed key order.
-
-        A legacy archive's ``temperature`` is emitted after ``effort``, where it was recorded.
-        """
-        fields: dict[str, object] = {
+        """Render this provenance as a flat, JSON-safe mapping in a fixed key order."""
+        return {
             "mode": self.mode,
             "timestamp": self.timestamp,
             "model_id": self.model_id,
             "effort": self.effort,
+            "dataset_seed": self.dataset_seed,
+            "git_revision": self.git_revision,
+            "runtime_identifier": self.runtime_identifier,
+            "price_table_version": self.price_table_version,
+            "answer_style_sha256": self.answer_style_sha256,
+            "prompt_bundle_sha256": self.prompt_bundle_sha256,
+            "prompt_caching": self.prompt_caching,
         }
-        if self.records_legacy_temperature:
-            fields["temperature"] = self.legacy_temperature
-        fields.update(
-            {
-                "dataset_seed": self.dataset_seed,
-                "git_revision": self.git_revision,
-                "runtime_identifier": self.runtime_identifier,
-                "price_table_version": self.price_table_version,
-                "answer_style_sha256": self.answer_style_sha256,
-                "prompt_bundle_sha256": self.prompt_bundle_sha256,
-            }
-        )
-        return fields
 
 
 #: The optional arm report key listing the task runs whose usage is a lower bound.
 USAGE_LOWER_BOUND_TASK_IDS_KEY: Final[str] = "usage_lower_bound_task_ids"
 
-#: The optional arm report key carrying `eval.metrics.TierTaskMetrics.to_report_fields`.
+#: The arm report key carrying `eval.metrics.TierTaskMetrics.to_report_fields`.
 TIER_TASK_METRICS_KEY: Final[str] = "tier_task_metrics"
 
 #: Arm-level key of the all-tier cost total: ``None`` while cost is withheld.
@@ -181,8 +210,7 @@ class ArmResult:
             before reporting token usage, so the arm's usage and cost under-count them. Written
             to the report only when non-empty; an archive without the key reads as empty.
         tier_task_metrics_fields: The arm's `eval.metrics.TierTaskMetrics.to_report_fields`
-            mapping. Written to the report only when non-empty; an archive without the key reads
-            as empty.
+            mapping, always written to the report.
         arm_totals_fields: The arm's all-tier :data:`ARM_TOTAL_KEYS`, written as top-level arm
             keys after ``model_metrics`` (whose figures cover the supervisor-tier arm model only).
             Written only when non-empty; an archive without the keys reads as empty.
@@ -203,6 +231,7 @@ class ArmResult:
     def to_report_fields(self) -> dict[str, object]:
         """Render this arm as a flat, JSON-safe mapping in a fixed key order."""
         fields: dict[str, object] = {
+            RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
             "provenance": self.provenance.to_report_fields(),
             "model_metrics": self.model_metrics_fields,
             **{
@@ -216,9 +245,8 @@ class ArmResult:
             "tool_metrics": list(self.tool_fields),
             "task_spread": list(self.task_spread_fields),
             "tier_summary": dict(self.tier_summary_fields),
+            TIER_TASK_METRICS_KEY: dict(self.tier_task_metrics_fields),
         }
-        if self.tier_task_metrics_fields:
-            fields[TIER_TASK_METRICS_KEY] = dict(self.tier_task_metrics_fields)
         if self.usage_lower_bound_task_ids:
             fields[USAGE_LOWER_BOUND_TASK_IDS_KEY] = list(self.usage_lower_bound_task_ids)
         return fields
@@ -240,10 +268,12 @@ class MatrixResult:
     def to_report_fields(self) -> dict[str, object]:
         """Render the full matrix as a flat, JSON-safe mapping in a fixed key order.
 
-        Leads with the ``tier_comparison`` block (:func:`tier_comparison`) and carries a
-        ``figure_semantics`` block after ``arms`` — see :func:`render_figure_semantics`.
+        Leads with :data:`RECORD_SHAPE_VERSION_KEY`, then the ``tier_comparison`` block
+        (:func:`tier_comparison`), and carries a ``figure_semantics`` block after ``arms`` — see
+        :func:`render_figure_semantics`.
         """
         return {
+            RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
             "tier_comparison": tier_comparison(self),
             "arms": [arm.to_report_fields() for arm in self.arms],
             "figure_semantics": render_figure_semantics(self),
@@ -777,6 +807,30 @@ REPEAT_COMPLETION_KEY: Final[str] = "completion_over_repeats"
 #: Fields of a completion-over-repeats figure (:meth:`eval.metrics.RepeatCompletion.to_report_fields`).
 _REPEAT_COMPLETION_FIELDS: Final[tuple[str, ...]] = ("completed", "applicable", "repeats", "rate")
 
+#: Integer token totals every ``tier_summary`` entry of a record shape 3 arm carries, in report
+#: order, copied into the tier comparison entry after ``input_tokens``.
+TIER_SUMMARY_TOKEN_KEYS: Final[tuple[str, ...]] = (
+    "total_prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
+
+#: Key of a tier comparison entry's uncached input figure, derived by :func:`uncached_input_tokens`.
+UNCACHED_INPUT_TOKENS_KEY: Final[str] = "uncached_input_tokens"
+
+#: Per-tier task counters every ``tier_task_metrics.by_tier`` entry of a record shape 3 arm
+#: carries, copied into the tier comparison entry after ``retry_count``.
+TIER_TASK_COUNT_KEYS: Final[tuple[str, ...]] = (
+    "budget_exhausted_task_count",
+    "truncated_tool_call_count",
+    "truncated_task_count",
+)
+
+#: :data:`TIER_TASK_COUNT_KEYS` that are ``None`` at the subagent tier, which issues no tool call.
+_SUBAGENT_NULL_COUNT_KEYS: Final[frozenset[str]] = frozenset(
+    {"truncated_tool_call_count", "truncated_task_count"}
+)
+
 #: Note: definitions of every summary row.
 _TIER_COMPARISON_DEFINITIONS_NOTE: Final[str] = (
     "Model lists the tier's configured model and every model that spent tokens at the tier; "
@@ -790,8 +844,9 @@ _TIER_COMPARISON_DEFINITIONS_NOTE: Final[str] = (
     "tier in any repeat, where a task counts when its tier expectation was met in a strict majority "
     "of its applicable repeats, and N is the per-task repeat count. Cost per "
     "completed task divides the tier's total cost by its completed task count, so spend on tasks "
-    "that did not complete is included; Cost per task, all tasks divides the same total by every "
-    "task the arm ran. Latency per completed task sums the tier's measured call latencies within "
+    "that did not complete is included; Cost per applicable task divides the same total by the "
+    "tier's applicable task count (n of Task completion rate), so the two rows are equal when "
+    "every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within "
     "each completed task and takes the nearest-rank percentile over those tasks; a completed task "
     "with no measured call at the tier contributes no sample, and n counts the contributing "
     "tasks. Model invocations sums the tier's included invocations; Long-context invocations "
@@ -800,7 +855,11 @@ _TIER_COMPARISON_DEFINITIONS_NOTE: Final[str] = (
     "the tier's tool calls whose tool_failure result was followed, later in the same task, by a "
     "call to the same tool from the same role that returned data or no_match; such a call does "
     "not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is "
-    "not applicable there."
+    "not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out "
+    "at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, "
+    "the Supervisor's own direct calls at Supervisor and every call made inside a delegation at "
+    "ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no "
+    "tool call itself, so both truncation rows are not applicable there."
 )
 
 #: Note: columns keep run order and are never compared.
@@ -816,11 +875,19 @@ _TIER_COMPARISON_EFFORT_NOTE: Final[str] = (
     '"Reading these figures".'
 )
 
-#: Note: input tokens are not like-for-like across families.
+#: Note: what each token row counts.
 _TIER_COMPARISON_TOKENS_NOTE: Final[str] = (
-    "Input tokens are each family's own reported count and are not like-for-like across "
-    f"families (token_accounting_disclosure, {_SEMANTICS_SOURCE}); see `input_tokens` "
-    'comparability under "Reading these figures".'
+    "Total input tokens sums, per model call, the whole prompt the call sent, counted the same way "
+    "for both families: the provider's reported input plus cache read and cache write tokens for "
+    "Anthropic, whose reported input excludes them, and the reported input for OpenAI, whose "
+    "reported input includes them, or that call's cache read plus cache write tokens where they "
+    "exceed it. Cache read tokens and Cache write tokens sum the tier's tokens served from and "
+    "written to the prompt cache. Uncached input tokens is Total input tokens minus Cache read "
+    "tokens minus Cache write tokens, so in every column Total input tokens = Cache read tokens + "
+    "Cache write tokens + Uncached input tokens exactly. Total output tokens sums the tier's "
+    "output tokens, reasoning tokens included. The per-model tables below keep each family's own "
+    f"reported input count (token_accounting_disclosure, {_SEMANTICS_SOURCE}); see "
+    '`input_tokens` comparability under "Reading these figures".'
 )
 
 #: Conditional note: at least one column ran the stub provider.
@@ -930,15 +997,14 @@ def _tier_comparison_entry(arm: ArmResult, tier: str) -> dict[str, object]:
 
     withheld = bool(arm.model_metrics_fields.get("cost_withheld_provisional"))
     cost_total = summary.get("cost_total") if summary is not None else None
-    task_count = len(arm.task_score_fields)
     cost_per_completed_task: float | None = None
-    cost_per_task: float | None = None
+    cost_per_applicable_task: float | None = None
     if not withheld and _is_number(cost_total):
         total = float(cast(float, cost_total))
         if isinstance(met, int) and not isinstance(met, bool) and met >= 1:
             cost_per_completed_task = total / met
-        if task_count >= 1:
-            cost_per_task = total / task_count
+        if isinstance(applicable, int) and not isinstance(applicable, bool) and applicable >= 1:
+            cost_per_applicable_task = total / applicable
 
     accuracy = arm.aggregate_score_fields.get("mean_correctness") if tier == "supervisor" else rate
 
@@ -950,7 +1016,7 @@ def _tier_comparison_entry(arm: ArmResult, tier: str) -> dict[str, object]:
         "accuracy": accuracy,
         "cost_withheld_provisional": withheld,
         "cost_per_completed_task": cost_per_completed_task,
-        "cost_per_task": cost_per_task,
+        "cost_per_applicable_task": cost_per_applicable_task,
         "completed_task_latency_ms_p50": (
             by_tier.get("completed_task_latency_ms_p50") if by_tier is not None else None
         ),
@@ -964,24 +1030,23 @@ def _tier_comparison_entry(arm: ArmResult, tier: str) -> dict[str, object]:
         "long_context_invocation_count": (
             summary.get("long_context_invocation_count") if summary is not None else None
         ),
-        "input_tokens": summary.get("input_tokens") if summary is not None else None,
+        **{
+            key: summary.get(key) if summary is not None else None
+            for key in ("input_tokens", *TIER_SUMMARY_TOKEN_KEYS)
+        },
+        UNCACHED_INPUT_TOKENS_KEY: (
+            uncached_input_tokens(summary) if summary is not None else None
+        ),
         "output_tokens": summary.get("output_tokens") if summary is not None else None,
         "retry_count": by_tier.get("retry_count") if by_tier is not None else None,
+        **{key: by_tier.get(key) if by_tier is not None else None for key in TIER_TASK_COUNT_KEYS},
     }
-    if tier == "supervisor":
-        entry["budget_exhausted_task_count"] = sum(
-            1 for task in arm.task_score_fields if task.get("budget_exhausted") is True
-        )
-    elif tier == "subagent":
+    if tier == "subagent":
         outcomes = block.get("delegation_outcomes") if block is not None else None
         entry["delegation_outcomes"] = (
             {key: _as_mapping(outcomes).get(key) for key in _DELEGATION_OUTCOME_KEYS}
             if isinstance(outcomes, Mapping)
             else None
-        )
-    else:
-        entry["truncated_task_count"] = sum(
-            1 for task in arm.task_score_fields if task.get("truncated") is True
         )
     return entry
 
@@ -1020,11 +1085,13 @@ def tier_comparison(matrix: MatrixResult) -> dict[str, object]:
         matrix: The matrix to summarise.
 
     Returns:
-        ``{"columns": [...], "tiers": {"supervisor"|"subagent"|"tool": [entry per column]},
-        "notes": [...]}`` in a fixed key order.
+        ``{RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION, "columns": [...],
+        "tiers": {"supervisor"|"subagent"|"tool": [entry per column]}, "notes": [...]}`` in a
+        fixed key order.
     """
     labels = _column_labels(matrix)
     return {
+        RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,
         "columns": [
             _tier_comparison_column(arm, label)
             for arm, label in zip(matrix.arms, labels, strict=True)
@@ -1067,7 +1134,6 @@ def _format_scalar(value: object) -> str:
 
 
 #: The provenance fields every arm carries, in :meth:`RunProvenance.to_report_fields`'s key order.
-#: An archive may omit the fields in :data:`_OPTIONAL_PROVENANCE_FIELDS`.
 _PROVENANCE_FIELDS: tuple[str, ...] = (
     "mode",
     "timestamp",
@@ -1079,10 +1145,8 @@ _PROVENANCE_FIELDS: tuple[str, ...] = (
     "price_table_version",
     "answer_style_sha256",
     "prompt_bundle_sha256",
+    "prompt_caching",
 )
-
-#: Optional provenance fields; absent reads as ``None``.
-_OPTIONAL_PROVENANCE_FIELDS: frozenset[str] = frozenset({"prompt_bundle_sha256"})
 
 #: Fixed column order for each arm's model-metrics block in ``matrix.md``, cost fields last.
 _MODEL_METRICS_FIELDS: tuple[str, ...] = (
@@ -1621,6 +1685,48 @@ def _latency_cell(entry: Mapping[str, object], key: str, *, stub: bool) -> str:
     return f"{_format_scalar(entry.get(key))} (n={count})"
 
 
+def uncached_input_tokens(figures: Mapping[str, object]) -> int | None:
+    """Return ``total_prompt_tokens - cache_read_tokens - cache_write_tokens`` from ``figures``.
+
+    Accepts a ``tier_summary`` entry or a tier comparison entry.
+
+    Returns:
+        The uncached input token count, or ``None`` when any of the three figures is not an
+        integer.
+
+    Raises:
+        ValueError: The cache counts exceed the total, which a per-call sum cannot produce.
+    """
+    total, read, write = (figures.get(key) for key in TIER_SUMMARY_TOKEN_KEYS)
+    if not all(type(value) is int for value in (total, read, write)):
+        return None
+    uncached = cast(int, total) - cast(int, read) - cast(int, write)
+    if uncached < 0:
+        raise ValueError(
+            f"total_prompt_tokens {total} is less than cache_read_tokens {read} plus "
+            f"cache_write_tokens {write}"
+        )
+    return uncached
+
+
+#: The tier comparison's token rows: label and entry key, in row order.
+_TOKEN_ROWS: Final[tuple[tuple[str, str], ...]] = (
+    ("Total input tokens", "total_prompt_tokens"),
+    ("Cache read tokens", "cache_read_tokens"),
+    ("Cache write tokens", "cache_write_tokens"),
+    ("Uncached input tokens", UNCACHED_INPUT_TOKENS_KEY),
+    ("Total output tokens", "output_tokens"),
+)
+
+
+#: The tier comparison's per-tier task-count rows: label and entry key, in row order.
+_TASK_COUNT_ROWS: Final[tuple[tuple[str, str], ...]] = (
+    ("Budget-exhausted tasks", "budget_exhausted_task_count"),
+    ("Truncated tool calls", "truncated_tool_call_count"),
+    ("Truncated tasks", "truncated_task_count"),
+)
+
+
 def _tier_comparison_rows(
     tier: str, entries: Sequence[Mapping[str, object]], columns: Sequence[Mapping[str, object]]
 ) -> list[tuple[str, ...]]:
@@ -1650,12 +1756,22 @@ def _tier_comparison_rows(
             return "withheld"
         return _format_scalar(entry.get(key))
 
+    def _task_count(entry: Mapping[str, object], key: str) -> str:
+        if tier == "subagent" and key in _SUBAGENT_NULL_COUNT_KEYS:
+            return "not applicable"
+        return _format_scalar(entry.get(key))
+
+    def _token_cell(entry: Mapping[str, object], key: str) -> str:
+        if key == UNCACHED_INPUT_TOKENS_KEY:
+            return _format_scalar(uncached_input_tokens(entry))
+        return _format_scalar(entry.get(key))
+
     def _retries(entry: Mapping[str, object]) -> str:
         if tier == "tool":
             return "not applicable"
         return _format_scalar(entry.get("retry_count"))
 
-    rows = [
+    return [
         _row("Model", [_model(e) for e in entries]),
         _row("Effort", [_effort(e) for e in entries]),
         _row(
@@ -1668,56 +1784,26 @@ def _tier_comparison_rows(
         ),
         _row("Task accuracy", [_accuracy(e) for e in entries]),
         _row("Cost per completed task", [_cost(e, "cost_per_completed_task") for e in entries]),
-        _row(
-            "P95 latency per completed task (ms)",
-            [
-                _latency_cell(e, "completed_task_latency_ms_p95", stub=stub)
-                for e, stub in zip(entries, stubs, strict=True)
-            ],
-        ),
-        _row(
-            "P50 latency per completed task (ms)",
-            [
-                _latency_cell(e, "completed_task_latency_ms_p50", stub=stub)
-                for e, stub in zip(entries, stubs, strict=True)
-            ],
+        *(
+            _row(
+                f"{percentile} latency per completed task (ms)",
+                [_latency_cell(e, key, stub=stub) for e, stub in zip(entries, stubs, strict=True)],
+            )
+            for percentile, key in (
+                ("P50", "completed_task_latency_ms_p50"),
+                ("P95", "completed_task_latency_ms_p95"),
+            )
         ),
         _row("Model invocations", [_format_scalar(e.get("invocation_count")) for e in entries]),
         _row(
             "Long-context invocations",
             [_format_scalar(e.get("long_context_invocation_count")) for e in entries],
         ),
-        _row("Input tokens", [_format_scalar(e.get("input_tokens")) for e in entries]),
-        _row("Output tokens", [_format_scalar(e.get("output_tokens")) for e in entries]),
-        _row("Cost per task, all tasks", [_cost(e, "cost_per_task") for e in entries]),
+        *(_row(label, [_token_cell(e, key) for e in entries]) for label, key in _TOKEN_ROWS),
+        _row("Cost per applicable task", [_cost(e, "cost_per_applicable_task") for e in entries]),
         _row("Self-corrected retries", [_retries(e) for e in entries]),
+        *(_row(label, [_task_count(e, key) for e in entries]) for label, key in _TASK_COUNT_ROWS),
     ]
-    if tier == "supervisor":
-        rows.append(
-            _row(
-                "Budget-exhausted tasks",
-                [_format_scalar(e.get("budget_exhausted_task_count")) for e in entries],
-            )
-        )
-    elif tier == "subagent":
-        for kind in _DELEGATION_OUTCOME_KEYS:
-            rows.append(
-                _row(
-                    f"Delegation outcome: {kind}",
-                    [
-                        _format_scalar(_as_mapping(e.get("delegation_outcomes")).get(kind))
-                        for e in entries
-                    ],
-                )
-            )
-    else:
-        rows.append(
-            _row(
-                "Truncated tasks",
-                [_format_scalar(e.get("truncated_task_count")) for e in entries],
-            )
-        )
-    return rows
 
 
 def _summary_list(summary: Mapping[str, object], key: str) -> list[object]:
@@ -1744,6 +1830,14 @@ def _require_entry_lists(tier: str, entry: Mapping[str, object]) -> None:
         raise ValueError(f"tier comparison summary tier {tier!r} has a non-string effort")
 
 
+#: Tier comparison entry keys a record shape 3 summary must carry.
+_REQUIRED_ENTRY_KEYS: Final[tuple[str, ...]] = (
+    "cost_per_applicable_task",
+    *TIER_SUMMARY_TOKEN_KEYS,
+    *TIER_TASK_COUNT_KEYS,
+)
+
+
 def tier_comparison_table(summary: Mapping[str, object]) -> dict[str, object]:
     """Format a :func:`tier_comparison` summary as display tables of cell strings.
 
@@ -1751,7 +1845,8 @@ def tier_comparison_table(summary: Mapping[str, object]) -> dict[str, object]:
     ``## Tier comparison summary`` section of ``matrix.md`` is rendered from this result.
 
     Args:
-        summary: A :func:`tier_comparison` mapping (``columns``, ``tiers``, ``notes``).
+        summary: A :func:`tier_comparison` mapping (``record_shape_version``, ``columns``,
+            ``tiers``, ``notes``).
 
     Returns:
         ``{"headers": ["Metric", <column label>...], "sections": [{"tier", "heading",
@@ -1759,8 +1854,12 @@ def tier_comparison_table(summary: Mapping[str, object]) -> dict[str, object]:
         ToolCall order.
 
     Raises:
+        RecordShapeRefused: ``summary`` is not record shape :data:`RECORD_SHAPE_VERSION`, or an
+            entry lacks ``cost_per_applicable_task`` or one of :data:`TIER_SUMMARY_TOKEN_KEYS` or
+            :data:`TIER_TASK_COUNT_KEYS`.
         ValueError: ``summary`` is not in the :func:`tier_comparison` shape.
     """
+    require_record_shape(summary, subject="tier comparison summary")
     columns = _summary_list(summary, "columns")
     if not all(isinstance(column, Mapping) for column in columns):
         raise ValueError("tier comparison summary column is not an object")
@@ -1781,7 +1880,10 @@ def tier_comparison_table(summary: Mapping[str, object]) -> dict[str, object]:
         ):
             raise ValueError(f"tier comparison summary tier {tier!r} does not match its columns")
         typed_entries = cast(list[Mapping[str, object]], entries)
-        for entry in typed_entries:
+        for index, entry in enumerate(typed_entries):
+            for key in _REQUIRED_ENTRY_KEYS:
+                if key not in entry:
+                    raise _missing_field("tier comparison summary", f"tiers.{tier}[{index}].{key}")
             _require_entry_lists(tier, entry)
         rows = _tier_comparison_rows(tier, typed_entries, typed_columns)
         sections.append({"tier": tier, "heading": heading, "rows": [list(row) for row in rows]})
@@ -1855,13 +1957,15 @@ _SUMMARY_CSV_TIER_SUFFIXES: Final[tuple[str, ...]] = (
     *(f"{REPEAT_COMPLETION_KEY}_{name}" for name in _REPEAT_COMPLETION_FIELDS),
     "accuracy",
     "cost_per_completed_task",
-    "cost_per_task",
+    "cost_per_applicable_task",
     "completed_task_latency_ms_p50",
     "completed_task_latency_ms_p95",
     "latency_sample_count",
     "invocation_count",
     "long_context_invocation_count",
     "input_tokens",
+    *TIER_SUMMARY_TOKEN_KEYS,
+    UNCACHED_INPUT_TOKENS_KEY,
     "output_tokens",
 )
 
@@ -1875,9 +1979,12 @@ def _summary_csv_columns() -> tuple[str, ...]:
             for tier, _ in _TIER_COMPARISON_SECTIONS
             for suffix in _SUMMARY_CSV_TIER_SUFFIXES
         ),
-        "summary_supervisor_budget_exhausted_task_count",
+        *(
+            f"summary_{tier}_{key}"
+            for tier, _ in _TIER_COMPARISON_SECTIONS
+            for key in TIER_TASK_COUNT_KEYS
+        ),
         *(f"summary_subagent_delegation_{kind}" for kind in _DELEGATION_OUTCOME_KEYS),
-        "summary_tool_truncated_task_count",
         *(f"summary_{tier}_retry_count" for tier, _ in _TIER_COMPARISON_SECTIONS),
     )
 
@@ -1913,18 +2020,14 @@ def _summary_csv_rows(matrix: MatrixResult) -> list[dict[str, str]]:
                 values[f"{REPEAT_COMPLETION_KEY}_{name}"] = over_repeats.get(name)
             for suffix in _SUMMARY_CSV_TIER_SUFFIXES:
                 row[f"summary_{tier}_{suffix}"] = _csv_cell(values[suffix])
-        supervisor = tiers["supervisor"][index]
-        subagent = tiers["subagent"][index]
-        tool = tiers["tool"][index]
-        row["summary_supervisor_budget_exhausted_task_count"] = _csv_cell(
-            supervisor["budget_exhausted_task_count"]
-        )
-        outcomes = subagent["delegation_outcomes"]
+        for tier, _ in _TIER_COMPARISON_SECTIONS:
+            for key in TIER_TASK_COUNT_KEYS:
+                row[f"summary_{tier}_{key}"] = _csv_cell(tiers[tier][index][key])
+        outcomes = tiers["subagent"][index]["delegation_outcomes"]
         for kind in _DELEGATION_OUTCOME_KEYS:
             row[f"summary_subagent_delegation_{kind}"] = _csv_cell(
                 _as_mapping(outcomes).get(kind) if outcomes is not None else None
             )
-        row["summary_tool_truncated_task_count"] = _csv_cell(tool["truncated_task_count"])
         for tier, _ in _TIER_COMPARISON_SECTIONS:
             row[f"summary_{tier}_retry_count"] = _csv_cell(tiers[tier][index]["retry_count"])
         rows.append(row)
@@ -2064,6 +2167,27 @@ def archive_raw_run(arm: ArmResult, raw_dir: Path) -> Path:
     return path
 
 
+def _require_tier_task_counts(block: Mapping[str, object], *, subject: str) -> None:
+    """Raise :class:`RecordShapeRefused` unless every tier carries its :data:`TIER_TASK_COUNT_KEYS`.
+
+    Each count is an integer, except those in :data:`_SUBAGENT_NULL_COUNT_KEYS`, which are
+    ``None`` at the subagent tier.
+    """
+    by_tier = block.get("by_tier")
+    if not isinstance(by_tier, Mapping):
+        raise _missing_field(subject, f"{TIER_TASK_METRICS_KEY}.by_tier")
+    for tier in _LATENCY_TIERS:
+        path = f"{TIER_TASK_METRICS_KEY}.by_tier.{tier}"
+        tier_entry = by_tier.get(tier)
+        if not isinstance(tier_entry, Mapping):
+            raise _missing_field(subject, path)
+        for key in TIER_TASK_COUNT_KEYS:
+            value = tier_entry.get(key, ...)
+            expects_null = tier == "subagent" and key in _SUBAGENT_NULL_COUNT_KEYS
+            if (value is not None) if expects_null else (type(value) is not int):
+                raise _missing_field(subject, f"{path}.{key}")
+
+
 def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
     """Reconstruct an :class:`ArmResult` from its :meth:`ArmResult.to_report_fields` output.
 
@@ -2077,9 +2201,15 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
         The reconstructed arm.
 
     Raises:
-        ValueError: When a required block or provenance field is absent, or a block is not an
-            object.
+        RecordShapeRefused: ``fields`` is not record shape :data:`RECORD_SHAPE_VERSION`, or a
+            required provenance field (``prompt_caching`` a string), ``tier_summary`` tier or
+            ``tier_task_metrics`` tier is absent, a ``tier_summary`` entry lacks an integer
+            :data:`TIER_SUMMARY_TOKEN_KEYS` figure, or a ``tier_task_metrics.by_tier`` entry lacks
+            a :data:`TIER_TASK_COUNT_KEYS` count of the right type.
+        ValueError: A block is not an object, or an aggregation is malformed.
     """
+    subject = "raw archive"
+    require_record_shape(fields, subject=subject)
 
     def _block(name: str) -> Mapping[str, object]:
         value = fields.get(name)
@@ -2088,16 +2218,14 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
         return cast(Mapping[str, object], value)
 
     provenance_fields = _block("provenance")
-    missing = [
-        name
-        for name in _PROVENANCE_FIELDS
-        if name not in provenance_fields and name not in _OPTIONAL_PROVENANCE_FIELDS
-    ]
-    if missing:
-        raise ValueError(f"raw archive provenance is missing field(s) {missing}")
+    for name in _PROVENANCE_FIELDS:
+        if name not in provenance_fields:
+            raise _missing_field(subject, f"provenance.{name}")
     effort = provenance_fields["effort"]
-    temperature = provenance_fields.get("temperature")
-    bundle_digest = provenance_fields.get("prompt_bundle_sha256")
+    bundle_digest = provenance_fields["prompt_bundle_sha256"]
+    prompt_caching = provenance_fields["prompt_caching"]
+    if not isinstance(prompt_caching, str):
+        raise _missing_field(subject, "provenance.prompt_caching")
     provenance = RunProvenance(
         mode=str(provenance_fields["mode"]),
         timestamp=str(provenance_fields["timestamp"]),
@@ -2109,8 +2237,7 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
         price_table_version=str(provenance_fields["price_table_version"]),
         answer_style_sha256=str(provenance_fields["answer_style_sha256"]),
         prompt_bundle_sha256=None if bundle_digest is None else str(bundle_digest),
-        legacy_temperature=None if temperature is None else float(cast(float, temperature)),
-        records_legacy_temperature="temperature" in provenance_fields,
+        prompt_caching=prompt_caching,
     )
     task_scores = fields.get("task_scores")
     if not isinstance(task_scores, list):
@@ -2134,13 +2261,21 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
             "cannot be re-rendered"
         )
 
-    tier_summary = fields.get("tier_summary")
-    if tier_summary is None:
-        tier_summary = {}
+    if "tier_summary" not in fields:
+        raise _missing_field(subject, "tier_summary")
+    tier_summary = fields["tier_summary"]
     if not isinstance(tier_summary, Mapping):
         raise ValueError(
             "raw archive's 'tier_summary' is not an object, so it cannot be re-rendered"
         )
+    for tier in _LATENCY_TIERS:
+        tier_entry = tier_summary.get(tier)
+        if not isinstance(tier_entry, Mapping):
+            raise _missing_field(subject, f"tier_summary.{tier}")
+        for key in TIER_SUMMARY_TOKEN_KEYS:
+            value = tier_entry.get(key)
+            if type(value) is not int:
+                raise _missing_field(subject, f"tier_summary.{tier}.{key}")
 
     arm_totals = {key: fields[key] for key in ARM_TOTAL_KEYS if key in fields}
     count = arm_totals.get(ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY)
@@ -2158,13 +2293,14 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
             "re-rendered"
         )
 
-    tier_task_metrics = fields.get(TIER_TASK_METRICS_KEY)
-    if tier_task_metrics is None:
-        tier_task_metrics = {}
+    if TIER_TASK_METRICS_KEY not in fields:
+        raise _missing_field(subject, TIER_TASK_METRICS_KEY)
+    tier_task_metrics = fields[TIER_TASK_METRICS_KEY]
     if not isinstance(tier_task_metrics, Mapping):
         raise ValueError(
             f"raw archive's {TIER_TASK_METRICS_KEY!r} is not an object, so it cannot be re-rendered"
         )
+    _require_tier_task_counts(cast(Mapping[str, object], tier_task_metrics), subject=subject)
 
     return ArmResult(
         provenance=provenance,
@@ -2252,15 +2388,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         argv: Command-line arguments, defaulting to :data:`sys.argv`'s tail.
 
     Returns:
-        Process exit code: 0 on success, 2 when the selection could not be resolved.
+        Process exit code: 0 on success, 2 when the selection could not be resolved, an archive is
+        refused (:class:`RecordShapeRefused`) or the arms ran under different prompt bundles;
+        nothing is written on exit 2.
     """
     args = _build_arg_parser().parse_args(argv)
     try:
         arms = load_raw_archives(args.raw_dir, git_revision=args.git_revision)
+        matrix_result = build_matrix_result(arms)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    paths = write_matrix_artifacts(build_matrix_result(arms), args.output_dir)
+    paths = write_matrix_artifacts(matrix_result, args.output_dir)
     for arm in arms:
         print(
             f"re-rendered {arm.provenance.model_id} "

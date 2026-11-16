@@ -13,6 +13,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -1009,3 +1010,65 @@ def test_results_under_the_ceiling_pass_unchanged() -> None:
         {"tool": "search_opportunities", "body": _search_body(10)},
     ]
     assert _bounded(entries) == (entries, False)
+
+
+# --- the shared bound on the leaf path --------------------------------------------------------
+
+
+def _activities_body(count: int) -> dict[str, object]:
+    return {
+        "opportunity": {"opportunity_id": "opp-0000"},
+        "contacts": [{"contact_id": "cont-0000"}],
+        "activities": [{"activity_id": f"act-{n:04d}", "note": "x" * 700} for n in range(count)],
+    }
+
+
+def _leaf_tool_results(provider: _RoundsProvider) -> list[dict[str, Any]]:
+    tool_messages = [m for m in provider.seen[1] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    results = tool_messages[0]["tool_results"]
+    assert isinstance(results, list)
+    return [json.loads(str(entry["output"])) for entry in results]
+
+
+def test_the_next_round_receives_the_bounded_leaf_result() -> None:
+    from agents.events import TOOL_OUTPUT_TRUNCATED_KEY, TOOL_RESULT_BYTE_CEILING, TRUNCATION_MARKER
+
+    a, _ = _two_tools()
+    raw = {"statusCode": 200, "body": _activities_body(60)}
+    assert _size(raw["body"]) > TOOL_RESULT_BYTE_CEILING
+    _, provider = _run_rounds([[a], []], [raw])
+
+    (sent,) = _leaf_tool_results(provider)
+    body = sent["body"]
+    assert body[TOOL_OUTPUT_TRUNCATED_KEY] is True
+    assert body["activities"][-1] == {TRUNCATION_MARKER: True}
+    assert len(body["activities"]) < 61
+    assert body["contacts"] == [{"contact_id": "cont-0000"}]
+    assert _size(body) <= TOOL_RESULT_BYTE_CEILING
+
+
+def test_a_leaf_under_the_ceiling_reaches_the_next_round_unchanged() -> None:
+    a, _ = _two_tools()
+    raw = {"statusCode": 200, "body": _activities_body(3)}
+    _, provider = _run_rounds([[a], []], [raw])
+
+    assert _leaf_tool_results(provider) == [raw]
+
+
+def test_a_byte_ceiling_bound_on_a_non_items_list_is_flagged_everywhere() -> None:
+    a, _ = _two_tools()
+    result, _ = _run_rounds([[a]], [{"statusCode": 200, "body": _activities_body(60)}])
+
+    assert result.tool_calls[0].truncated is True
+    tool_results = [e for e in result.events if e.kind == "tool_result"]
+    assert tool_results and tool_results[0].truncated is True
+    assert result.outcome.data is not None and result.outcome.data["truncated"] is True
+
+
+def test_an_unbounded_leaf_is_not_flagged_truncated() -> None:
+    a, _ = _two_tools()
+    result, _ = _run_rounds([[a]], [{"statusCode": 200, "body": _activities_body(3)}])
+
+    assert result.tool_calls[0].truncated is False
+    assert result.outcome.data is not None and "truncated" not in result.outcome.data

@@ -386,7 +386,7 @@ def _instantiate_for_classification(exception_type: type[Exception]) -> Exceptio
     """Return an instance of ``exception_type``, bypassing ``__init__`` if construction fails."""
     try:
         return exception_type()
-    except (TypeError, KeyError):
+    except TypeError, KeyError:
         return exception_type.__new__(exception_type)
 
 

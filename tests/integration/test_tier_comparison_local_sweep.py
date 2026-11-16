@@ -51,23 +51,21 @@ _COMMON_ROWS = (
     "Task completion over repeats",
     "Task accuracy",
     "Cost per completed task",
-    "P95 latency per completed task (ms)",
     "P50 latency per completed task (ms)",
+    "P95 latency per completed task (ms)",
     "Model invocations",
     "Long-context invocations",
-    "Input tokens",
-    "Output tokens",
-    "Cost per task, all tasks",
+    "Total input tokens",
+    "Cache read tokens",
+    "Cache write tokens",
+    "Uncached input tokens",
+    "Total output tokens",
+    "Cost per applicable task",
     "Self-corrected retries",
+    "Budget-exhausted tasks",
+    "Truncated tool calls",
+    "Truncated tasks",
 )
-_SPECIFIC_ROWS = {
-    "Supervisor": ("Budget-exhausted tasks",),
-    "Subagent": tuple(
-        f"Delegation outcome: {kind}"
-        for kind in ("data", "no_match", "denied", "tool_failure", "none")
-    ),
-    "ToolCall": ("Truncated tasks",),
-}
 
 
 @dataclass(frozen=True)
@@ -192,7 +190,7 @@ def test_matrix_md_opens_with_the_summary_in_the_ac1_order(sweeps: _Sweeps) -> N
     assert positions == sorted(positions)
     for section in _SECTIONS:
         rows = _summary_table(markdown, section)
-        assert list(rows) == ["Metric", "---", *_COMMON_ROWS, *_SPECIFIC_ROWS[section]]
+        assert list(rows) == ["Metric", "---", *_COMMON_ROWS]
         assert all(len(cells) == len(DEFAULT_ARM_SPECS) for cells in rows.values())
         assert rows["Metric"] == [spec.family for spec in DEFAULT_ARM_SPECS]
 
@@ -201,7 +199,7 @@ def test_stub_columns_read_not_measured_for_latency(sweeps: _Sweeps) -> None:
     markdown = _markdown(sweeps)
     for section in _SECTIONS:
         rows = _summary_table(markdown, section)
-        for label in ("P95 latency per completed task (ms)", "P50 latency per completed task (ms)"):
+        for label in ("P50 latency per completed task (ms)", "P95 latency per completed task (ms)"):
             assert rows[label] == ["not measured"] * len(DEFAULT_ARM_SPECS)
 
 
@@ -209,7 +207,7 @@ def test_withheld_cost_cells_read_withheld(sweeps: _Sweeps) -> None:
     markdown = _markdown(sweeps)
     for section in _SECTIONS:
         rows = _summary_table(markdown, section)
-        for label in ("Cost per completed task", "Cost per task, all tasks"):
+        for label in ("Cost per completed task", "Cost per applicable task"):
             assert rows[label] == ["withheld"] * len(DEFAULT_ARM_SPECS)
 
 

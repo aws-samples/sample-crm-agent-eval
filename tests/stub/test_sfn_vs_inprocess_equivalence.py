@@ -133,6 +133,7 @@ def _sfn_shaped(store: Store) -> list[dict[str, Any]]:
                 tenant=TENANT,
                 family=spec.family,
                 turn_runner=runner,
+                repeat_index=ref.repeat_index,
             )
         )
     return [

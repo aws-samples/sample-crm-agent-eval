@@ -22,6 +22,7 @@ import pytest
 import scripts.smoke.store_principal_deny as smoke
 from botocore import xform_name
 from botocore.awsrequest import AWSResponse
+from botocore.exceptions import ClientError
 from botocore.validate import validate_parameters
 from scripts.smoke.harness import DEFER, CheckResult, context_for_test
 
@@ -1425,7 +1426,7 @@ def test_state_operator_list_must_match_the_stack_output(tmp_path: Path) -> None
             smoke.PROBE_GENERATE_DATA_KEY,
             Err("KMSInvalidStateException", "key is pending deletion"),
             DEFER,
-            "KMSInvalidStateException: key is pending deletion",
+            "unclassified error (KMSInvalidStateException)",
         ),
         (
             smoke.STATE_LOG_BUCKET,
@@ -1690,7 +1691,7 @@ def test_admin_simulation_pair_fails_when_the_deny_matches_the_operator_too(
         (_implicit_deny("logs:FilterLogEvents", _LOG_GROUP_ARN), "fail"),
     ],
 )
-def test_logs_probe_is_classified_and_unclassified_wording_defers_with_the_message(
+def test_logs_probe_is_classified_and_unclassified_wording_defers_with_the_code(
     tmp_path: Path, outcome: Err, status: str
 ) -> None:
     account = FakeAccount(logs_outcome=outcome)
@@ -1698,7 +1699,8 @@ def test_logs_probe_is_classified_and_unclassified_wording_defers_with_the_messa
     assert row.status == status
     if status == DEFER:
         assert row.defer_reason == "probe_call_unclassified_error"
-        assert outcome.message in row.detail
+        assert outcome.code in row.detail
+        assert outcome.message not in row.detail
 
 
 def test_a_successful_logs_read_defers_as_not_key_gated_and_never_passes(tmp_path: Path) -> None:
@@ -2334,3 +2336,44 @@ def test_key_policy_for_simulation_rewrites_only_star_resources() -> None:
     )
     single = json.loads(key_policy_for_simulation(untouched, _CURSOR_KEY_ARN))["Statement"]
     assert (single["Resource"], single["NotResource"]) == ("x", "*")
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(code: str, operation: str, status: int = 400) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": f"User: {_PLANTED_ARN} is not authorized"},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        operation,
+    )
+
+
+class _DeniedLambda:
+    def get_function_configuration(self, **_: Any) -> dict[str, Any]:
+        raise _planted("AccessDeniedException", "GetFunctionConfiguration")
+
+
+class TestNoAwsErrorMessageInDetails:
+    """A raised AWS call and a reached-resource probe name the code, never the message."""
+
+    def test_the_raised_descriptor_carries_the_code_only(self) -> None:
+        detail = smoke._raised("describe-table of t", _planted("AccessDeniedException", "X"))
+        assert detail == "describe-table of t raised AccessDeniedException"
+
+    def test_a_failed_discovery_call_names_the_code_only(self) -> None:
+        ctx = context_for_test(clients={"lambda": _DeniedLambda()})
+        result = smoke.discover_cursor_key(ctx)
+        assert isinstance(result, smoke.Unavailable)
+        assert "raised AccessDeniedException" in result.detail
+        assert _PLANTED_ARN not in result.detail
+
+    def test_a_reached_resource_probe_names_the_code_only(self) -> None:
+        row = smoke.classify_store_probe(
+            "s:GetObject", "bucket", _planted("NoSuchKey", "GetObject", 404), _PROBE_ROLE
+        )
+        assert row.status == "fail"
+        assert "reached the resource" in row.detail and "NoSuchKey" in row.detail
+        assert _PLANTED_ARN not in row.detail

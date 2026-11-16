@@ -87,6 +87,8 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    aws_error_detail,
+    exception_detail,
     run_main,
 )
 
@@ -1804,7 +1806,7 @@ def _role_exists(ctx: SmokeContext, role_name: str) -> bool | str:
     except Exception as exc:  # noqa: BLE001 - classified below; never silently treated as absent
         if _is_no_such_entity(exc):
             return False
-        return f"{type(exc).__name__}: {exc}"
+        return aws_error_detail("iam:GetRole", exc)
     return True
 
 
@@ -1901,7 +1903,10 @@ def _own_table_denied_check(
         decision, _ = _simulate_evaluation(ctx, role_arn, action, base_table_arn)
     except Exception as exc:  # noqa: BLE001 - report as a failing check, not a crash
         return CheckResult(
-            resource=role_name, check=check, status="fail", detail=f"simulate raised: {exc}"
+            resource=role_name,
+            check=check,
+            status="fail",
+            detail=aws_error_detail("iam:SimulatePrincipalPolicy", exc),
         )
     return CheckResult(
         resource=role_name,
@@ -1933,7 +1938,10 @@ def _scoped_index_allowed_check(
         )
     except Exception as exc:  # noqa: BLE001 - report as a failing check, not a crash
         return CheckResult(
-            resource=role_name, check=check, status="fail", detail=f"simulate raised: {exc}"
+            resource=role_name,
+            check=check,
+            status="fail",
+            detail=aws_error_detail("iam:SimulatePrincipalPolicy", exc),
         )
     return CheckResult(
         resource=role_name,
@@ -1961,7 +1969,7 @@ def _index_only_base_table_check(
             resource=role_name,
             check=check,
             status="fail",
-            detail=f"simulate_principal_policy raised: {exc}",
+            detail=aws_error_detail("iam:SimulatePrincipalPolicy", exc),
         )
     if decision == "no_result":
         return CheckResult(
@@ -2040,7 +2048,7 @@ def _extra_condition_row(
             resource=role_name,
             check=check,
             status="fail",
-            detail=f"simulate raised: {exc} ({subject})",
+            detail=f"{aws_error_detail('iam:SimulatePrincipalPolicy', exc)} ({subject})",
         )
     if allowed:
         ok = decision == "allowed" and not unset
@@ -2276,7 +2284,7 @@ def _probe_decision(
     try:
         return _simulate_with_leading_keys(ctx, role_arn, action, resource_arn, leading_keys)
     except Exception as exc:  # noqa: BLE001 - the caller's row fails on any non-decision
-        return f"an error ({type(exc).__name__}: {exc})"
+        return f"an error ({aws_error_detail('iam:SimulatePrincipalPolicy', exc)})"
 
 
 def _role_documents(
@@ -2314,7 +2322,7 @@ def _index_scope_denied_check(
             resource=role_name,
             check=check,
             status="fail",
-            detail=f"simulate_principal_policy raised: {exc} ({subject})",
+            detail=f"{aws_error_detail('iam:SimulatePrincipalPolicy', exc)} ({subject})",
         )
     if decision in ("explicitDeny", "implicitDeny"):
         return CheckResult(
@@ -2360,7 +2368,7 @@ def _conditioned_scope_denied_check(
                 resource=role_name,
                 check=check,
                 status="fail",
-                detail=f"simulate_principal_policy raised: {exc} ({subject})",
+                detail=f"{aws_error_detail('iam:SimulatePrincipalPolicy', exc)} ({subject})",
             )
         if decision not in ("explicitDeny", "implicitDeny"):
             return CheckResult(
@@ -2403,7 +2411,7 @@ def _conditioned_scope_rows(
             check=f"conditioned_scope_keys_derivable:{function}:{action}@{table}",
             status="fail",
             detail=(
-                f"no parser-derived out-of-scope key could be derived: {exc}. The "
+                f"no parser-derived out-of-scope key could be derived: {exception_detail(exc)}. The "
                 f"conditioned_scope_denied row probes only {PROBE_FOREIGN_KEY!r}"
             ),
         )
@@ -2484,7 +2492,9 @@ def _resolve_intended_grants(matrix: Mapping[str, Any]) -> _IntendedGrants:
         error = ""
     except Exception as exc:  # noqa: BLE001 - report as a failing check, not a crash
         computed = {}
-        error = f"could not read infra/main.tf's local.tool_dynamodb_grants: {exc}"
+        error = (
+            f"could not read infra/main.tf's local.tool_dynamodb_grants: {exception_detail(exc)}"
+        )
     intended: dict[str, set[tuple[str, str]]] = dict(documented)
     intended.update(computed)
     return _IntendedGrants(intended=intended, documented=documented, computed=computed, error=error)
@@ -2602,7 +2612,8 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
             check="index_only_grants_readable",
             status="fail",
             detail=(
-                f"could not read infra/main.tf's index-only grants: {exc}. Every index-only grant "
+                f"could not read infra/main.tf's index-only grants: {exception_detail(exc)}. Every "
+                "index-only grant "
                 "is simulated against its base-table ARN instead, so its own-grant row fails"
             ),
         )
@@ -2617,7 +2628,8 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
             check="conditioned_grants_readable",
             status="fail",
             detail=(
-                f"could not read the sweep and tool roles' leading_key_condition values: {exc}. "
+                "could not read the sweep and tool roles' leading_key_condition values: "
+                f"{exception_detail(exc)}. "
                 "Their own conditioned grants the matrix declares are refused rather than simulated, "
                 f"and each conditioned_scope_denied row probes only {PROBE_FOREIGN_KEY!r}"
             ),
@@ -2711,7 +2723,10 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
                     resource=role_name,
                     check="extra_conditions_readable",
                     status="fail",
-                    detail=f"could not read {SWEEP_GRANT_LOCALS[role_function]}: {exc}",
+                    detail=(
+                        f"could not read {SWEEP_GRANT_LOCALS[role_function]}: "
+                        f"{exception_detail(exc)}"
+                    ),
                 )
             else:
                 yield from extra_condition_rows(
@@ -2812,7 +2827,7 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
                             ctx, role_arn, action, simulated_arn, probe_keys or None
                         )
                     except Exception as exc:  # noqa: BLE001 - report as a failing check, not a crash
-                        inconclusive = f"simulate_principal_policy raised: {exc}"
+                        inconclusive = aws_error_detail("iam:SimulatePrincipalPolicy", exc)
                         break
                     if arn_decision == "no_result":
                         inconclusive = (
@@ -2973,7 +2988,7 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
                     resource=role_name,
                     check="no_dynamodb_wildcard",
                     status="fail",
-                    detail=f"could not load role policies: {documents_error}",
+                    detail=(f"could not load role policies: {exception_detail(documents_error)}"),
                 )
             )
             yield CheckResult(
@@ -2981,7 +2996,9 @@ def _role_matrix_checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C9
                 check="leading_keys:policies_unreadable",
                 status="fail",
                 detail=(
-                    f"could not load role policies ({documents_error}), so no statement's "
+                    f"could not load role policies "
+                    f"({exception_detail(documents_error)}), so no "
+                    "statement's "
                     "dynamodb:LeadingKeys condition was examined"
                 ),
             )
@@ -3203,7 +3220,7 @@ def _discover_role_arns(ctx: SmokeContext) -> tuple[dict[str, str], str | None]:
                 if label is not None:
                     found[label] = str(role["Arn"])
     except Exception as exc:  # noqa: BLE001 - reported on every row that needs a role
-        return found, f"iam:ListRoles raised {type(exc).__name__}: {exc}"
+        return found, aws_error_detail("iam:ListRoles", exc)
     return found, None
 
 
@@ -3212,7 +3229,11 @@ def _env_inputs(ctx: SmokeContext, account_id: str) -> tuple[str | None, str | N
     try:
         config = ctx.client("lambda").get_function_configuration(FunctionName=CURSOR_ENV_FUNCTION)
     except Exception as exc:  # noqa: BLE001 - reported on every row that needs these inputs
-        return None, None, f"get_function_configuration({CURSOR_ENV_FUNCTION}) raised {exc}"
+        return (
+            None,
+            None,
+            aws_error_detail(f"lambda:GetFunctionConfiguration({CURSOR_ENV_FUNCTION})", exc),
+        )
     env = (config.get("Environment") or {}).get("Variables") or {}
     key_arn = env.get(CURSOR_KEY_ENV) or None
     name = env.get(ALLOWLIST_PARAMETER_ENV) or None
@@ -3300,7 +3321,7 @@ def _approve_rows(
                     str(g["IndexName"]) for g in table.get("GlobalSecondaryIndexes") or ()
                 )
             except Exception as exc:  # noqa: BLE001 - reported on every approve row
-                problem = f"describe_table({physical}) raised {type(exc).__name__}: {exc}"
+                problem = aws_error_detail(f"dynamodb:DescribeTable({physical})", exc)
             if not problem and APPROVE_INDEX not in indexes:
                 problem = f"{physical} lists no {APPROVE_INDEX} index: {indexes}"
     if problem or role_arn is None:
@@ -3340,7 +3361,7 @@ def supplementary_checks(ctx: SmokeContext) -> Iterator[CheckResult]:
     try:
         account_id = str(ctx.client("sts").get_caller_identity()["Account"])
     except Exception as exc:  # noqa: BLE001 - reported on every row
-        detail = f"sts:GetCallerIdentity raised {type(exc).__name__}: {exc}"
+        detail = aws_error_detail("sts:GetCallerIdentity", exc)
         for label, role_name in NON_API_ROLE_NAMES.items():
             for check in (
                 "cursor_key_use_denied",
@@ -3573,7 +3594,10 @@ def _allowlist_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[Che
         )
     except Exception as exc:  # noqa: BLE001 - reported on the row
         yield _row(
-            inputs.parameter_name, ALLOWLIST_KEY_CHECKS[0], False, f"{type(exc).__name__}: {exc}"
+            inputs.parameter_name,
+            ALLOWLIST_KEY_CHECKS[0],
+            False,
+            aws_error_detail("ssm:DescribeParameters", exc),
         )
     try:
         parameter = ssm.get_parameter(Name=inputs.parameter_name, WithDecryption=True)["Parameter"]
@@ -3587,13 +3611,18 @@ def _allowlist_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[Che
         )
     except Exception as exc:  # noqa: BLE001 - reported on the row
         yield _row(
-            inputs.parameter_name, ALLOWLIST_KEY_CHECKS[1], False, f"{type(exc).__name__}: {exc}"
+            inputs.parameter_name,
+            ALLOWLIST_KEY_CHECKS[1],
+            False,
+            aws_error_detail("ssm:GetParameter", exc),
         )
     try:
         enabled = bool(kms.get_key_rotation_status(KeyId=key).get("KeyRotationEnabled"))
         yield _row(key, ALLOWLIST_KEY_CHECKS[2], enabled, f"KeyRotationEnabled={enabled}")
     except Exception as exc:  # noqa: BLE001 - reported on the row
-        yield _row(key, ALLOWLIST_KEY_CHECKS[2], False, f"{type(exc).__name__}: {exc}")
+        yield _row(
+            key, ALLOWLIST_KEY_CHECKS[2], False, aws_error_detail("kms:GetKeyRotationStatus", exc)
+        )
     try:
         tags = {
             str(t["TagKey"]): str(t["TagValue"])
@@ -3610,7 +3639,9 @@ def _allowlist_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[Che
             f"missing={missing} wrong={wrong}",
         )
     except Exception as exc:  # noqa: BLE001 - reported on the row
-        yield _row(key, ALLOWLIST_KEY_CHECKS[3], False, f"{type(exc).__name__}: {exc}")
+        yield _row(
+            key, ALLOWLIST_KEY_CHECKS[3], False, aws_error_detail("kms:ListResourceTags", exc)
+        )
     try:
         wildcards = _wildcard_allows(json.loads(inputs.key_policy))
         yield _row(
@@ -3688,7 +3719,7 @@ def _allowlist_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Iterator[Che
             status="defer",
             defer_reason="aws_managed_ssm_key_absent",
             detail=(
-                f"describe_key({AWS_SSM_KEY_ALIAS}) raised {type(exc).__name__}: {exc}; the "
+                f"{aws_error_detail(f'kms:DescribeKey({AWS_SSM_KEY_ALIAS})', exc)}; the "
                 "account's AWS managed SSM key ARN is unknown, so the Deny on decrypting under it "
                 "was not simulated"
             ),
@@ -3810,7 +3841,7 @@ def _allowlist_identity_rows(ctx: SmokeContext, inputs: _AllowlistInputs) -> Ite
             "dynamodb_table_key",
             ALLOWLIST_KEY_CHECKS[13],
             False,
-            f"the table key is unreadable: {type(exc).__name__}: {exc}",
+            f"the table key is unreadable: {exception_detail(exc)}",
         )
     cursor_users = {
         name: (arn, inputs.consumer_envs[name][CURSOR_KEY_ENV])
@@ -3852,7 +3883,7 @@ def allowlist_key_checks(ctx: SmokeContext) -> Iterator[CheckResult]:
     try:
         inputs = _allowlist_inputs(ctx)
     except Exception as exc:  # noqa: BLE001 - reported on every row
-        detail = f"allowlist inputs unreadable: {type(exc).__name__}: {exc}"
+        detail = f"allowlist inputs unreadable: {exception_detail(exc)}"
         for check in ALLOWLIST_KEY_CHECKS:
             yield _row(ALLOWLIST_KEY_OUTPUT, check, False, detail)
         return

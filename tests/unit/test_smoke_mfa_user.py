@@ -173,3 +173,35 @@ def test_a_pool_that_issues_no_access_token_fails_with_an_actionable_message() -
 
     with stubber, pytest.raises(RuntimeError, match="no AccessToken issued"):
         _provisioner_with(stubber, client).provision()
+
+
+def test_a_failed_deletion_names_the_aws_code_never_the_message() -> None:
+    planted_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+    client = boto3.client("cognito-idp", region_name="us-east-1")
+    stubber = Stubber(client)
+    _stub_user_creation(stubber)
+    stubber.add_response(
+        "admin_initiate_auth",
+        {"AuthenticationResult": {"AccessToken": _ACCESS_TOKEN}},
+        {
+            "UserPoolId": _USER_POOL_ID,
+            "ClientId": _SPA_CLIENT_ID,
+            "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+            "AuthParameters": ANY,
+        },
+    )
+    stubber.add_client_error(
+        "admin_delete_user",
+        service_error_code="AccessDeniedException",
+        service_message=f"User: {planted_arn} is not authorized",
+        http_status_code=400,
+    )
+
+    with stubber:
+        provisioner = _provisioner_with(stubber, client)
+        provisioner.provision()
+        [row] = list(provisioner.cleanup())
+
+    assert row.status == "fail"
+    assert "AdminDeleteUser failed (AccessDeniedException)" in row.detail
+    assert planted_arn not in row.detail

@@ -9,7 +9,10 @@ its own inference profile, re-aggregates the cost-bearing blocks with the sweep'
 
 An entry without ``inference_profile`` is refused unless ``--assume-inference-profile-prefix`` is
 given, in which case its profile is ``<prefix><model_id>``; the assertion is echoed to stderr and
-recorded in ``reprice.json``. An arm with no pre-aggregation file is refused, as is one whose
+recorded in ``reprice.json``. A pre-aggregation archive whose ``record_shape_version`` is not
+:data:`eval.matrix.RECORD_SHAPE_VERSION` exactly (an ``int``), or with an entry of any
+:data:`UNIT_STAMPED_ENTRY_KINDS` list lacking a string ``task_id`` or a non-negative integer
+``repeat_index``, is refused. An arm with no pre-aggregation file is refused, as is one whose
 per-call records disagree with the arm archive: per ``(tier, role, model_id)`` row, the call count
 and token sums must equal the archived ``tier_role_model_metrics``, and per tier the input and
 output token sums must equal the archived ``tier_summary``. Exit codes: ``0`` written, ``2``
@@ -39,15 +42,23 @@ from crm.metering import (
     cost_for_usage,
     family_for_model_id,
 )
-from eval.matrix import ArmResult, build_matrix_result, load_raw_archives, write_matrix_artifacts
+from eval.matrix import (
+    RECORD_SHAPE_VERSION,
+    RECORD_SHAPE_VERSION_KEY,
+    ArmResult,
+    build_matrix_result,
+    load_raw_archives,
+    write_matrix_artifacts,
+)
 from eval.metrics import (
     aggregate_model_metrics,
     aggregate_tier_role_model,
     aggregate_tier_summary,
+    attribution_prompt_tokens,
     not_measured_latency_metrics,
 )
 from eval.pricing import inference_profile_for, is_cost_provisional, load_price_table_status
-from eval.sweep_units import arm_total_fields
+from eval.sweep_units import UNIT_REPEAT_INDEX_KEY, UNIT_TASK_ID_KEY, arm_total_fields
 from providers.capabilities import Tier
 
 #: Per-call keys the pre-aggregation archive carries on every ``invocation_attributions`` entry.
@@ -55,6 +66,13 @@ INFERENCE_PROFILE_KEY: Final[str] = "inference_profile"
 PRICING_TIER_KEY: Final[str] = "pricing_tier"
 ROUTE_KEY: Final[str] = "route"
 ARCHIVED_PRICING_KEYS: Final[tuple[str, ...]] = (INFERENCE_PROFILE_KEY, PRICING_TIER_KEY, ROUTE_KEY)
+
+#: Pre-aggregation entry lists whose every entry names the unit that produced it.
+UNIT_STAMPED_ENTRY_KINDS: Final[tuple[str, ...]] = (
+    "invocation_attributions",
+    "tool_call_attributions",
+    "task_scores",
+)
 
 #: Subdirectory of the raw directory holding the pre-aggregation archives.
 PRE_AGGREGATION_DIRNAME: Final[str] = "pre-aggregation"
@@ -225,16 +243,39 @@ _ROW_CHECK_KEYS: Final[tuple[str, ...]] = (
     "output_tokens",
     "cache_read_tokens",
     "cache_write_tokens",
+    "prompt_tokens",
 )
+
+_TIER_CHECK_KEYS: Final[tuple[str, ...]] = (
+    "input_tokens",
+    "output_tokens",
+    "total_prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+)
+
+
+def _token_sums(attributions: Sequence[InvocationAttribution]) -> dict[str, int]:
+    return {
+        "input_tokens": sum(a.tokens.input_tokens for a in attributions),
+        "output_tokens": sum(a.tokens.output_tokens for a in attributions),
+        "cache_read_tokens": sum(a.cache.read_tokens for a in attributions),
+        "cache_write_tokens": sum(a.cache.write_tokens for a in attributions),
+    }
 
 
 def _row_figures(attributions: Sequence[InvocationAttribution]) -> dict[str, int]:
     return {
         "included_invocation_count": len(attributions),
-        "input_tokens": sum(a.tokens.input_tokens for a in attributions),
-        "output_tokens": sum(a.tokens.output_tokens for a in attributions),
-        "cache_read_tokens": sum(a.cache.read_tokens for a in attributions),
-        "cache_write_tokens": sum(a.cache.write_tokens for a in attributions),
+        **_token_sums(attributions),
+        "prompt_tokens": sum(attribution_prompt_tokens(a) for a in attributions),
+    }
+
+
+def _tier_figures(attributions: Sequence[InvocationAttribution]) -> dict[str, int]:
+    return {
+        **_token_sums(attributions),
+        "total_prompt_tokens": sum(attribution_prompt_tokens(a) for a in attributions),
     }
 
 
@@ -243,7 +284,8 @@ def cross_check_archive(arm: ArmResult, attributions: Sequence[InvocationAttribu
 
     Per ``(tier, role, model_id)``, the record count and token sums must equal the archived
     ``tier_role_model_metrics`` row (every key the row carries); per tier, the input and output
-    token sums must equal the archived ``tier_summary`` entry where it records them.
+    token sums, total prompt tokens and cache read/write sums must equal the archived
+    ``tier_summary`` entry where it records them.
 
     Raises:
         RepriceRefused: The archive has no rows to check against, or any figure disagrees.
@@ -277,12 +319,9 @@ def cross_check_archive(arm: ArmResult, attributions: Sequence[InvocationAttribu
     for tier, entry in arm.tier_summary_fields.items():
         if not isinstance(entry, Mapping):
             continue
-        tier_calls = [a for a in attributions if a.tier == tier]
-        sums = {
-            "input_tokens": sum(a.tokens.input_tokens for a in tier_calls),
-            "output_tokens": sum(a.tokens.output_tokens for a in tier_calls),
-        }
-        for name, total in sums.items():
+        sums = _tier_figures([a for a in attributions if a.tier == tier])
+        for name in _TIER_CHECK_KEYS:
+            total = sums[name]
             if name in entry and entry[name] != total:
                 mismatches.append(
                     f"tier_summary[{tier!r}] {name}: archived {entry[name]!r}, per-call {total}"
@@ -401,11 +440,32 @@ def repriced_arm(arm: ArmResult, calls: _ArmCalls, *, withhold_cost: bool) -> Ar
     )
 
 
+def _require_unit_ids(path: Path, payload: Mapping[str, object]) -> None:
+    """Refuse unless every :data:`UNIT_STAMPED_ENTRY_KINDS` entry names its unit's ids."""
+    for kind in UNIT_STAMPED_ENTRY_KINDS:
+        entries = payload.get(kind)
+        if not isinstance(entries, list):
+            raise RepriceRefused(f"{path}: no {kind} list")
+        for position, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                raise RepriceRefused(f"{path}: {kind}[{position}] is not an object")
+            task_id = entry.get(UNIT_TASK_ID_KEY)
+            repeat_index = entry.get(UNIT_REPEAT_INDEX_KEY)
+            if not isinstance(task_id, str) or not task_id:
+                raise RepriceRefused(f"{path}: {kind}[{position}] carries no {UNIT_TASK_ID_KEY}")
+            if type(repeat_index) is not int or repeat_index < 0:
+                raise RepriceRefused(
+                    f"{path}: {kind}[{position}] carries no {UNIT_REPEAT_INDEX_KEY}"
+                )
+
+
 def _load_pre_aggregation(raw_dir: Path) -> dict[str, tuple[Path, list[object]]]:
     """Map each pre-aggregation archive's ``model_id`` to its path and attribution entries.
 
     Raises:
-        RepriceRefused: An archive is unreadable or malformed, or two name the same model.
+        RepriceRefused: An archive is unreadable or malformed, is not
+            :data:`eval.matrix.RECORD_SHAPE_VERSION`, has a :data:`UNIT_STAMPED_ENTRY_KINDS` entry
+            without its unit's task id and repeat index, or two name the same model.
     """
     found: dict[str, tuple[Path, list[object]]] = {}
     for path in sorted((raw_dir / PRE_AGGREGATION_DIRNAME).glob("*.json")):
@@ -417,6 +477,12 @@ def _load_pre_aggregation(raw_dir: Path) -> dict[str, tuple[Path, list[object]]]
         entries = payload.get("invocation_attributions") if isinstance(payload, dict) else None
         if not isinstance(model_id, str) or not isinstance(entries, list):
             raise RepriceRefused(f"{path}: no model_id and invocation_attributions list")
+        version = payload.get(RECORD_SHAPE_VERSION_KEY)
+        if type(version) is not int or version != RECORD_SHAPE_VERSION:
+            raise RepriceRefused(
+                f"{path}: {RECORD_SHAPE_VERSION_KEY} is {version!r}, not {RECORD_SHAPE_VERSION}"
+            )
+        _require_unit_ids(path, payload)
         if model_id in found:
             raise RepriceRefused(
                 f"{path} and {found[model_id][0]} both hold pre-aggregation records for {model_id!r}"
@@ -536,6 +602,7 @@ __all__ = [
     "PRICING_TIER_KEY",
     "REPRICE_RECORD_FILENAME",
     "ROUTE_KEY",
+    "UNIT_STAMPED_ENTRY_KINDS",
     "RepriceRefused",
     "attribution_from_entry",
     "cross_check_archive",

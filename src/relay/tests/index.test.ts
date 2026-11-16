@@ -296,6 +296,19 @@ describe("a successful turn", () => {
     expect(deps.requests[0]?.sessionId).toBe(SESSION_ID);
     expect(deps.requests[0]?.pageContext).toEqual({ kind: "opaque", reason: "test" });
     expect(deps.requests[0]?.resumeFrom).toBe(3);
+    expect(deps.requests[0]).not.toHaveProperty("resume");
+  });
+
+  it("forwards a resume flag of exactly true and drops any other value", async () => {
+    for (const [resume, forwarded] of [
+      [true, true],
+      [false, undefined],
+      ["true", undefined],
+    ] as const) {
+      const deps = depsFor(streamOf(runtimeFrame({ kind: "completed", text: "done" })));
+      await streamTurn(eventFor(turnBody({ resume_from: 2, resume })), new RecordingSink(), deps);
+      expect(deps.requests[0]?.resume).toBe(forwarded);
+    }
   });
 
   it("ends the stream exactly once", async () => {

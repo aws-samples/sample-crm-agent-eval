@@ -62,6 +62,7 @@ from scripts.smoke.harness import (
     CheckResult,
     ExpectedCheckCount,
     SmokeContext,
+    exception_detail,
     open_https,
     run_main,
 )
@@ -559,7 +560,7 @@ def _delete_settings_item(store: Any, *, tenant: str, rep_id: str, who: str) -> 
         store.delete_item(SETTINGS_TABLE, {"rep_id": key})
         remaining = store.get_item(SETTINGS_TABLE, {"rep_id": key})
     except Exception as exc:  # noqa: BLE001 - surfaced as a failing check
-        return _row(check, False, "", f"{type(exc).__name__}: {exc}")
+        return _row(check, False, "", exception_detail(exc))
     return _row(
         check,
         remaining is None,
@@ -572,7 +573,7 @@ def _teardown(store: Any, smoke_tenant: SmokeTenant) -> CheckResult:
     try:
         deleted = teardown_smoke_tenant(store, smoke_tenant)
     except Exception as exc:  # noqa: BLE001 - a failed teardown must never read as clean
-        return _row("tenant_torn_down", False, "", f"{type(exc).__name__}: {exc}")
+        return _row("tenant_torn_down", False, "", exception_detail(exc))
     return _row("tenant_torn_down", True, f"{sum(deleted.values())} item(s) deleted", "")
 
 
@@ -611,7 +612,7 @@ def checks(
     try:
         yield from simulate(ctx)
     except Exception as exc:  # noqa: BLE001 - the API rows still run
-        yield _row("role_simulations", False, "", f"{type(exc).__name__}: {exc}")
+        yield _row("role_simulations", False, "", exception_detail(exc))
 
     smoke_tenant = allocate_smoke_tenant(resolved_store)
     provisioners: list[Provisioner] = []

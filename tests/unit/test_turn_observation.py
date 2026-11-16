@@ -33,7 +33,7 @@ from eval.turn_observation import (
     serialise_turn,
 )
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
-from providers.capabilities import Family, load_capability_matrix
+from providers.capabilities import Family, Tier, load_capability_matrix
 from providers.stub import StubProvider
 
 MATRIX = load_capability_matrix()
@@ -99,7 +99,21 @@ def test_data_is_reported_only_when_nothing_else_occurred() -> None:
     data_only = _observe(_ok({"account_id": "a"}), calls=[("get_account", {"account_id": "a"})])
     assert data_only.outcome(tenant="t", budget_exhausted=False).denial_outcome == "data"
     nothing = ObservingDispatch(lambda _t, _i: _ok({}))
-    assert nothing.outcome(tenant="t", budget_exhausted=True).denial_outcome is None
+    exhausted = nothing.outcome(tenant="t", budget_exhausted=True, budget_exhausted_tier="subagent")
+    assert exhausted.denial_outcome is None
+
+
+def test_the_outcome_carries_the_exhaustion_tier_it_is_given() -> None:
+    observer = ObservingDispatch(lambda _t, _i: _ok({}))
+    exhausted = observer.outcome(tenant="t", budget_exhausted=True, budget_exhausted_tier="tool")
+    assert (exhausted.budget_exhausted, exhausted.budget_exhausted_tier) == (True, "tool")
+    completed = observer.outcome(tenant="t", budget_exhausted=False)
+    assert completed.budget_exhausted_tier is None
+
+
+def test_an_exhausted_outcome_without_a_tier_is_refused() -> None:
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        ObservingDispatch(lambda _t, _i: _ok({})).outcome(tenant="t", budget_exhausted=True)
 
 
 def test_calls_targets_and_arguments_are_recorded_in_order() -> None:
@@ -377,6 +391,7 @@ def _rich_turn() -> ObservedTurn:
             denial_outcome="denied",
             denial_missing_scope="account:acc-9",
             budget_exhausted=True,
+            budget_exhausted_tier="subagent",
             truncated=True,
             truncation_disclosed=False,
             observed_outcomes=frozenset({"z_label", "a_label"}),
@@ -457,11 +472,17 @@ def _mutated(path: tuple[object, ...], value: object, *, delete: bool = False) -
 @pytest.mark.parametrize(
     ("path", "value", "delete"),
     [
-        (("schema",), 3, False),
+        (("schema",), 4, False),
+        (("schema",), 2, False),
         (("schema",), True, False),
         (("outcome",), None, True),
         (("extra",), 1, False),
         (("outcome", "budget_exhausted"), "yes", False),
+        (("outcome", "budget_exhausted_tier"), None, True),
+        (("outcome", "budget_exhausted_tier"), None, False),
+        (("outcome", "budget_exhausted_tier"), "orchestrator", False),
+        (("outcome", "budget_exhausted_tier"), 1, False),
+        (("outcome", "budget_exhausted"), False, False),
         (("outcome", "tool_calls", 0, "tool_name"), 5, False),
         (("outcome", "observed_outcomes"), [1], False),
         (("outcome", "proposals", 0, "surplus"), "x", False),
@@ -485,16 +506,47 @@ def test_deserialise_refuses_a_malformed_payload(
         deserialise_turn(_mutated(path, value, delete=delete))
 
 
-def test_the_writer_emits_schema_2() -> None:
-    assert serialise_turn(_rich_turn())["schema"] == 2
+def test_the_writer_emits_schema_3() -> None:
+    assert SERIALISED_TURN_SCHEMA == 3
+    assert serialise_turn(_rich_turn())["schema"] == 3
 
 
-def test_a_schema_1_body_from_a_skewed_runtime_is_refused_with_a_named_mismatch() -> None:
-    """An older Runtime body (schema 1, same shape) fails as a version skew."""
-    stale = _mutated(("schema",), 1)
+def test_the_writer_emits_the_exhaustion_tier_in_the_outcome() -> None:
+    assert serialise_turn(_rich_turn())["outcome"]["budget_exhausted_tier"] == "subagent"
+    completed = ObservedTurn(
+        outcome=TurnOutcome(tenant="eval-abc"),
+        tool_arguments=(),
+        invocations=(),
+        tool_calls=(),
+        stream_calls=0,
+        exclusions=(),
+        turn_latency_ms=None,
+    )
+    wire = serialise_turn(completed)
+    assert "budget_exhausted_tier" in wire["outcome"]
+    assert wire["outcome"]["budget_exhausted_tier"] is None
+    assert deserialise_turn(wire) == completed
+
+
+@pytest.mark.parametrize("tier", ["supervisor", "subagent", "tool"])
+def test_each_exhaustion_tier_round_trips(tier: Tier) -> None:
+    wire = _mutated(("outcome", "budget_exhausted_tier"), tier)
+    assert deserialise_turn(wire).outcome.budget_exhausted_tier == tier
+
+
+def test_a_schema_2_body_from_a_skewed_runtime_is_refused_with_a_named_mismatch() -> None:
+    """A schema-2 Runtime body, which carries no exhaustion tier, fails as a version skew."""
+    stale = _mutated(("schema",), 2)
+    del stale["outcome"]["budget_exhausted_tier"]
     with pytest.raises(ValueError) as refused:
         deserialise_turn(stale)
-    assert str(refused.value) == "turn.schema must be 2, got 1"
+    assert str(refused.value) == "turn.schema must be 3, got 2"
+
+
+def test_a_schema_3_body_without_the_exhaustion_tier_is_refused_naming_the_key() -> None:
+    wire = _mutated(("outcome", "budget_exhausted_tier"), None, delete=True)
+    with pytest.raises(ValueError, match="budget_exhausted_tier"):
+        deserialise_turn(wire)
 
 
 def test_deserialise_refuses_a_non_object() -> None:
@@ -543,6 +595,7 @@ def test_a_turn_with_a_call_cut_at_the_deadline_is_observed_as_a_usage_lower_bou
     )
     turn = asyncio.run(asyncio.wait_for(_observed_async(_StallsAfterFirstRound()), timeout=5.0))
     assert turn.outcome.budget_exhausted is True
+    assert turn.outcome.budget_exhausted_tier == "supervisor"
     assert turn.usage_lower_bound is True
     wire = serialise_turn(turn)
     assert wire[USAGE_LOWER_BOUND_KEY] is True
@@ -581,3 +634,33 @@ async def _observed_async(provider: ModelProvider) -> ObservedTurn:
         tuning=arm_turn_tuning(ArmSpec(family="anthropic")),
         dispatch=lambda tool, _input: _ok({"items": [], "tool": tool.name}),
     )
+
+
+def _oversized_activities() -> dict[str, Any]:
+    return _ok(
+        {"activities": [{"activity_id": f"act-{n:04d}", "note": "x" * 700} for n in range(60)]}
+    )
+
+
+def test_a_result_over_the_byte_ceiling_is_observed_as_truncated_and_disclosed() -> None:
+    """The observer sees the shared bound, so an oversized read without its own flag counts."""
+    raw = _oversized_activities()
+    assert "truncated" not in raw["body"]
+    observed = _observe(raw, calls=[("list_activities", {"opportunity_id": "opp-0000"})])
+    outcome = observed.outcome(tenant="t", budget_exhausted=False)
+    assert outcome.truncated is True
+    assert outcome.truncation_disclosed is True
+
+
+def test_the_observer_returns_the_dispatched_output_unbounded() -> None:
+    raw = _oversized_activities()
+    observer = ObservingDispatch(lambda _tool, _input: raw)
+    assert observer(_tool("list_activities"), {"opportunity_id": "opp-0000"}) is raw
+
+
+def test_a_result_under_the_byte_ceiling_is_not_observed_as_truncated() -> None:
+    observed = _observe(
+        _ok({"activities": [{"activity_id": "act-0000"}]}),
+        calls=[("list_activities", {"opportunity_id": "opp-0000"})],
+    )
+    assert observed.outcome(tenant="t", budget_exhausted=False).truncated is False

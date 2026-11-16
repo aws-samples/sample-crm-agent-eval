@@ -53,7 +53,7 @@ def _event_kind(event: SseEvent) -> str:
     """The `kind` field of one SSE record's JSON payload, or `""` if it has none."""
     try:
         return str(json.loads(event.data).get("kind") or "")
-    except (json.JSONDecodeError, AttributeError):
+    except json.JSONDecodeError, AttributeError:
         return ""
 
 

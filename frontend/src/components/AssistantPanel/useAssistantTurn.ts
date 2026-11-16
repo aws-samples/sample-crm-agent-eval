@@ -37,6 +37,8 @@ export interface TurnRequestBody {
   readonly prompt: string;
   readonly session_id: string;
   readonly resume_from?: number;
+  /** Sent only by a reconnect of the current turn; a follow-up never carries it. */
+  readonly resume?: true;
   readonly page_context?: PageContext;
   readonly tuning?: Readonly<Record<string, unknown>>;
 }
@@ -78,7 +80,7 @@ export const NOT_COMPARABLE_REASONS = {
  * @param prompt The user's message.
  * @param sessionId The turn's session id.
  * @param options `pageContext` is omitted from the body entirely when absent; `resumeFrom` is set only
- *   on a resume.
+ *   on a resume, and `resume` only on a reconnect of the current turn.
  * @returns The body to POST.
  */
 export function buildTurnRequest(
@@ -88,12 +90,14 @@ export function buildTurnRequest(
     readonly pageContext?: PageContext;
     readonly tuning?: Readonly<Record<string, unknown>>;
     readonly resumeFrom?: number;
+    readonly resume?: true;
   },
 ): TurnRequestBody {
   return {
     prompt,
     session_id: sessionId,
     ...(options?.resumeFrom === undefined ? {} : { resume_from: options.resumeFrom }),
+    ...(options?.resume === true ? { resume: true as const } : {}),
     ...(options?.pageContext === undefined ? {} : { page_context: options.pageContext }),
     ...(options?.tuning === undefined ? {} : { tuning: options.tuning }),
   };

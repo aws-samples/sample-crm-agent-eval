@@ -59,6 +59,7 @@ def _obs(
     outcome: str | None = None,
     efforts: Mapping[Tier, str | None] | None = None,
     tool_calls: tuple[ToolCallAttribution, ...] = (),
+    exhausted_at: Tier | None = None,
 ) -> TaskTierObservation:
     return TaskTierObservation(
         task_id=task_id,
@@ -72,6 +73,7 @@ def _obs(
         delegation_outcome=outcome,
         resolved_efforts=efforts,
         tool_calls=tool_calls,
+        budget_exhausted_tier=exhausted_at,
     )
 
 
@@ -178,6 +180,9 @@ def test_tier_with_no_completed_task_reports_none_at_count_zero() -> None:
         "completed_task_latency_ms_p50": None,
         "completed_task_latency_ms_p95": None,
         "retry_count": 0,
+        "budget_exhausted_task_count": 0,
+        "truncated_tool_call_count": 0,
+        "truncated_task_count": 0,
     }
 
 
@@ -271,6 +276,9 @@ def test_report_fields_key_order() -> None:
             "completed_task_latency_ms_p50",
             "completed_task_latency_ms_p95",
             "retry_count",
+            "budget_exhausted_task_count",
+            "truncated_tool_call_count",
+            "truncated_task_count",
         ]
         assert entry["configured_model_id"] == _CONFIGURED[tier]
 
@@ -279,9 +287,11 @@ def test_all_tiers_matches_report_order() -> None:
     assert ALL_TIERS == ("supervisor", "subagent", "tool")
 
 
-def _tc(tool_name: str, role: str, kind: OutcomeKind) -> ToolCallAttribution:
+def _tc(
+    tool_name: str, role: str, kind: OutcomeKind, *, truncated: bool = False
+) -> ToolCallAttribution:
     return ToolCallAttribution(
-        tool_name=tool_name, role=role, latency_ms=None, outcome_kind=kind, truncated=False
+        tool_name=tool_name, role=role, latency_ms=None, outcome_kind=kind, truncated=truncated
     )
 
 
@@ -360,3 +370,84 @@ def test_retry_count_is_zero_without_tool_calls() -> None:
 
 def test_the_supervisor_role_matches_the_agents_constant() -> None:
     assert SUPERVISOR_ROLE == AGENTS_SUPERVISOR_ROLE
+
+
+# -- budget exhaustion and truncation per tier --------------------------------------------------
+
+
+def test_budget_exhausted_tasks_are_counted_at_the_tier_where_the_budget_ran_out() -> None:
+    observations = [
+        _obs("t1", exhausted_at="supervisor"),
+        _obs("t2", exhausted_at="subagent"),
+        _obs("t3", exhausted_at="tool"),
+        _obs("t4", exhausted_at="tool"),
+        _obs("t5"),
+    ]
+    by_tier = _by_tier(observations)
+    assert {tier: by_tier[tier]["budget_exhausted_task_count"] for tier in ALL_TIERS} == {  # type: ignore[index]
+        "supervisor": 1,
+        "subagent": 1,
+        "tool": 2,
+    }
+
+
+def test_budget_exhausted_tasks_are_zero_at_every_tier_with_no_exhaustion() -> None:
+    by_tier = _by_tier([_obs("t1"), _obs("t2")])
+    for tier in ALL_TIERS:
+        assert by_tier[tier]["budget_exhausted_task_count"] == 0  # type: ignore[index]
+
+
+def test_budget_exhausted_tasks_are_counted_for_an_unmeasured_arm() -> None:
+    entry = _tier([_obs("t1", exhausted_at="supervisor")], "supervisor", measured=False)
+    assert entry["budget_exhausted_task_count"] == 1
+
+
+def _truncation_observations() -> list[TaskTierObservation]:
+    return [
+        _obs(
+            "t1",
+            tool_calls=(
+                _tc("search_opportunities", SUPERVISOR_ROLE, "data", truncated=True),
+                _tc("search_opportunities", SUPERVISOR_ROLE, "data", truncated=True),
+                _tc("list_activities", "research", "data", truncated=True),
+            ),
+        ),
+        _obs(
+            "t2",
+            tool_calls=(
+                _tc("list_activities", "research", "data", truncated=True),
+                _tc("get_account", "research", "data"),
+            ),
+        ),
+        _obs("t3", tool_calls=(_tc("get_account", SUPERVISOR_ROLE, "data"),)),
+    ]
+
+
+def test_a_supervisor_role_truncated_call_counts_at_the_supervisor() -> None:
+    entry = _tier(_truncation_observations(), "supervisor")
+    assert entry["truncated_tool_call_count"] == 2
+    assert entry["truncated_task_count"] == 1
+
+
+def test_a_truncated_call_inside_a_delegation_counts_at_the_tool_tier() -> None:
+    entry = _tier(_truncation_observations(), "tool")
+    assert entry["truncated_tool_call_count"] == 2
+    assert entry["truncated_task_count"] == 2
+
+
+def test_the_subagent_tier_reports_no_truncation_figures() -> None:
+    entry = _tier(_truncation_observations(), "subagent")
+    assert entry["truncated_tool_call_count"] is None
+    assert entry["truncated_task_count"] is None
+
+
+def test_truncation_is_zero_not_none_at_supervisor_and_tool_without_truncation() -> None:
+    by_tier = _by_tier([_obs("t1", tool_calls=(_tc("get_account", "research", "data"),))])
+    for tier in ("supervisor", "tool"):
+        assert by_tier[tier]["truncated_tool_call_count"] == 0  # type: ignore[index]
+        assert by_tier[tier]["truncated_task_count"] == 0  # type: ignore[index]
+
+
+def test_truncation_is_counted_for_an_unmeasured_arm() -> None:
+    entry = _tier(_truncation_observations(), "tool", measured=False)
+    assert entry["truncated_tool_call_count"] == 2

@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Final, Literal
@@ -54,6 +55,8 @@ from scripts.smoke.harness import (
     DEFER,
     CheckResult,
     SmokeContext,
+    aws_error_detail,
+    exception_detail,
     key_policy_for_simulation,
     run_main,
 )
@@ -378,11 +381,32 @@ def _placeholder_for(
     return f"smoke-{name}"
 
 
+_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_.]{0,127}")
+
+
+def _function_error_detail(function_error: str, raw_payload: bytes) -> str:
+    """Return `FunctionError=<value>`, plus ` errorType=<type>` when the payload names one.
+
+    Each value appears only when it is a short identifier. The payload's `errorMessage` and
+    `stackTrace` never appear.
+    """
+    value = function_error if _IDENTIFIER.fullmatch(function_error) else "<unrecognised>"
+    detail = f"FunctionError={value}"
+    try:
+        decoded = json.loads(raw_payload) if raw_payload else None
+    except ValueError:
+        return detail
+    error_type = decoded.get("errorType") if isinstance(decoded, Mapping) else None
+    if isinstance(error_type, str) and _IDENTIFIER.fullmatch(error_type):
+        detail += f" errorType={error_type}"
+    return detail
+
+
 def _invoke(ctx: SmokeContext, function_name: str, event: Mapping[str, Any]) -> dict[str, Any]:
     """Invoke ``function_name`` synchronously with ``event`` and return the decoded response body.
 
-    Raises `ValueError` when the invocation reports a `FunctionError`, or when the response
-    payload is not valid JSON.
+    Raises `ValueError` when the invocation reports a `FunctionError` (with the
+    `_function_error_detail` text), or when the response payload is not valid JSON.
     """
     client = ctx.client("lambda")
     response = client.invoke(
@@ -394,10 +418,7 @@ def _invoke(ctx: SmokeContext, function_name: str, event: Mapping[str, Any]) -> 
     payload_stream = response["Payload"]
     raw_payload = payload_stream.read()
     if function_error:
-        raise ValueError(
-            f"FunctionError={function_error}: "
-            f"{raw_payload.decode('utf-8', errors='replace') if raw_payload else ''}"
-        )
+        raise ValueError(_function_error_detail(str(function_error), raw_payload))
     try:
         decoded = json.loads(raw_payload)
     except json.JSONDecodeError as exc:
@@ -1271,7 +1292,7 @@ def cursor_key_env_checks(
                     resource=tool.name,
                     check=CURSOR_ENV_CHECK,
                     status="fail",
-                    detail=f"get_function_configuration failed: {exc}",
+                    detail=aws_error_detail("lambda:GetFunctionConfiguration", exc),
                 )
             )
             continue
@@ -1365,7 +1386,7 @@ def cursor_key_property_checks(ctx: SmokeContext, key_arn: str) -> Iterable[Chec
             "KeyRotationEnabled=True",
         )
     except Exception as exc:  # noqa: BLE001
-        yield row(CURSOR_KEY_ROTATION_CHECK, f"get_key_rotation_status failed: {exc}", "")
+        yield row(CURSOR_KEY_ROTATION_CHECK, aws_error_detail("kms:GetKeyRotationStatus", exc), "")
 
     try:
         metadata = kms.describe_key(KeyId=key_arn).get("KeyMetadata") or {}
@@ -1379,7 +1400,7 @@ def cursor_key_property_checks(ctx: SmokeContext, key_arn: str) -> Iterable[Chec
             f"{shape!r}",
         )
     except Exception as exc:  # noqa: BLE001
-        yield row(CURSOR_KEY_SHAPE_CHECK, f"describe_key failed: {exc}", "")
+        yield row(CURSOR_KEY_SHAPE_CHECK, aws_error_detail("kms:DescribeKey", exc), "")
 
     try:
         tags = kms.list_resource_tags(KeyId=key_arn).get("Tags") or []
@@ -1390,7 +1411,7 @@ def cursor_key_property_checks(ctx: SmokeContext, key_arn: str) -> Iterable[Chec
             "data-classification tag present",
         )
     except Exception as exc:  # noqa: BLE001
-        yield row(CURSOR_KEY_TAG_CHECK, f"list_resource_tags failed: {exc}", "")
+        yield row(CURSOR_KEY_TAG_CHECK, aws_error_detail("kms:ListResourceTags", exc), "")
 
 
 def _context_entries(
@@ -1507,7 +1528,10 @@ def _simulated_row(
         )
     except Exception as exc:  # noqa: BLE001
         return CheckResult(
-            resource=resource, check=check, status="fail", detail=f"simulation failed: {exc}"
+            resource=resource,
+            check=check,
+            status="fail",
+            detail=aws_error_detail("iam:SimulatePrincipalPolicy", exc),
         )
     failure = _decision_failure(
         results, actions, accept, want, require_complete_context=require_complete_context
@@ -1530,7 +1554,7 @@ def cursor_key_simulation_checks(
         policy_failure = ""
     except Exception as exc:  # noqa: BLE001
         key_policy = None
-        policy_failure = f"get_key_policy failed: {exc}"
+        policy_failure = aws_error_detail("kms:GetKeyPolicy", exc)
 
     def allowed(decision: str) -> bool:
         return decision == "allowed"
@@ -1963,7 +1987,7 @@ def _teardown_check(
             resource=RESOURCE_CLASS,
             check="tenant_left_clean",
             status="fail",
-            detail=f"teardown of tenant {smoke_tenant.tenant!r} failed: {exc}",
+            detail=(f"teardown of tenant {smoke_tenant.tenant!r} failed: {exception_detail(exc)}"),
         )
         return
     yield CheckResult(

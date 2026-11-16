@@ -15,6 +15,7 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 from scripts.smoke import verified_claims
 from scripts.smoke.harness import CheckResult, context_for_test
@@ -1117,3 +1118,78 @@ def test_the_out_of_book_read_backs_are_strongly_consistent(
         call for call in sent if any("-oob-" in str(v.get("S")) for v in call["Key"].values())
     ]
     assert wire_oob and all(call.get("ConsistentRead") is True for call in wire_oob)
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted_error(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": f"{_PLANTED_ARN} is not authorized",
+            }
+        },
+        operation,
+    )
+
+
+def _assert_masked(results: list[CheckResult], row: CheckResult) -> None:
+    assert row.status == "fail"
+    assert "failed (AccessDeniedException)" in row.detail
+    assert not [r for r in results if _PLANTED_ARN in r.detail]
+
+
+def test_an_identity_aws_error_is_reported_by_code_not_message(store: Store) -> None:
+    class _Denied:
+        def acquire(self) -> SmokeIdentity:
+            raise _planted_error("AdminInitiateAuth")
+
+        def release(self) -> Iterable[CheckResult]:
+            return ()
+
+    results = list(
+        checks(_test_context(store), http_caller=_make_handler_http_caller(store), lease=_Denied())
+    )
+    _assert_masked(results, results[0])
+
+
+@pytest.mark.parametrize(
+    ("attribute", "resource", "check"),
+    [
+        ("_stage_index_ids", "approve", "derived_index_attributes_recomputed"),
+        ("_proposals_by_status", "approve", "proposal_reachable_by_approved_status_index"),
+    ],
+)
+def test_an_index_query_aws_error_is_reported_by_code_not_message(
+    store: Store, monkeypatch: pytest.MonkeyPatch, attribute: str, resource: str, check: str
+) -> None:
+    import scripts.smoke.integration_proposal_chain as module
+
+    def denied(*_args: Any, **_kwargs: Any) -> set[str]:
+        raise RuntimeError("store call failed") from _planted_error("Query")
+
+    monkeypatch.setattr(module, attribute, denied)
+    results = _run_chain(store)
+    _assert_masked(results, _find(results, resource, check))
+
+
+def test_a_row_count_aws_error_is_reported_by_code_not_message(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.smoke.integration_proposal_chain as module
+
+    real_count = module._tenant_row_count  # noqa: SLF001
+    demo_reads: list[str] = []
+
+    def denied_after_the_snapshot(ctx: Any, table: str, tenant: str) -> int:
+        if tenant == "demo":
+            demo_reads.append(table)
+            if len(demo_reads) > len(module._DEMO_WATCHED_TABLES):  # noqa: SLF001
+                raise _planted_error("Query")
+        return real_count(ctx, table, tenant)
+
+    monkeypatch.setattr(module, "_tenant_row_count", denied_after_the_snapshot)
+    results = _run_chain(store)
+    _assert_masked(results, _find(results, RESOURCE_CLASS, "demo_tenant_untouched"))

@@ -595,3 +595,47 @@ def test_a_malformed_state_machine_arn_fails_discovery() -> None:
     outputs = {**_OUTPUTS, STATE_MACHINE_ARN_OUTPUT: "crm-agent-eval-eval-sweep"}
     result = _row(_results(outputs=outputs), CHECK_LOG_GROUPS_DISCOVERED)
     assert result.status == "fail" and STATE_MACHINE_ARN_OUTPUT in result.detail
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted_error(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": f"{_PLANTED_ARN} is not authorized",
+            }
+        },
+        operation,
+    )
+
+
+@pytest.mark.parametrize(
+    ("check", "kwargs"),
+    [
+        (CHECK_TRAIL_MULTI_REGION, {"fake": _FakeCloudTrail(_planted_error("DescribeTrails"))}),
+        (
+            CHECK_TRAIL_LOGGING,
+            {"fake": _FakeCloudTrail([_trail()], status=_planted_error("GetTrailStatus"))},
+        ),
+        (
+            CHECK_ALB_DELETION_PROTECTION,
+            {"elbv2": _FakeElbv2(_planted_error("DescribeLoadBalancerAttributes"))},
+        ),
+        (CHECK_LOG_GROUPS_DISCOVERED, {"logs": _FakeLogs(_planted_error("DescribeLogGroups"))}),
+        (
+            CHECK_CODEBUILD_ENCRYPTION_KEY,
+            {"codebuild": _FakeCodeBuild(_planted_error("BatchGetProjects"))},
+        ),
+    ],
+)
+def test_an_aws_error_detail_carries_the_code_but_never_the_message(
+    check: str, kwargs: dict[str, Any]
+) -> None:
+    result = _row(_results(**kwargs), check)
+    assert result.status == "fail"
+    assert "AccessDeniedException" in result.detail
+    assert _PLANTED_ARN not in result.detail
+    assert "123456789012" not in result.detail

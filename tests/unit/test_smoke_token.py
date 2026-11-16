@@ -14,12 +14,14 @@ from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from botocore.stub import ANY, Stubber
-from scripts.smoke import verified_claims
+from scripts.smoke import smoke_token, verified_claims
 from scripts.smoke.cognito_claims import LiveSmokeUserProvisioner
 from scripts.smoke.harness import context_for_test
 from scripts.smoke.smoke_token import (
     TENANT_CLAIM,
+    assert_supplied_token,
     assert_token_tenant,
     mint_run_token,
 )
@@ -372,3 +374,21 @@ def _patch_offline_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         verified_claims, "cognito_jwks_url", lambda _region, _pool: test_key.jwks_url()
     )
+
+
+def test_an_undecodable_supplied_token_names_the_aws_code_never_the_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    planted_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+    def decode(_token: str) -> dict[str, Any]:
+        raise ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": f"User: {planted_arn}"}},
+            "DescribeUserPool",
+        )
+
+    monkeypatch.setattr(smoke_token, "_live_decode_for", lambda _ctx: decode)
+    with pytest.raises(RuntimeError) as raised:
+        assert_supplied_token(context_for_test(), id_token="t", expected_tenant="eval-smoke-ab")
+    assert "DescribeUserPool failed (AccessDeniedException)" in str(raised.value)
+    assert planted_arn not in str(raised.value)

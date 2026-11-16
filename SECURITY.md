@@ -3,9 +3,10 @@
 See also: [documentation map](README.md#documentation) · [security baseline](docs/security-baseline.md) · [agent architecture](docs/agent-architecture.md) · [MCP client guide](docs/mcp-client-guide.md) · [runbook](docs/runbook.md)
 
 This page is the project's threat model: what the system protects, who might attack it and how,
-which controls stand in the way, and which risks remain. It covers the OWASP Top 10 (2025) and the
-OWASP Top 10 for LLM Applications (2025). The infrastructure controls themselves, each with its
-verification command, live in [`docs/security-baseline.md`](docs/security-baseline.md).
+which controls stand in the way, and which risks remain. It maps the system to three OWASP lists:
+the OWASP Top 10 (2025), the current web edition; the OWASP Top 10 for LLM Applications (2026); and
+the OWASP Top 10 for Agentic Applications (2026). The infrastructure controls themselves, each with
+its verification command, live in [`docs/security-baseline.md`](docs/security-baseline.md).
 
 ## Reporting a vulnerability
 
@@ -154,20 +155,35 @@ account.
 | A09 Security Logging and Alerting Failures | detection and attribution | CloudTrail; API Gateway access logs; KMS-encrypted log groups with retention; `check_log_redaction` | no CloudTrail metric filters or alarms; TM-09 |
 | A10 Mishandling of Exceptional Conditions | AWS errors, misconfiguration | error taxonomy at every module boundary; handler failures returned as classified payloads; fail-closed allowlist, cursor and identity paths | TM-16 |
 
-## OWASP Top 10 for LLM Applications (2025)
+## OWASP Top 10 for LLM Applications (2026)
 
 | Category | How it applies | Controls | Residual |
 |---|---|---|---|
-| LLM01 Prompt Injection | rep prompts, MCP arguments and CRM text returned as tool output | the model never holds authority: identity, tenant and scope come from verified tokens; tool arguments validated against the toolspec; high-risk writes need human approval | TM-06 |
-| LLM02 Sensitive Information Disclosure | CRM data in prompts and answers | answers can only contain what scoped tools returned; images in answers are never fetched, so markdown cannot exfiltrate through a URL; log redaction | TM-11 |
-| LLM03 Supply Chain | model access and SDKs | models reached only through Bedrock inference profiles in the account; pinned vendor SDKs in the Runtime image only; model ids in `config/model_capabilities.yaml` | as A03 |
-| LLM04 Data and Model Poisoning | golden tasks and seeded data | no fine-tuning or training; golden tasks and fixtures are tracked and reviewed; eval tenants are disposable | planted CRM text is handled as LLM01 |
-| LLM05 Improper Output Handling | model output rendered in the SPA and passed to tools | markdown without raw HTML, `https:` and relative links only, no image fetch; tool calls schema-validated; SSE frames generated from one schema | none known |
-| LLM06 Excessive Agency | agent write tools | role-scoped subagents with only the tools they need; no tool commits a high-risk change; the agent cannot approve, reject or revert; per-turn tool-call and time budgets | low-risk writes in the rep's own book (TM-06) |
-| LLM07 System Prompt Leakage | supervisor and subagent prompts | prompts hold no secret or authority and are published in `config/agent_prompts/`; authorization never depends on prompt text | none |
-| LLM08 Vector and Embedding Weaknesses | not applicable | the system has no vector store or retrieval index | none |
-| LLM09 Misinformation | fabricated CRM facts in answers | delegation outcomes are typed (`data`, `denied`, `tool_failure`, `no_match`), so a denial or failure is never turned into data; the UI shows the tool trace beside the answer | a model can still misstate data it was given |
-| LLM10 Unbounded Consumption | token and cost exhaustion | per-request prompt limit (refused, not trimmed); per-turn token, tool-call and time budgets; eval cost cap and daily live cap; throttles and reserved concurrency | TM-14, TM-15 |
+| LLM01 Prompt Injection | rep prompts, MCP arguments, page context, CRM text returned as tool output, and the session's earlier turns | the model never holds authority: identity, tenant and scope come from verified tokens; tool arguments validated against the toolspec; page context is framed to the model as client-supplied data, not instructions; high-risk writes need human approval | TM-06 |
+| LLM02 Sensitive Information Disclosure | CRM data in prompts, answers, tool arguments, logs and stored chat history | answers can only contain what scoped tools returned; images in answers are never fetched, so markdown cannot exfiltrate through a URL; log redaction (`check_log_redaction`); stored history is redacted, readable only by its owner and expires 24 hours after its last write | TM-11 |
+| LLM03 Excessive Agency | agent write tools | role-scoped subagents with only the tools they need; no tool commits a high-risk change; the agent cannot approve, reject or revert; per-turn tool-call and time budgets | low-risk writes in the rep's own book (TM-06) |
+| LLM04 Supply Chain | models, model access and SDKs | models reached only through Bedrock inference profiles in the account, with no third-party weights, adapters or fine-tunes; pinned vendor SDKs in the Runtime image only; model ids in `config/model_capabilities.yaml` | as A03 (TM-19) |
+| LLM05 Data and Model Poisoning | golden tasks, seeded data and stored chat history | no fine-tuning, training or embedding; golden tasks and fixtures are tracked and reviewed; eval tenants are disposable; stored history holds only the session owner's own prompts and answers | planted CRM text is handled as LLM01, stored history as ASI06 |
+| LLM06 Unbounded Consumption | token and cost exhaustion, including tool-call fan-out | per-request prompt limit (refused, not trimmed); per-turn token, tool-call and time budgets; tool output bounded before it re-enters the context; eval cost cap and daily live cap; throttles and reserved concurrency | TM-14, TM-15 |
+| LLM07 Misinformation | fabricated CRM facts in answers | delegation outcomes are typed (`data`, `denied`, `tool_failure`, `no_match`), so a denial or failure is never turned into data; the UI shows the tool trace beside the answer | a model can still misstate data it was given |
+| LLM08 Hidden Context Exposure | system prompts, answer style, page-context framing and the tool schemas the models receive | nothing in the model's context is meant to be secret: the prompts are published in `config/agent_prompts/`, and the agents' tool registry and the Gateway MCP tool definitions are generated from the tracked toolspec, which MCP clients can also list; no credential, token or identity is placed in model context; authorization never depends on prompt text or tool descriptions | none: the rest of a turn's context is the user's own prompt, page context and scoped data |
+| LLM09 Vector and Embedding Weaknesses | not applicable | the system has no vector store, embedding index or semantic cache; search is a DynamoDB index query with text matching in process | none |
+| LLM10 Improper Output Handling | model output rendered in the SPA, passed to tools and returned to MCP clients | markdown without raw HTML, `https:` and relative links only, no image fetch; tool arguments validated by the handler; SSE frames generated from one schema | control characters in answers are not removed, so an MCP client that prints answers to a terminal must neutralise them |
+
+## OWASP Top 10 for Agentic Applications (2026)
+
+| Category | How it applies | Controls | Residual |
+|---|---|---|---|
+| ASI01 Agent Goal Hijack | CRM text, page context or a prompt redirects the supervisor or a subagent across a multi-step turn | the agent's goal carries no authority: every tool call runs as the signed-in user and is re-authorized in the handler; page context is framed as data; a subagent sees only its delegated intent, not the conversation; high-risk changes need human approval; per-turn tool-call and time budgets | TM-06 |
+| ASI02 Tool Misuse and Exploitation | an agent applying a legitimate tool unsafely, such as a wrong write or a costly loop | each agent role holds only the tools the toolspec grants it, and only the `mutation` subagent holds write tools; no tool commits a high-risk change; per-call result and read caps; per-turn tool-call and time budgets | low-risk writes in the rep's own book (TM-06); TM-10 |
+| ASI03 Identity and Privilege Abuse | delegation from supervisor to subagent to tool tier, and the Runtime acting for a user | agents hold no identity or credential of their own; every call carries the verified user's identity on the `agent` channel, taken from the relay's or chat target's verified claims, and identity keys the model writes are stripped; delegation never widens scope; the agent channel cannot approve, reject or revert; the Runtime resource policy admits only the relay, sweep and chat-target roles | TM-03, TM-17 |
+| ASI04 Agentic Supply Chain Vulnerabilities | tools, prompts, models and agent code the Runtime uses | nothing is loaded at run time from an outside source: tools come from the tracked toolspec and prompts from `config/agent_prompts/`, and both are part of the prompt-bundle digest recorded with each eval run; the agents connect to no external MCP server, agent or registry; models only through Bedrock; pinned SDKs built into the Runtime image | TM-19 |
+| ASI05 Unexpected Code Execution (RCE) | whether model output can reach an interpreter | no agent holds a code interpreter, shell, browser or file-system tool; model output is only parsed as JSON tool arguments or rendered as text; YAML configuration is read with safe loading | none known |
+| ASI06 Memory & Context Poisoning | durable chat history, the only agent memory that outlives a turn | history keeps each turn's prompt and final answer, never tool payloads; it is kept per session and owner and refused to any other user; at most 10 turns of at most 4,000 characters each, redacted; it expires 24 hours after its last write; no long-term, shared or vector memory; eval turns use no history | an answer that repeats injected CRM text is read again by later turns of the same session until the history expires (TM-06) |
+| ASI07 Insecure Inter-Agent Communication | supervisor-to-subagent delegation | subagents run in the supervisor's Runtime process and are called in-process, with no network hop, message bus, agent discovery or agent-to-agent protocol; a delegation passes one `intent` string and returns one typed outcome; the callers into the Runtime (relay, chat target, sweep) sign with SigV4 and are admitted by its resource policy | the intent is natural language, so injected text can still shape it (TM-06) |
+| ASI08 Cascading Failures | one bad output spreading through delegations, turns or sweeps | per-turn token, tool-call and time budgets end a runaway turn; a denial or failure is never turned into data; writes stay inside the caller's tenant and book; agents run only within a user's turn or an admin-started sweep, and never start another turn; sweep tasks run one at a time in disposable tenants | TM-14, TM-15 |
+| ASI09 Human-Agent Trust Exploitation | a rep approving a change because an answer persuaded them | high-risk changes need an explicit approve in the UI; the proposal card renders from the stored proposal, not from model text; the UI shows the tool trace beside the answer | a rep can still approve a stored proposal on the strength of a misleading answer; Low |
+| ASI10 Rogue Agents | an agent drifting from its intended scope | an agent keeps no state beyond its session's history, holds no credential and cannot change its own prompts, tools or model; it acts only inside a user's turn or a sweep; every write is audited under the verified rep | no alarm on unusual agent behaviour (TM-09) |
 
 ## Accepted risks and open items
 
@@ -182,6 +198,12 @@ listed under [Limitations](README.md#limitations).
 - CloudTrail has no alarms; audit rows do not record the entry channel (TM-09).
 - One shared MCP service principal (TM-17).
 - Prompts and tool results reach Bedrock unredacted; acceptable only for synthetic data (TM-11).
+- Injected CRM text that an answer repeats stays in that session's history, and is read by its
+  later turns, until the history expires (TM-06).
+- A rep can approve a stored proposal because a misleading answer persuaded them. The card shows
+  the stored change, so what is approved is what is stored.
+- Answers returned to MCP clients keep any control characters; a client that prints them to a
+  terminal must neutralise them.
 
 ## External threat model review
 

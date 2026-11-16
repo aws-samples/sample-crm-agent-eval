@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke import mcp_chat_gateway as module
 from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.three_tier_chat import MODEL_TURN_ALLOTMENTS
@@ -742,3 +743,47 @@ class TestEveryReadTokenIsVerified:
         rows, _ = _run(_FakeGateway(), invoke_only_token=foreign)
         row = rows["gateway2_refuses_invoke_only_token"]
         assert row.status == "fail" and "iss" in row.detail
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted_error(operation: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {
+                "Code": "AccessDeniedException",
+                "Message": f"{_PLANTED_ARN} is not authorized",
+            }
+        },
+        operation,
+    )
+
+
+def test_a_cleanup_aws_error_carries_its_code_but_never_its_message() -> None:
+    class _DeniedDynamo(_FakeDynamo):
+        def delete_item(self, *, TableName: str, Key: dict[str, Any]) -> dict[str, Any]:  # noqa: N803
+            raise _planted_error("DeleteItem")
+
+    rows, _ = _run(_FakeGateway(), dynamo=_DeniedDynamo())
+    row = rows["conversation_items_removed"]
+    assert row.status == "fail"
+    assert "dynamodb conversation cleanup failed (AccessDeniedException)" in row.detail
+    assert not [r for r in rows.values() if _PLANTED_ARN in r.detail]
+
+
+@pytest.mark.parametrize("chained", [True, False])
+def test_a_mint_failure_masks_a_chained_aws_error_and_keeps_a_local_message(chained: bool) -> None:
+    def minter(_ctx: Any, _scope: str) -> str:
+        if chained:
+            raise RuntimeError("mint failed") from _planted_error("InitiateAuth")
+        raise RuntimeError("token endpoint returned no access_token")
+
+    ctx = context_for_test(outputs=_OUTPUTS, clients={})
+    row = module._invoke_only_token_row(ctx, _FakeGateway(), minter, lambda _t: {})
+    assert row.status == "fail"
+    assert _PLANTED_ARN not in row.detail
+    if chained:
+        assert "failed (AccessDeniedException)" in row.detail
+    else:
+        assert "token endpoint returned no access_token" in row.detail

@@ -95,7 +95,7 @@ describe("the request body carries a descriptor and no rows", () => {
   });
 
   it("has no parameter through which a caller could pass rows", () => {
-    // `buildTurnRequest`'s options admit only `pageContext`, `tuning`, and `resumeFrom`.
+    // `buildTurnRequest`'s options admit only `pageContext`, `tuning`, `resumeFrom` and `resume`.
     const body = buildTurnRequest("x", "sess-1", { pageContext: LIST_CONTEXT });
     expect(Object.keys(body).sort()).toEqual(["page_context", "prompt", "session_id"]);
   });
@@ -105,6 +105,11 @@ describe("the request body carries a descriptor and no rows", () => {
     const resumed = buildTurnRequest("x", "s", { pageContext: LIST_CONTEXT, resumeFrom: 4 });
     expect(resumed.resume_from).toBe(4);
     expect(resumed.page_context).toEqual(LIST_CONTEXT);
+  });
+
+  it("sets resume only when asked, so a follow-up body never carries it", () => {
+    expect("resume" in buildTurnRequest("x", "s", { resumeFrom: 4 })).toBe(false);
+    expect(buildTurnRequest("x", "s", { resumeFrom: 0, resume: true }).resume).toBe(true);
   });
 
   it("the hook's builder carries the current descriptor without the caller restating it", () => {

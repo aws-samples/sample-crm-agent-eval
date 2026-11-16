@@ -1,7 +1,7 @@
 # Runs `make verify` -- the offline aggregate gate: lint, typecheck, unit, stub, integration,
 # relay, gates, shellcheck. No AWS credential and no cost.
 # Tag must match the interpreter in .python-version.
-image: python:3.13.18-slim
+image: python:3.14.10-slim
 
 stages:
   - verify
@@ -13,7 +13,7 @@ variables:
   LC_ALL: "C.UTF-8"
   DEBIAN_FRONTEND: "noninteractive"
   # Installed into each job's .venv before the lock.
-  PIP_VERSION: "26.2.2"
+  PIP_VERSION: "26.3"
 
 # Base packages both jobs install.
 .apt_deps: &apt_deps
@@ -40,7 +40,7 @@ verify:
     AWS_ACCESS_KEY_ID: "local"
     AWS_SECRET_ACCESS_KEY: "local"  # pragma: allowlist secret
     AWS_DEFAULT_REGION: "us-east-1"
-    TERRAFORM_VERSION: "1.17.0"
+    TERRAFORM_VERSION: "1.17.2"
     GITLEAKS_VERSION: "8.30.1"
     GITLEAKS_SHA256_X64: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"  # pragma: allowlist secret
     GITLEAKS_SHA256_ARM64: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"  # pragma: allowlist secret
@@ -48,9 +48,9 @@ verify:
     SHELLCHECK_SHA256_X86_64: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"  # pragma: allowlist secret
     SHELLCHECK_SHA256_AARCH64: "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588"  # pragma: allowlist secret
     # Major must equal the relay Lambda runtime in infra/modules/agent_relay/variables.tf.
-    NODE_VERSION: "24.22.1"
-    NODE_SHA256_X64: "6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6"  # pragma: allowlist secret
-    NODE_SHA256_ARM64: "dbabf7a1cbf947e6059ffad2c27b80041db97dea1e553b62afdee7f13fca336e"  # pragma: allowlist secret
+    NODE_VERSION: "24.22.3"
+    NODE_SHA256_X64: "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"  # pragma: allowlist secret
+    NODE_SHA256_ARM64: "6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c"  # pragma: allowlist secret
     # Minimum pytest-xdist worker count; equal to the Makefile's PYTEST_WORKERS default.
     PYTEST_WORKERS_FLOOR: "4"
   cache:
@@ -240,12 +240,17 @@ verify:
 # Frontend lint, typecheck, unit tests and build, plus the emitted-CSS gate.
 frontend:
   stage: verify
-  image: node:26.13.0-slim
+  # Tag must match the interpreter in .python-version; Node comes from the pinned tarball below.
+  image: python:3.14.10-slim
   variables:
     NPM_CONFIG_FUND: "false"
     NPM_CONFIG_AUDIT: "false"
     CRM_REQUIRE_EMITTED_CSS: "1"
     CRM_REQUIRE_TS_CONTRACTS: "1"
+    # Must equal frontend/.nvmrc.
+    FRONTEND_NODE_VERSION: "26.13.1"
+    FRONTEND_NODE_SHA256_X64: "5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864"  # pragma: allowlist secret
+    FRONTEND_NODE_SHA256_ARM64: "89e1853138db51e8b82d3e98ba9c0d3f2956a28e5e55ea1b7e12d25aae92d5dd"  # pragma: allowlist secret
   cache:
     key:
       files:
@@ -255,14 +260,32 @@ frontend:
   before_script:
     - set -euo pipefail
     - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends python3 python3-venv make git
+    - apt-get install -y -qq --no-install-recommends make git xz-utils curl ca-certificates libatomic1
     - |
-      # Fail unless the image's Node matches frontend/.nvmrc.
+      # Install the pinned Node release; it must match frontend/.nvmrc.
       pinned="$(cat frontend/.nvmrc)"
-      installed="$(node --version | sed 's/^v//')"
-      [ "$installed" = "$pinned" ] || {
-        echo "ERROR: frontend/.nvmrc pins ${pinned} but the image ships ${installed}" >&2; exit 1; }
-      echo "frontend Node ${installed} matches frontend/.nvmrc"
+      [ "${FRONTEND_NODE_VERSION}" = "$pinned" ] || {
+        echo "ERROR: frontend/.nvmrc pins ${pinned} but FRONTEND_NODE_VERSION is ${FRONTEND_NODE_VERSION}" >&2; exit 1; }
+      case "$(uname -m)" in
+        x86_64)  node_arch="x64";   frontend_node_sha="${FRONTEND_NODE_SHA256_X64}" ;;
+        aarch64) node_arch="arm64"; frontend_node_sha="${FRONTEND_NODE_SHA256_ARM64}" ;;
+        *) echo "ERROR: no pinned Node digest for architecture $(uname -m)" >&2; exit 1 ;;
+      esac
+      node_dir="node-v${FRONTEND_NODE_VERSION}-linux-${node_arch}"
+      asset="${node_dir}.tar.xz"
+      curl -fsSL --retry 3 --retry-all-errors -o "/tmp/${asset}" \
+        "https://nodejs.org/dist/v${FRONTEND_NODE_VERSION}/${asset}"
+      echo "${frontend_node_sha}  /tmp/${asset}" | sha256sum --check --strict -
+      tar -xJf "/tmp/${asset}" -C /usr/local --strip-components=1 --no-same-owner \
+        "${node_dir}/bin" "${node_dir}/include" "${node_dir}/lib"
+      rm -f "/tmp/${asset}"
+      resolved="$(command -v node)"
+      [ "$resolved" = /usr/local/bin/node ] || {
+        echo "ERROR: PATH resolves node to ${resolved}, not the pinned install" >&2; exit 1; }
+      installed="$(node --version)"
+      [ "$installed" = "v${pinned}" ] || {
+        echo "ERROR: frontend/.nvmrc pins ${pinned} but PATH resolves ${installed}" >&2; exit 1; }
+      echo "frontend node ${installed} (npm $(npm --version)) pinned at ${resolved}"
     - python3 -m venv .venv
     - .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
     - |
@@ -275,6 +298,11 @@ frontend:
   script:
     - .venv/bin/python -m pytest tests/unit/test_check_emitted_css.py
     - .venv/bin/python -m pytest tests/integration/test_envelope_groups_contract.py tests/integration/test_eval_envelopes_contract.py
+    # The SPA-relay-Runtime reconnect contract: the bundled relay and the real Runtime on the same bodies.
+    - .venv/bin/python -m pytest tests/integration/test_resume_contract.py
+    # The tier-comparison UI contract rewrites the fixture the frontend unit tests read.
+    - .venv/bin/python -m pytest tests/integration/test_tier_comparison_ui_contract.py
+    - git diff --exit-code -- frontend/src/pages/evals/__fixtures__/tierComparison.json
     - cd frontend
     - npm run gen:types
     # The full gate, including the frontend consumer byte-diff the verify job defers.

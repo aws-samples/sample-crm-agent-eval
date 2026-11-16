@@ -104,7 +104,7 @@ def test_the_eval_zip_carries_the_user_settings_handler() -> None:
     assert "config/models.yaml" in members
 
 
-#: A Python Lambda runtime literal in Terraform: `runtime = "python3.13"` or a variable default.
+#: A Python Lambda runtime literal in Terraform: `runtime = "python3.14"` or a variable default.
 _TF_PYTHON_RUNTIME: Final = re.compile(r'^\s*(?:runtime|default)\s*=\s*"python(\d+\.\d+)"', re.M)
 
 
@@ -127,4 +127,4 @@ def test_every_python_runtime_names_the_version_packaging_and_the_gate_target() 
     assert infra_versions == {target}, infra_versions
     assert packager_versions == {target}, packager_versions
     assert smoke_versions == {target}, smoke_versions
-    assert target == "3.13"
+    assert target == "3.14"

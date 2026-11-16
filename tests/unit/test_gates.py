@@ -1614,7 +1614,7 @@ class TestEveryLocaleDependentMatcherIsPinnedOrExempt:
             path = REPO_ROOT / rel
             try:
                 text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+            except OSError, UnicodeDecodeError:
                 continue
             shell, python = cls._is_shell(path), path.suffix == ".py"
             if not (shell or python):

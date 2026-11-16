@@ -103,6 +103,7 @@ STORE_METHOD_ACTIONS: Final[dict[str, StoreMethod]] = {
     "get_item": StoreMethod(frozenset({"dynamodb:GetItem"})),
     "put_item": StoreMethod(frozenset({"dynamodb:PutItem"})),
     "put_if_absent": StoreMethod(frozenset({"dynamodb:PutItem"})),
+    "put_conditional": StoreMethod(frozenset({"dynamodb:PutItem"})),
     "update_item": StoreMethod(frozenset({"dynamodb:UpdateItem"})),
     "delete_item": StoreMethod(frozenset({"dynamodb:DeleteItem"})),
     # Re-reads the item at its own primary key before writing.

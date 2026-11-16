@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Pin every planted-defect value PD-01..PD-07 for two tenants."""
+"""Pin every planted-defect value PD-01..PD-08 for two tenants."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
 import fixtures.generate as generate
 import pytest
 from fixtures.generate import GeneratedCorpus, generate_dataset, scoped_id
+
+from agents.events import TOOL_RESULT_BYTE_CEILING
 
 TENANTS = ("demo", "eval-x")
 
@@ -42,7 +45,13 @@ DECLARED_RECORDS: dict[str, frozenset[str]] = {
     "_plant_pd05_report_only_speculation": frozenset({"opp-0056", "note-defect-pd05"}),
     "_plant_pd06_same_named_contacts_one_account": frozenset({"cont-0077", "cont-0078"}),
     "_plant_pd07_clean_multi_step_write_target": frozenset({"opp-0088"}),
+    "_plant_pd08_activity_history_larger_than_one_page": frozenset(
+        f"act-defect-pd08-{index:02d}" for index in range(55)
+    ),
 }
+
+#: ``list_activities``'s default page size.
+DEFAULT_ACTIVITY_PAGE: int = 50
 
 _ID_FIELDS = {
     "accounts": "account_id",
@@ -189,6 +198,80 @@ def test_pd07_target_is_open_with_no_seeded_note_or_meeting(
     assert [
         a for a in _children(corpus, "activities", opportunity_id) if a["kind"] == "meeting"
     ] == []
+
+
+def _pd08_activities(corpus: GeneratedCorpus, tenant: str) -> list[dict[str, object]]:
+    prefix = scoped_id(tenant, "act-defect-pd08-")
+    return [a for a in corpus.activities if str(a["activity_id"]).startswith(prefix)]
+
+
+def _base_corpus(tenant: str, monkeypatch: pytest.MonkeyPatch) -> GeneratedCorpus:
+    monkeypatch.setattr(generate, "_plant_pd08_activity_history_larger_than_one_page", _no_planting)
+    return generate_dataset(tenant)
+
+
+def test_pd08_plants_55_activities_on_opp_0000(corpus: GeneratedCorpus, tenant: str) -> None:
+    """PD-08 adds 55 activities to opp-0000, each with a body, all ids distinct."""
+    planted = _pd08_activities(corpus, tenant)
+    assert len(planted) == 55
+    assert {a["opportunity_id"] for a in planted} == {scoped_id(tenant, "opp-0000")}
+    assert {a["account_id"] for a in planted} == {scoped_id(tenant, "acct-0000")}
+    assert len({a["activity_id"] for a in planted}) == 55
+    assert all(isinstance(a["body"], str) and a["body"] for a in planted)
+    assert {a["kind"] for a in planted} <= set(generate.ACTIVITY_KINDS)
+
+
+def test_pd08_ids_are_disjoint_from_the_base_corpus(
+    corpus: GeneratedCorpus, tenant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No PD-08 id occurs in the corpus generated without PD-08."""
+    base = _base_corpus(tenant, monkeypatch)
+    planted_ids = {a["activity_id"] for a in _pd08_activities(corpus, tenant)}
+    assert planted_ids.isdisjoint(_flatten(base))
+
+
+def test_pd08_leaves_every_other_activity_byte_identical(
+    corpus: GeneratedCorpus, tenant: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every activity outside PD-08 serialises identically, and in order, to the base corpus."""
+    base = _base_corpus(tenant, monkeypatch)
+    planted_ids = {a["activity_id"] for a in _pd08_activities(corpus, tenant)}
+    others = [a for a in corpus.activities if a["activity_id"] not in planted_ids]
+    assert [a["activity_id"] for a in others] == [a["activity_id"] for a in base.activities]
+    differing = [
+        str(mine["activity_id"])
+        for mine, theirs in zip(others, base.activities, strict=True)
+        if json.dumps(mine, sort_keys=True) != json.dumps(theirs, sort_keys=True)
+    ]
+    assert differing == []
+    assert [a["activity_id"] for a in corpus.activities[: len(base.activities)]] == [
+        a["activity_id"] for a in base.activities
+    ]
+
+
+def test_pd08_activities_fall_inside_the_opportunity_timeline(
+    corpus: GeneratedCorpus, tenant: str
+) -> None:
+    """Each PD-08 activity occurs between opp-0000's creation and its recorded last touch."""
+    opportunity = _record(corpus, tenant, "opportunities", "opp-0000")
+    for activity in _pd08_activities(corpus, tenant):
+        assert str(opportunity["created_at"]) <= str(activity["occurred_at"])
+        assert str(activity["occurred_at"]) <= str(opportunity["last_touch"])
+
+
+def test_pd08_is_deterministic(corpus: GeneratedCorpus, tenant: str) -> None:
+    """A second generation produces the same PD-08 activities."""
+    assert _pd08_activities(generate_dataset(tenant), tenant) == _pd08_activities(corpus, tenant)
+
+
+def test_any_default_page_of_opp_0000_activities_exceeds_the_tool_result_bound(
+    corpus: GeneratedCorpus, tenant: str
+) -> None:
+    """Even the 50 smallest of opp-0000's activities exceed the tool-result byte ceiling."""
+    activities = _children(corpus, "activities", scoped_id(tenant, "opp-0000"))
+    assert len(activities) > DEFAULT_ACTIVITY_PAGE
+    sizes = sorted(len(repr(a)) for a in activities)
+    assert sum(sizes[:DEFAULT_ACTIVITY_PAGE]) > TOOL_RESULT_BYTE_CEILING
 
 
 def test_no_contact_other_than_pd01s_is_departed(corpus: GeneratedCorpus, tenant: str) -> None:

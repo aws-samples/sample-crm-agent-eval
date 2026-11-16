@@ -95,7 +95,7 @@ else
   echo "pre-commit: running gitleaks over the working tree's non-ignored files..."
   # The gate resolves `gitleaks` from PATH, so put the resolved GITLEAKS_BIN's directory first.
   _gitleaks_dir="$(dirname -- "$(command -v "$GITLEAKS_BIN")")"
-  if ! PATH="$_gitleaks_dir:$PATH" python3 scripts/check_secret_scan.py ; then
+  if ! PATH="$_gitleaks_dir:$PATH" scripts/repo_python.sh scripts/check_secret_scan.py ; then
     FAILED=1
   fi
 fi

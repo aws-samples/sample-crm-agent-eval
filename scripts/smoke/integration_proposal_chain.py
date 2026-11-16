@@ -80,7 +80,13 @@ from scripts.smoke.cognito_claims import (
     ProvisionedSmokeUser,
     _live_table_prefix,
 )
-from scripts.smoke.harness import CheckResult, SmokeContext, open_https, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    SmokeContext,
+    exception_detail,
+    open_https,
+    run_main,
+)
 from scripts.smoke.integration_ui_api_ddb import in_book_accounts
 
 from crm.audit import build_audit_record
@@ -444,7 +450,7 @@ class SuppliedTokenLease:
                 resource="smoke_tenant",
                 check="tenant_left_clean",
                 status="fail",
-                detail=f"teardown of {tenant!r} failed: {type(exc).__name__}: {exc}",
+                detail=f"teardown of {tenant!r} failed: {exception_detail(exc)}",
             )
             return
         yield CheckResult(
@@ -635,7 +641,7 @@ def checks(
             resource=RESOURCE_CLASS,
             check="identity_acquired",
             status="fail",
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=exception_detail(exc),
         )
         yield from resolved_lease.release()
         return
@@ -1202,7 +1208,7 @@ def _derived_index_attributes_check(
             resource="approve",
             check="derived_index_attributes_recomputed",
             status="fail",
-            detail=f"gsi_stage could not be queried: {type(exc).__name__}: {exc}",
+            detail=f"gsi_stage could not be queried: {exception_detail(exc, 'dynamodb:Query')}",
         )
     target_id = str(row.get("opportunity_id"))
     indexed_correctly = target_id in at_new_stage and target_id not in at_old_stage
@@ -1263,7 +1269,7 @@ def _proposal_status_index_check(
             resource="approve",
             check="proposal_reachable_by_approved_status_index",
             status="fail",
-            detail=f"gsi_status could not be queried: {type(exc).__name__}: {exc}",
+            detail=f"gsi_status could not be queried: {exception_detail(exc, 'dynamodb:Query')}",
         )
     if proposal_id not in approved or proposal_id in pending:
         return CheckResult(
@@ -2038,7 +2044,7 @@ def _demo_tenant_untouched_check(ctx: SmokeContext, demo_before: Mapping[str, in
             resource=RESOURCE_CLASS,
             check="demo_tenant_untouched",
             status="fail",
-            detail=f"could not re-read the demo tenant's row counts: {type(exc).__name__}: {exc}",
+            detail=f"could not re-read the demo tenant's row counts: {exception_detail(exc)}",
         )
     drift = {
         t: (demo_before.get(t), demo_after[t])
@@ -2165,7 +2171,7 @@ def _teardown_removed_everything_checks(
                 resource="smoke_tenant",
                 check=f"{table}_rows_removed",
                 status="fail",
-                detail=f"could not re-read {table} rows: {type(exc).__name__}: {exc}",
+                detail=f"could not re-read {table} rows: {exception_detail(exc)}",
             )
             continue
         if not ids:
@@ -2205,7 +2211,7 @@ def _teardown_removed_everything_checks(
                 resource="smoke_tenant",
                 check=f"{table}_empty_for_tenant",
                 status="fail",
-                detail=f"could not count {table} rows for {tenant!r}: {type(exc).__name__}: {exc}",
+                detail=f"could not count {table} rows for {tenant!r}: {exception_detail(exc)}",
             )
             continue
         yield CheckResult(
@@ -2550,7 +2556,7 @@ def _out_of_book_revert_leg(
             resource="out_of_book_revert",
             check="fixture_seeded_outside_the_book",
             status="fail",
-            detail=f"{type(exc).__name__}: {exc}",
+            detail=exception_detail(exc),
         )
         yield from _skip_leg(leg[1:], "the out-of-book fixture could not be seeded")
         return

@@ -6,7 +6,8 @@ A disposable `eval-smoke-<run_id>` tenant and Cognito user are provisioned with
 removed afterwards; the `demo` tenant is proved untouched. One turn is posted through
 `cloudfront_source`, naming a real `demo` account the caller cannot see, and counted against this
 module's :data:`scripts.smoke.three_tier_chat.MODEL_TURN_ALLOTMENTS` share. Billable: the turn makes
-real model calls.
+real model calls. The Runtime's conversation-history item for the turn's session is deleted before
+the principal is removed, and proved absent by the `history_items_deleted` row.
 
 :func:`relay_turn_checks` turns the parsed stream into rows: the turn completed, no `tool_result`
 carried the out-of-book account, every event kind is in the closed vocabulary, and the per-agent
@@ -18,6 +19,7 @@ assistant's prose is never read.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import uuid
@@ -31,8 +33,15 @@ from scripts.smoke.demo_tenant_guard import (
     store_row_reader,
     writes_only_under_smoke_tenant_check,
 )
-from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, run_main
-from scripts.smoke.three_tier_chat import ModelTurnBudget, budget_refused
+from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, exception_detail, run_main
+from scripts.smoke.three_tier_chat import (
+    HISTORY_ITEMS_DELETED_CHECK,
+    HistoryItemsFactory,
+    ModelTurnBudget,
+    _LiveHistoryItems,
+    budget_refused,
+    delete_history_items,
+)
 from scripts.smoke_agent_stream import (
     LiveStreamPrincipalProvisioner,
     cloudfront_source,
@@ -43,6 +52,7 @@ from agents.events import EVENT_KINDS
 from agents.registry import tool_registry_for
 from agents.subagents import ALL_SUBAGENT_SPECS
 from agents.supervisor import DIRECT_TOOL_NAMES, SUPERVISOR_ROLE
+from crm.store.keys import history_key
 from crm.toolspec.definitions import (
     BY_NAME,
     TABLES,
@@ -494,7 +504,7 @@ def relay_turn_checks(
     try:
         events = list(run_turn(prompt))
     except Exception as exc:  # noqa: BLE001 - a transport failure is a check failure, not a crash
-        detail = f"turn failed: {type(exc).__name__}: {exc}"
+        detail = f"turn failed: {exception_detail(exc)}"
         return [
             CheckResult(resource=resource, check=check, status="fail", detail=detail)
             for resource, check in _turn_rows()
@@ -525,16 +535,20 @@ def _event_payloads(chunks: Iterable[bytes]) -> list[dict[str, Any]]:
     for event in parse_sse_bytes(chunks):
         try:
             decoded = json.loads(event.data)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if isinstance(decoded, dict):
             payloads.append(decoded)
     return payloads
 
 
-def _cloudfront_turn_runner(ctx: SmokeContext, token: str) -> TurnRunner:
+def new_session_id() -> str:
+    """A fresh session id for this module's relay turn."""
+    return f"smoke-agents-{uuid.uuid4().hex}"
+
+
+def _cloudfront_turn_runner(ctx: SmokeContext, token: str, session_id: str) -> TurnRunner:
     def run(prompt: str) -> list[dict[str, Any]]:
-        session_id = f"smoke-agents-{uuid.uuid4().hex}"
         body = {"prompt": prompt, "session_id": session_id, "resume_from": 0}
         source = cloudfront_source(ctx, token=token, body=body, session_id=session_id)
         return _event_payloads(source())
@@ -560,14 +574,17 @@ def checks(
     provisioner_factory: Callable[[SmokeContext], LiveStreamPrincipalProvisioner] = (
         LiveStreamPrincipalProvisioner
     ),
-    runner_factory: Callable[[SmokeContext, str], TurnRunner] = _cloudfront_turn_runner,
+    runner_factory: Callable[[SmokeContext, str, str], TurnRunner] = _cloudfront_turn_runner,
+    history_items: HistoryItemsFactory = _LiveHistoryItems,
 ) -> Iterable[CheckResult]:
     """Provision a disposable principal, run one counted turn, prove `demo` untouched, clean up.
 
     Every row in :func:`_turn_rows` is emitted on every path: a turn that did not run is a `defer`
-    naming why. The factories are injectable for the offline test.
+    naming why. Once the turn has been sent, its session's history item is deleted in the `finally`,
+    before the principal is removed. The factories are injectable for the offline test.
     """
     budget = ModelTurnBudget(RESOURCE_CLASS)
+    sent_sessions: list[str] = []
     provisioner = provisioner_factory(ctx)
     reader = store_row_reader(provisioner.store())
     demo_before = read_tenant_snapshot(reader, DEMO_TENANT)
@@ -581,7 +598,7 @@ def checks(
                     resource="smoke_principal",
                     check="mfa_access_token_issued",
                     status="fail",
-                    detail=f"could not provision the smoke principal: {type(exc).__name__}: {exc}",
+                    detail=f"could not provision the smoke principal: {exception_detail(exc)}",
                 )
             )
             results.extend(
@@ -602,9 +619,11 @@ def checks(
             label = "relay turn"
             if budget.spend(label):
                 account = out_of_book_account()
+                session_id = new_session_id()
+                sent_sessions.append(session_id)
                 results.extend(
                     relay_turn_checks(
-                        runner_factory(ctx, token),
+                        runner_factory(ctx, token, session_id),
                         prompt=turn_prompt(account),
                         out_of_book_account=account,
                     )
@@ -628,8 +647,34 @@ def checks(
                     resource=RESOURCE_CLASS, tenant=provisioner.tenant(), reader=reader
                 )
             )
+            results.extend(
+                _delete_turn_history(ctx, history_items, provisioner.tenant(), sent_sessions)
+            )
         results.extend(provisioner.cleanup())
     return results
+
+
+def _delete_turn_history(
+    ctx: SmokeContext,
+    items_factory: HistoryItemsFactory,
+    tenant: str,
+    sessions: Sequence[str],
+) -> Iterable[CheckResult]:
+    """Delete the history item of every session a turn was sent with, as this module's row."""
+    if not sessions:
+        return
+    try:
+        items = items_factory(ctx)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
+        yield CheckResult(
+            resource=RESOURCE_CLASS,
+            check=HISTORY_ITEMS_DELETED_CHECK,
+            status="fail",
+            detail=f"could not address the history items: {exception_detail(exc)}",
+        )
+        return
+    deleted = delete_history_items(items, [history_key(tenant, session) for session in sessions])
+    yield dataclasses.replace(deleted, resource=RESOURCE_CLASS)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

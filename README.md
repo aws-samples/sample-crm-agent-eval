@@ -73,9 +73,9 @@ This is a demo and a research instrument, not a production CRM.
 
 | Tool | Version |
 |---|---|
-| Python | exactly the version in `.python-version` (3.13.18); a newer host `python3` makes `pip install -e .` fail |
-| Node.js | 26.13.0 for `frontend/` (`frontend/.nvmrc`); 24 or later for `src/relay/` (deployed on the `nodejs24.x` Lambda runtime) |
-| Terraform | 1.17.0 or later (licensed under BUSL-1.1); the AWS provider is pinned to 6.71.0 |
+| Python | exactly the version in `.python-version` (3.14.10); a host `python3` of any other minor version makes `pip install -e .` fail |
+| Node.js | 26.13.1 for `frontend/` (`frontend/.nvmrc`); 24 or later for `src/relay/` (deployed on the `nodejs24.x` Lambda runtime) |
+| Terraform | 1.17.2 tested; 1.17.0 or later required (licensed under BUSL-1.1); the AWS provider is pinned to 6.72.0 |
 | Docker | for DynamoDB Local (`amazon/dynamodb-local:3.3.2`, pinned by digest in `scripts/run_local_dynamodb.sh`) |
 | ShellCheck | 0.11.0 (pinned in CI); `make verify` runs it |
 | gitleaks | 8.30.1 (pinned in CI); optional locally, where `check_secret_scan` skips without it |
@@ -105,7 +105,7 @@ and route tables, and the API Gateway logging role and setting. See
 ## Install
 
 ```bash
-python3.13 -m venv .venv                   # the interpreter whose version matches .python-version
+python3.14 -m venv .venv                   # the interpreter whose version matches .python-version
 # On a version mismatch this prints "wrong interpreter" and installs no Python packages.
 { [ "$(.venv/bin/python --version)" = "Python $(cat .python-version)" ] || { echo "wrong interpreter" >&2; false; }; } &&
   .venv/bin/pip install --no-input --no-deps -r requirements.txt &&
@@ -473,13 +473,18 @@ the backend must go before the Runtime's network interfaces are released.
 - Most `violation_*.json` plan fixtures still record AWS provider 6.62.0, the version of the plan
   they were derived from. The compliant plan fixtures and the two violation fixtures derived from
   them are built at test time by `scripts/plan_fixtures.py`, from
-  `tests/fixtures/plans/compliant.base.ndjson`, which was captured from a plan under the
-  then-pinned 6.68.0 provider.
-- The last grype scan covered the previous AWS provider pin, `hashicorp/aws` 6.70.0 (go1.26.10,
-  `golang.org/x/net` v0.61.0): no matches against its DB built 2026-10-25, measured 2026-10-25. The
-  pinned 6.71.0 has not been scanned. The binary is local Terraform tooling and is never deployed.
+  `tests/fixtures/plans/compliant.base.ndjson`, which was captured from a plan under
+  Terraform 1.17.2 and the pinned 6.72.0 provider.
+- The last grype scan (grype 0.121.2) covered the pinned AWS provider's `darwin_arm64` build only,
+  `hashicorp/aws` 6.72.0 (go1.27.3, `golang.org/x/net` v0.62.0): one match against its DB built
+  2026-11-13, measured 2026-11-13. The match is GO-2026-6859 in the Go standard library, a race in
+  HTTP/1 servers that use `MaxBytesReader`, with severity unknown and the fix in go1.27.4. The
+  binary is local Terraform tooling and is never deployed.
 - The JWKS fetch in `scripts/smoke/cognito_claims.py` uses PyJWT's own HTTP client, not the smoke
   harness's https-only opener.
+- When the tool-output bound trims a page of records, the page's `next_cursor` still resumes after
+  the full page, so paging on cannot reach the trimmed records. Requesting the page again with a
+  smaller `limit` does.
 - **Principal boundary.** Resource policies deny the data and administration of these stores to every
   principal outside the project roles that use them, the operators in `crm_operator_principal_arns`
   and, for administration, the account root:
@@ -506,6 +511,10 @@ the backend must go before the Runtime's network interfaces are released.
   - The CRM log groups stay readable by any principal in the account with CloudWatch Logs read
     permissions. CloudWatch Logs decrypts under its own service identity, so the logs key Deny
     refuses direct key use but not log reads. Log redaction applies to what they can read.
+- Chat history items in the `reps` table expire 24 hours after their last write, but DynamoDB
+  deletes expired items in the background, typically within a few days of expiry, and `reps`'
+  point-in-time recovery keeps them for its 35-day window. Removing a user's history sooner means deleting its `history#` items as an operator (see
+  `docs/runbook.md`, "Conversation history").
 - Until the first secret rotation, the MCP app client's secret stays readable through
   `cognito-idp:DescribeUserPoolClient` by any principal allowed that action; Cognito user pools have
   no resource policy. After a rotation (`scripts/rotate_mcp_client_secret.py`, see

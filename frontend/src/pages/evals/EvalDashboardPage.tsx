@@ -30,7 +30,7 @@ import { LiveSweepDialog, RepeatsSelect } from "./LiveSweepDialog";
 import { RunHistory } from "./RunHistory";
 import { TierComparisonSummary } from "./TierComparisonSummary";
 import { classifyRunMode } from "./runMode";
-import { erroredItemsCostNote } from "./types";
+import { erroredItemsCostNote, isEarlierRecordFormat } from "./types";
 import { toArtifactLinks, useEvalRun } from "./useEvalRun";
 import { STATUS_LABEL, describeProgress, describeRunSpend, tasksRan, useRunHistory } from "./useRunHistory";
 
@@ -185,8 +185,10 @@ function EvalDashboardPageBody({
     classifyRunMode(focused.mode) === "live" &&
     (focused.status === "queued" || focused.status === "running") &&
     !focused.cancel_requested;
-  const showResults =
+  const hasOutcome =
     focused !== undefined && (focused.status === "completed" || focused.status === "cancelled");
+  const earlierFormat = hasOutcome && isEarlierRecordFormat(focused);
+  const showResults = hasOutcome && !earlierFormat;
   const matrix = focused?.matrix;
   const artifacts = toArtifactLinks(focused);
 
@@ -360,6 +362,12 @@ function EvalDashboardPageBody({
           </dl>
         ) : null}
       </section>
+
+      {earlierFormat ? (
+        <p role="status" data-testid="eval-record-format-earlier" className={NOTICE_INFO}>
+          Recorded in an earlier format; its results are not shown.
+        </p>
+      ) : null}
 
       {showResults && !matrix ? (
         <p

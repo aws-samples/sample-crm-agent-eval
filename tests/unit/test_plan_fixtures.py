@@ -24,15 +24,15 @@ UNREAD_KEYS = frozenset(
 
 #: sha256 of `json.dumps(build(name), sort_keys=True)` per name.
 EXPECTED_SHA256 = {
-    "compliant": "d9dd799f5d32997be6f0d5c41cb5298fa5f0d4078fec75ec0656dce5a2084005",
+    "compliant": "f6dec943e81e652ef2ee27ead8b8d32f6ef3a3d44ffb61aacb36c5fde4ddfc98",
     "compliant_gateway_role_known_arn": (
-        "d74f7982321b59662ab93488a428d33149c9447122ed31a155244cd88cdc18ca"
+        "200bb43354db8bc6cb228620336941290d62649d673f2ce5124704b06fb6d20d"
     ),
     "violation_log_group_no_kms": (
-        "9b556f57694c25fce782841d349ea5bbe9a01a5739bf4b714e145026eea2cef5"
+        "b04e891dbb41c075133c3c462e5d7fb400d4417d1e7f3337245f237651538859"
     ),
     "violation_relay_function_url_buffered": (
-        "aac904c0a3c097fbaad20a33b20d9720a5bfdd67e76160325c2348ee8f3da9d4"
+        "104d63ef5e93b2af2672411a9a88dc68e0cab308ba97e32ce005ec73597beb45"
     ),
 }
 

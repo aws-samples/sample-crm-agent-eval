@@ -14,7 +14,7 @@ module "lambda_action_user_settings" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "crm.handlers.user_settings.handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = local.eval_lambda_zip
   source_code_hash       = filebase64sha256(local.eval_lambda_zip)
 

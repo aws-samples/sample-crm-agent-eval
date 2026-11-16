@@ -137,6 +137,12 @@ describe("the invocation payload carries identity through the retained agent cha
     expect(Object.keys(payload)).not.toContain("page_context");
     expect(Object.keys(payload)).not.toContain("tuning");
     expect(Object.keys(payload)).not.toContain("resume_from");
+    expect(Object.keys(payload)).not.toContain("resume");
+  });
+
+  it("sends resume only when the turn carries the flag", () => {
+    expect(buildRuntimePayload(turn({ resumeFrom: 0, resume: true }))["resume"]).toBe(true);
+    expect(Object.keys(buildRuntimePayload(turn({ resumeFrom: 0 })))).not.toContain("resume");
   });
 
   it("forwards page context, tuning, and a resume point when the caller supplies them", () => {

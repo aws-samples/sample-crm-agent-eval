@@ -42,7 +42,13 @@ from pathlib import Path
 from typing import Any, Final
 
 from scripts import region_map
-from scripts.smoke.harness import CheckResult, ExpectedCheckCount, SmokeContext, run_main
+from scripts.smoke.harness import (
+    CheckResult,
+    ExpectedCheckCount,
+    SmokeContext,
+    exception_detail,
+    run_main,
+)
 
 LAYER: Final[int] = 4
 RESOURCE_CLASS: Final[str] = "runtime_network_posture"
@@ -184,7 +190,7 @@ def copy_platform_version(http_response: Any, parsed: Any, **_: Any) -> None:
         return
     try:
         body = json.loads(getattr(http_response, "content", b"") or b"{}")
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return
     if isinstance(body, Mapping) and isinstance(body.get(_PLATFORM_VERSION_KEY), str):
         parsed[_PLATFORM_VERSION_KEY] = body[_PLATFORM_VERSION_KEY]
@@ -345,7 +351,7 @@ def _resource_policy_has_source_vpce_deny(ctx: SmokeContext, resource_arn: str) 
         return DenyReadResult.READ_FAILED
     try:
         document = json.loads(policy_text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return DenyReadResult.READ_FAILED
     for statement in document.get("Statement", []):
         if not isinstance(statement, Mapping):
@@ -368,7 +374,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one line
             resource="agentcore_runtime_arn",
             check="terraform_output_present",
             status="fail",
-            detail=f"required Terraform output 'agentcore_runtime_arn' is absent ({exc})",
+            detail=f"required Terraform output 'agentcore_runtime_arn' is absent ({exception_detail(exc)})",
         )
         return
 
@@ -389,7 +395,7 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one line
             resource=runtime_arn,
             check="runtime_ready",
             status="fail",
-            detail=f"the runtime or its endpoint status could not be read: {type(exc).__name__}: {exc}",
+            detail=f"the runtime or its endpoint status could not be read: {exception_detail(exc)}",
         )
         return
     yield CheckResult(

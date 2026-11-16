@@ -38,6 +38,7 @@ def tree(tmp_path: Path) -> Path:
     """A copy holding the script and its stamper, with a stub terraform first on PATH."""
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
+    shutil.copy2(_REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh")
     (root / "infra").mkdir()
     for name in ("refresh_outputs.sh", "outputs_provenance.py", "proc_run.py"):
         shutil.copy2(_REPO_ROOT / "scripts" / name, root / "scripts" / name)

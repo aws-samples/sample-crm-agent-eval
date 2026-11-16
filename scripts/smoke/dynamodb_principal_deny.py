@@ -8,7 +8,8 @@ Reads the deployed stack, never source:
 * the operator ARNs from the `crm_operator_principal_arns` output (the shape rows defer while it is
   absent, that is, before the apply);
 * the data-plane roles from the account: the execution role of every `crm-agent-eval-*` Lambda that
-  holds an inline policy named `<function>-dynamodb-kms`.
+  holds an inline policy named `<function>-dynamodb-kms`, plus the AgentCore Runtime's execution
+  role, read with `get-agent-runtime` for the `agentcore_runtime_arn` output.
 
 Rows:
 
@@ -18,6 +19,7 @@ Rows:
 * `table_sse_enabled:<table>`: `TableStatus == ACTIVE`, no `InaccessibleEncryptionDateTime`, and
   `SSEDescription.Status == ENABLED`.
 * `data_plane_roles_discovered`: at least one role was found.
+* `runtime_role_discovered`: the Runtime's execution role was read from the account.
 * `operator_data_plane_admitted`: the operator's `GetItem` on a non-existent key succeeds.
 * `probe_denied:<call>`: a run-scoped role `crm-agent-eval-probe-<run_id>`, trusted by the operator
   only and holding an identity Allow for exactly the probed actions, is refused with "explicit deny
@@ -48,6 +50,8 @@ from scripts.smoke.harness import (
     Deadline,
     ExpectedCheckCount,
     SmokeContext,
+    aws_error_code,
+    aws_error_detail,
     error_code,
     run_main,
     smoke_client_config,
@@ -60,6 +64,7 @@ RESOURCE_CLASS: Final[str] = "dynamodb_principal_deny"
 
 TABLE_NAMES_OUTPUT: Final[str] = "dynamodb_table_names"
 OPERATOR_ARNS_OUTPUT: Final[str] = "crm_operator_principal_arns"
+RUNTIME_ARN_OUTPUT: Final[str] = "agentcore_runtime_arn"
 
 FUNCTION_PREFIX: Final[str] = "crm-agent-eval-"
 DYNAMODB_KMS_POLICY_SUFFIX: Final[str] = "-dynamodb-kms"
@@ -379,7 +384,7 @@ def caller_identity(ctx: SmokeContext) -> CallerIdentity:
     arn = str(ctx.client("sts").get_caller_identity()["Arn"])
     parts = arn.split(":", 5)
     if len(parts) != 6:
-        raise ValueError(f"caller ARN {arn!r} is not an ARN")
+        raise ValueError("the caller ARN is not an ARN")
     partition, service, account, resource = parts[1], parts[2], parts[4], parts[5]
     if service == "sts" and resource.startswith("assumed-role/"):
         role_name = resource.split("/")[1]
@@ -387,7 +392,10 @@ def caller_identity(ctx: SmokeContext) -> CallerIdentity:
         return CallerIdentity(account=account, partition=partition, principal_arn=role_arn)
     if service == "iam" and resource.startswith("user/"):
         return CallerIdentity(account=account, partition=partition, principal_arn=arn)
-    raise ValueError(f"caller {arn!r} is neither an assumed role nor an IAM user")
+    raise ValueError(
+        f"the caller ({service}:{resource.partition('/')[0]}) is neither an assumed role nor an "
+        "IAM user"
+    )
 
 
 def discover_data_plane_roles(ctx: SmokeContext) -> frozenset[str]:
@@ -408,6 +416,24 @@ def discover_data_plane_roles(ctx: SmokeContext) -> frozenset[str]:
             if f"{name}{DYNAMODB_KMS_POLICY_SUFFIX}" in policy_names:
                 roles.add(role_arn)
     return frozenset(roles)
+
+
+def discover_runtime_role(ctx: SmokeContext) -> tuple[str | None, str]:
+    """The Runtime's execution-role ARN from `get-agent-runtime`, or `None` with the reason."""
+    runtime_arn = ctx.outputs.get(RUNTIME_ARN_OUTPUT)
+    if not isinstance(runtime_arn, str) or "/" not in runtime_arn:
+        return None, f"the {RUNTIME_ARN_OUTPUT} output is absent or not a runtime ARN"
+    runtime_id = runtime_arn.rpartition("/")[2]
+    try:
+        runtime = ctx.client("bedrock-agentcore-control").get_agent_runtime(
+            agentRuntimeId=runtime_id
+        )
+    except Exception as exc:  # noqa: BLE001 - reported as a failing row
+        return None, aws_error_detail("bedrock-agentcore-control:GetAgentRuntime", exc)
+    role_arn = runtime.get("roleArn")
+    if not isinstance(role_arn, str) or ":role/" not in role_arn:
+        return None, "get-agent-runtime returned no roleArn"
+    return role_arn, f"the Runtime {runtime_id} runs as {role_arn}"
 
 
 def _operator_arns(ctx: SmokeContext) -> tuple[frozenset[str] | None, str]:
@@ -436,7 +462,7 @@ def _describe_tables(
                     resource=physical,
                     check="describe_table",
                     status="fail",
-                    detail=f"describe_table raised {type(exc).__name__}: {exc}",
+                    detail=aws_error_detail("dynamodb:DescribeTable", exc),
                 )
             )
             continue
@@ -508,7 +534,7 @@ def _shape_row(
                 resource=resource,
                 check=check,
                 status="fail",
-                detail=f"reading the policy raised {error_code(exc) or type(exc).__name__}: {exc}",
+                detail=aws_error_detail("reading the resource policy", exc),
             ),
             None,
         )
@@ -541,7 +567,7 @@ def _operator_admitted_row(ctx: SmokeContext, target: TableTarget, run_id: str) 
             resource=target.physical,
             check=check,
             status="fail",
-            detail=f"the operator's GetItem raised {error_code(exc) or type(exc).__name__}: {exc}",
+            detail=aws_error_detail("the operator's dynamodb:GetItem", exc),
         )
     return CheckResult(
         resource=target.physical, check=check, status="pass", detail="GetItem returned 200"
@@ -646,13 +672,13 @@ def classify_probe(
         )
     code = error_code(outcome)
     message = str((getattr(outcome, "response", {}) or {}).get("Error", {}).get("Message", ""))
-    quoted = f"{code}: {message}" if code else f"{type(outcome).__name__}: {outcome}"
+    reported_code = aws_error_code(outcome)
     if code in _REACHED_RESOURCE_CODES:
         return CheckResult(
             resource=resource,
             check=check,
             status="fail",
-            detail=f"the call reached the resource, no boundary refused it ({quoted})",
+            detail=f"the call reached the resource, no boundary refused it ({reported_code})",
         )
     if code in {"AccessDeniedException", "AccessDenied"}:
         lowered = message.lower()
@@ -662,22 +688,30 @@ def classify_probe(
                     resource=resource,
                     check=check,
                     status="fail",
-                    detail=f"the denial does not name the probe role {probe_role} ({quoted})",
+                    detail=f"the denial does not name the probe role {probe_role} ({reported_code})",
                 )
-            return CheckResult(resource=resource, check=check, status="pass", detail=quoted)
+            return CheckResult(
+                resource=resource,
+                check=check,
+                status="pass",
+                detail=(
+                    f"{reported_code}: an explicit deny in a resource-based policy naming the probe role "
+                    f"{probe_role}"
+                ),
+            )
         if "because no " in lowered and "policy allows" in lowered:
             return CheckResult(
                 resource=resource,
                 check=check,
                 status="fail",
-                detail=f"an implicit deny, not the resource-based Deny ({quoted})",
+                detail=f"an implicit deny, not the resource-based Deny ({reported_code})",
             )
     return CheckResult(
         resource=resource,
         check=check,
         status=DEFER,
         defer_reason=DEFER_PROBE_UNCLASSIFIED,
-        detail=quoted,
+        detail=f"unclassified error ({reported_code})",
     )
 
 
@@ -777,8 +811,7 @@ def _delete_probe_role(ctx: SmokeContext, role_name: str) -> CheckResult:
             check=check,
             status="fail",
             detail=(
-                f"deleting probe role {role_name} raised {error_code(exc) or type(exc).__name__}: "
-                f"{exc}. Delete it by hand."
+                f"{aws_error_detail(f'deleting probe role {role_name}', exc)}. Delete it by hand."
             ),
         )
     return CheckResult(
@@ -836,8 +869,7 @@ def _probe(
                 check="probe_role_setup",
                 status="fail",
                 detail=(
-                    f"setting up the probe raised {error_code(exc) or type(exc).__name__}: {exc}; "
-                    "no probe call was classified"
+                    f"{aws_error_detail('setting up the probe', exc)}; no probe call was classified"
                 ),
             )
         )
@@ -871,6 +903,15 @@ def run_checks(
         status="pass" if discovered else "fail",
         detail=f"{len(discovered)} execution role(s) hold a <function>{DYNAMODB_KMS_POLICY_SUFFIX} policy",
     )
+    runtime_role, runtime_detail = discover_runtime_role(ctx)
+    yield CheckResult(
+        resource=RESOURCE_CLASS,
+        check="runtime_role_discovered",
+        status="pass" if runtime_role else "fail",
+        detail=runtime_detail,
+    )
+    if runtime_role:
+        discovered = discovered | {runtime_role}
 
     operators, operator_reason = _operator_arns(ctx)
     data_plane = discovered | operators if operators is not None else None
@@ -954,14 +995,14 @@ def checks(ctx: SmokeContext) -> Iterable[CheckResult]:
 
 
 def expected_check_count(ctx: SmokeContext) -> ExpectedCheckCount:
-    """Two rows per table, plus the key, discovery, operator, five probe and deletion rows."""
+    """Two rows per table, plus the key, two discovery, operator, five probe and deletion rows."""
     tables = len(ctx.outputs.require_mapping(TABLE_NAMES_OUTPUT))
     return ExpectedCheckCount(
-        minimum=2 * tables + 4 + len(PROBE_CALLS),
+        minimum=2 * tables + 5 + len(PROBE_CALLS),
         basis=(
             f"2 x {tables} tables in {TABLE_NAMES_OUTPUT} + key_policy_shape + "
-            f"data_plane_roles_discovered + operator_data_plane_admitted + {len(PROBE_CALLS)} "
-            "probe calls + probe_role_deleted"
+            "data_plane_roles_discovered + runtime_role_discovered + operator_data_plane_admitted + "
+            f"{len(PROBE_CALLS)} probe calls + probe_role_deleted"
         ),
     )
 

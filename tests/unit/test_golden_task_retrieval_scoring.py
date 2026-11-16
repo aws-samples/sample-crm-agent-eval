@@ -37,7 +37,7 @@ NARROWED_TASK_IDS: tuple[str, ...] = (
 
 #: Each narrowed task's expected read targets, stated independently of the task file.
 _EXPECTED_TARGETS: dict[str, tuple[str, ...]] = {
-    "gt-04-investigation-turn-budget-partial": ("opp-0000", "opp-0040", "opp-0080"),
+    "gt-04-investigation-turn-budget-partial": ("opp-0000", "opp-0040", "opp-0080", "opp-0200"),
     "gt-05-investigation-large-tool-result": ("opp-0000",),
 }
 
@@ -135,10 +135,10 @@ def test_narrowed_task_fails_when_the_turn_read_the_wrong_opportunity(
     assert score.correctness is not None and score.correctness < 1.0
 
 
-def test_gt04_fails_the_two_opportunities_it_never_read(
+def test_gt04_fails_the_three_opportunities_it_never_read(
     store: Store, tasks_by_id: dict[str, dict[str, Any]]
 ) -> None:
-    """Reading one of gt-04's three opportunities passes one read assertion and fails the others."""
+    """Reading one of gt-04's four opportunities passes one read assertion and fails the others."""
     task = tasks_by_id["gt-04-investigation-turn-budget-partial"]
     outcome = TurnOutcome(
         tenant=_TENANT,
@@ -147,24 +147,25 @@ def test_gt04_fails_the_two_opportunities_it_never_read(
     score = score_task(store, task=task, outcome=outcome)
 
     results = _read_results(score)
-    assert [r.passed for r in results] == [True, False, False]
+    assert [r.passed for r in results] == [True, False, False, False]
     assert _scoped("opp-0040") in results[1].name
     assert _scoped("opp-0080") in results[2].name
+    assert _scoped("opp-0200") in results[3].name
 
 
 # --- Passing cases --------------------------------------------------------------------------------
 
 
-def test_gt04_passes_when_all_three_opportunities_were_read(
+def test_gt04_passes_when_all_four_opportunities_were_read(
     store: Store, tasks_by_id: dict[str, dict[str, Any]]
 ) -> None:
-    """Reading all three opportunities the sweep is about satisfies gt-04's retrieval assertions."""
+    """Reading all four departed-contact opportunities satisfies gt-04's retrieval assertions."""
     task = tasks_by_id["gt-04-investigation-turn-budget-partial"]
     outcome = TurnOutcome(
         tenant=_TENANT,
         tool_calls=tuple(
             ToolCall(tool_name="get_opportunity", target_id=_scoped(local_id))
-            for local_id in ("opp-0000", "opp-0040", "opp-0080")
+            for local_id in _EXPECTED_TARGETS["gt-04-investigation-turn-budget-partial"]
         ),
     )
     score = score_task(store, task=task, outcome=outcome)

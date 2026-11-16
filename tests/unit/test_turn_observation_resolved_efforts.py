@@ -57,6 +57,7 @@ def _unit(turn: ObservedTurn) -> TaskUnitResult:
     tier = TierScore(tier="supervisor", applicable=False, passed=None)
     return TaskUnitResult(
         task_id="gt-unit",
+        repeat_index=0,
         task_score=TaskScore(
             task_id="gt-unit",
             scoring_mode="machine",

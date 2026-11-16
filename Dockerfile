@@ -7,7 +7,7 @@
 
 # ECR Public mirror of the Docker Official Image. Tag must match .python-version; pip must match
 # .gitlab-ci.yml's PIP_VERSION (tests/unit/test_dockerfile_pins.py).
-FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.13.18-slim AS base
+FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.14.10-slim AS base
 
 # Fixed UID/GID for the non-root runtime user.
 ARG APP_UID=10001
@@ -20,7 +20,7 @@ WORKDIR /app
 
 # Dependency layer, cached across source-only changes.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --no-input pip==26.2.2 \
+RUN pip install --no-cache-dir --no-input pip==26.3 \
     && pip install --no-cache-dir --no-input --no-deps -r requirements.txt
 
 # src/providers/capabilities.py reads config/ relative to /app.

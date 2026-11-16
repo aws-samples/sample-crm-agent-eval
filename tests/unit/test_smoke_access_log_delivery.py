@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke.access_log_delivery import (
     CHECK_DELIVERED,
     CHECK_TARGET,
@@ -61,6 +62,13 @@ _DISTRIBUTION_LOGGING: dict[str, Any] = {
     "Bucket": f"{_LOGS_BUCKET}.s3.amazonaws.com",
     "Prefix": "cloudfront-access-logs/",
 }
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _client_error(operation: str, message: str = "no") -> ClientError:
+    return ClientError({"Error": {"Code": "AccessDenied", "Message": message}}, operation)
 
 
 class _FakeS3:
@@ -186,8 +194,8 @@ class TestAccessLogDelivery:
 
     def test_a_listing_error_is_a_failure_not_an_absence_of_evidence(self) -> None:
         counts = _all_delivered()
-        counts[(_CLOUDTRAIL_ACCESS_LOGS_BUCKET, "s3-access-logs/cloudtrail/")] = RuntimeError(
-            "AccessDenied"
+        counts[(_CLOUDTRAIL_ACCESS_LOGS_BUCKET, "s3-access-logs/cloudtrail/")] = _client_error(
+            "ListObjectsV2"
         )
         results, _, _ = _run(counts)
         failed = [r for r in results if r.status == "fail"]
@@ -274,7 +282,7 @@ class TestTheCheckAssertsItsOwnTarget:
 
     def test_an_unreadable_source_logging_status_fails(self) -> None:
         targets: dict[str, tuple[str, str] | None | Exception] = dict(_SOURCE_TARGETS)
-        targets[_ORIGIN_BUCKET] = RuntimeError("AccessDenied")
+        targets[_ORIGIN_BUCKET] = _client_error("GetBucketLogging")
         results, _, _ = _run(_all_delivered(), targets=targets)
         failed = [r for r in results if r.status == "fail"]
         assert len(failed) == 1, results
@@ -307,7 +315,9 @@ class TestTheCheckAssertsItsOwnTarget:
         assert "Logging.Enabled false" in failed[0].detail
 
     def test_an_unreadable_distribution_config_fails(self) -> None:
-        results, _, _ = _run(_all_delivered(), distribution_logging=RuntimeError("AccessDenied"))
+        results, _, _ = _run(
+            _all_delivered(), distribution_logging=_client_error("GetDistributionConfig")
+        )
         failed = [r for r in results if r.status == "fail"]
         assert len(failed) == 1, results
         assert "AccessDenied" in failed[0].detail
@@ -378,3 +388,24 @@ class TestTheCompositionPassesTheseOutputs:
             "aws_s3_bucket.cloudtrail_access_logs.id"
         )
         assert declared["cloudtrail_s3_bucket_name"] == "aws_s3_bucket.cloudtrail.id"
+
+
+class TestAwsErrorsCarryNoMessage:
+    @pytest.mark.parametrize("site", ["list_objects", "get_bucket_logging", "distribution_config"])
+    def test_a_planted_arn_in_an_aws_error_never_reaches_a_detail(self, site: str) -> None:
+        error = _client_error("Operation", f"{_PLANTED_ARN} is not authorized")
+        counts = _all_delivered()
+        targets: dict[str, tuple[str, str] | None | Exception] = dict(_SOURCE_TARGETS)
+        distribution: dict[str, Any] | Exception | None = None
+        if site == "list_objects":
+            counts[(_CLOUDTRAIL_ACCESS_LOGS_BUCKET, "s3-access-logs/cloudtrail/")] = error
+        elif site == "get_bucket_logging":
+            targets[_ORIGIN_BUCKET] = error
+        else:
+            distribution = error
+        results, _, _ = _run(counts, targets=targets, distribution_logging=distribution)
+        failed = [r for r in results if r.status == "fail"]
+        assert len(failed) == 1, results
+        assert "AccessDenied" in failed[0].detail
+        assert _PLANTED_ARN not in failed[0].detail
+        assert all(_PLANTED_ARN not in r.detail for r in results)

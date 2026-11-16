@@ -42,35 +42,49 @@ const TIERS: readonly { readonly tier: string; readonly heading: string }[] = [
   { tier: "tool", heading: "ToolCall" },
 ];
 
-/** Row labels every tier carries, in order. */
-const COMMON_ROW_LABELS: readonly string[] = [
+/** The row labels of every tier, in order. */
+const ROW_LABELS: readonly string[] = [
   "Model",
   "Effort",
   "Task completion rate",
   "Task completion over repeats",
   "Task accuracy",
   "Cost per completed task",
-  "P95 latency per completed task (ms)",
   "P50 latency per completed task (ms)",
+  "P95 latency per completed task (ms)",
   "Model invocations",
   "Long-context invocations",
-  "Input tokens",
-  "Output tokens",
-  "Cost per task, all tasks",
+  "Total input tokens",
+  "Cache read tokens",
+  "Cache write tokens",
+  "Uncached input tokens",
+  "Total output tokens",
+  "Cost per applicable task",
   "Self-corrected retries",
+  "Budget-exhausted tasks",
+  "Truncated tool calls",
+  "Truncated tasks",
 ];
 
 /** The row counting calls priced at long-context rates. */
 const LONG_CONTEXT_ROW = "Long-context invocations";
 
-/** Row labels that follow the common ones, per tier. */
-const TIER_ROW_LABELS: Readonly<Record<string, readonly string[]>> = {
-  supervisor: ["Budget-exhausted tasks"],
-  subagent: ["data", "no_match", "denied", "tool_failure", "none"].map(
-    (kind) => `Delegation outcome: ${kind}`,
-  ),
-  tool: ["Truncated tasks"],
-};
+/** Asserts Total input tokens = Cache read + Cache write + Uncached input tokens in every column. */
+function expectInputTokenIdentity(heading: string, rows: readonly (readonly string[])[]): void {
+  const cells = (label: string): number[] =>
+    (rows.find((row) => row[0] === label) ?? []).slice(1).map((cell) => Number(cell));
+  const total = cells("Total input tokens");
+  const read = cells("Cache read tokens");
+  const write = cells("Cache write tokens");
+  const uncached = cells("Uncached input tokens");
+  expect(total.length, `${heading} carries the input token rows`).toBeGreaterThan(0);
+  for (const [column, value] of total.entries()) {
+    expect(
+      value,
+      `${heading} column ${column + 1}: total input is cache read + cache write + uncached`,
+    ).toBe(read[column] + write[column] + uncached[column]);
+  }
+}
 
 /** Words that state a judgement; none may appear anywhere in the summary. */
 const VERDICT_WORDS = [
@@ -115,11 +129,6 @@ interface WireStatus {
   readonly status?: unknown;
   readonly matrix?: { readonly arms?: readonly unknown[] };
   readonly tier_comparison_table?: WireTierTable;
-}
-
-/** The expected row labels of `tier`, in order. */
-function expectedRowLabels(tier: string): string[] {
-  return [...COMMON_ROW_LABELS, ...(TIER_ROW_LABELS[tier] ?? [])];
 }
 
 /** Split one GitHub-flavoured Markdown table line into its trimmed cells. */
@@ -300,15 +309,16 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
     const { tables, notes } = parseTierSection(readFileSync(SAMPLE_MATRIX, "utf-8"));
 
     expect([...tables.keys()]).toEqual(TIERS.map(({ heading }) => heading));
-    for (const { tier, heading } of TIERS) {
+    for (const { heading } of TIERS) {
       const table = tables.get(heading);
       expect(table?.headers[0], `${heading}'s first column`).toBe("Metric");
       expect(table?.rows.map((row) => row[0]), `${heading}'s row labels`).toEqual(
-        expectedRowLabels(tier),
+        [...ROW_LABELS],
       );
       for (const row of table?.rows ?? []) {
         expect(row.length, `${heading} row ${row[0]}`).toBe(table?.headers.length);
       }
+      expectInputTokenIdentity(heading, table?.rows ?? []);
     }
     expect(notes.length).toBeGreaterThan(0);
     expect(firstVerdictWord(tierSectionText(readFileSync(SAMPLE_MATRIX, "utf-8")))).toBeNull();
@@ -318,7 +328,7 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
     for (const sample of ["anthropic wins", "Winner: openai", "we recommend x", "x outperforms y"]) {
       expect(firstVerdictWord(sample), `${sample} states a judgement`).not.toBeNull();
     }
-    const vocabulary = [...COMMON_ROW_LABELS, ...Object.values(TIER_ROW_LABELS).flat(), "withheld"];
+    const vocabulary = [...ROW_LABELS, "withheld"];
     for (const label of vocabulary) {
       expect(firstVerdictWord(label), `${label} is a measurement label`).toBeNull();
     }
@@ -361,7 +371,7 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
       expect(
         table.rows.map((row) => row[0]),
         `${heading} carries the fixed row labels in order`,
-      ).toEqual(expectedRowLabels(tier));
+      ).toEqual([...ROW_LABELS]);
       for (const row of table.rows) {
         expect(row.length, `${heading} row ${row[0]} has one cell per arm`).toBe(armCount + 1);
       }
@@ -373,6 +383,7 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
       for (const cell of longContext.slice(1)) {
         expect(cell, `${heading}'s ${LONG_CONTEXT_ROW} is a recorded count, not —`).toMatch(/^\d+$/);
       }
+      expectInputTokenIdentity(heading, table.rows);
     }
 
     const summaryText = (await summary.innerText()).replace(/\s+/g, " ");
@@ -404,6 +415,78 @@ test.describe("the tier comparison summary and its matrix.md download", () => {
       firstVerdictWord(tierSectionText(markdown)),
       "matrix.md's tier section names no verdict or winner",
     ).toBeNull();
+  });
+});
+
+/** One history entry as the `list` action returns it. Mirrored, never imported. */
+interface WireListedRun {
+  readonly run_id?: string;
+  readonly status?: string;
+  readonly record_format?: string;
+}
+interface WireRunList {
+  readonly runs?: readonly WireListedRun[];
+  readonly next_cursor?: string | null;
+}
+
+/** History pages read while looking for an earlier-format run, at most. */
+const MAX_HISTORY_PAGES = 20;
+
+/** Wait for the next `eval_trigger` `list` response and return its body. */
+async function nextHistoryPage(page: Page): Promise<WireRunList> {
+  const response = await page.waitForResponse((candidate) => {
+    if (!EVAL_TRIGGER_PATH.test(new URL(candidate.url()).pathname)) return false;
+    if (candidate.request().method() !== "POST") return false;
+    try {
+      return (candidate.request().postDataJSON() as { action?: unknown }).action === "list";
+    } catch {
+      return false;
+    }
+  });
+  expect(response.status(), "the run history request succeeds").toBeLessThan(400);
+  return (await response.json()) as WireRunList;
+}
+
+test.describe("a run recorded in an earlier format", () => {
+  test("is listed in history and opens to the earlier-format notice with no tier table", async ({
+    signedInPage: page,
+  }) => {
+    const firstPage = nextHistoryPage(page);
+    await page.goto(EVAL_ROUTE);
+    let history = await firstPage;
+    let earlier: WireListedRun | undefined;
+    for (let pages = 1; pages <= MAX_HISTORY_PAGES; pages += 1) {
+      earlier = (history.runs ?? []).find(
+        (run) =>
+          run.record_format === "earlier" &&
+          typeof run.run_id === "string" &&
+          (run.status === "completed" || run.status === "cancelled"),
+      );
+      if (earlier !== undefined || !history.next_cursor) break;
+      const nextPage = nextHistoryPage(page);
+      await page.getByRole("button", { name: "Load more runs" }).click();
+      history = await nextPage;
+    }
+    test.skip(
+      earlier === undefined,
+      "the stack's run history holds no completed or cancelled run recorded in an earlier format",
+    );
+    const runId = earlier?.run_id ?? "";
+
+    const show = page
+      .getByRole("table", { name: "Evaluation sweeps, newest first" })
+      .getByRole("button", { name: `Show run ${runId}` });
+    await expect(show, "the earlier-format run is listed in history").toBeVisible();
+    await show.click();
+
+    await expect(page.getByTestId("eval-record-format-earlier")).toHaveText(
+      "Recorded in an earlier format; its results are not shown.",
+    );
+    await expect(page.getByTestId("tier-comparison-summary")).toHaveCount(0);
+    for (const { tier } of TIERS) {
+      await expect(page.getByTestId(`tier-comparison-table-${tier}`)).toHaveCount(0);
+    }
+    await expect(page.getByRole("alert")).toHaveCount(0);
   });
 });
 

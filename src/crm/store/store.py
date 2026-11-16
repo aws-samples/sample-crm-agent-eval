@@ -17,7 +17,8 @@ included, an internal error.
   attribute raises ``ValueError``.
 * **Conditional writes.** :meth:`Store.update_item` updates an existing item only (unless
   ``create_if_absent``) and raises :class:`Conflict` when its condition fails;
-  :meth:`Store.put_if_absent` reports an existing item as ``False``.
+  :meth:`Store.put_if_absent` reports an existing item as ``False``;
+  :meth:`Store.put_conditional` reports a lost optimistic-version race as ``False``.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from decimal import Decimal
 from typing import Any, Final
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError, HTTPClientError
 from botocore.exceptions import ConnectionError as BotoConnectionError
 
@@ -82,6 +84,9 @@ DynamoDBClient = Any
 _IDEMPOTENCY_ATTR: Final[str] = "_idempotency_key"
 _IDEMPOTENCY_FINGERPRINT_ATTR: Final[str] = "_idempotency_fingerprint"
 
+#: The optimistic-concurrency counter attribute :meth:`Store.put_conditional` conditions on.
+VERSION_ATTRIBUTE: Final[str] = "version"
+
 #: DynamoDB's per-request ceiling for items per ``BatchWriteItem``.
 _BATCH_WRITE_CHUNK_SIZE: Final[int] = 25
 #: DynamoDB's per-request ceiling for ``BatchGetItem`` keys.
@@ -90,6 +95,31 @@ _BATCH_GET_CHUNK_SIZE: Final[int] = 100
 #: raise; the delay before each re-submission doubles from the base.
 _BATCH_PUT_MAX_ATTEMPTS: Final[int] = 6
 _BATCH_PUT_BACKOFF_BASE_SECONDS: Final[float] = 0.05
+
+
+#: Bounds of :func:`bounded_client_config`: seconds to connect, seconds to read, and attempts per
+#: request with the first included.
+BOUNDED_CONNECT_TIMEOUT_SECONDS: Final[float] = 2.0
+BOUNDED_READ_TIMEOUT_SECONDS: Final[float] = 3.0
+BOUNDED_TOTAL_MAX_ATTEMPTS: Final[int] = 2
+
+
+def bounded_client_config() -> Config:
+    """Return a ``botocore`` configuration with short timeouts and one retry, for latency-bound
+    callers."""
+    return Config(
+        connect_timeout=BOUNDED_CONNECT_TIMEOUT_SECONDS,
+        read_timeout=BOUNDED_READ_TIMEOUT_SECONDS,
+        retries={"mode": "standard", "total_max_attempts": BOUNDED_TOTAL_MAX_ATTEMPTS},
+    )
+
+
+def bounded_store(*, table_prefix: str = "") -> Store:
+    """Return a :class:`Store` whose DynamoDB client uses :func:`bounded_client_config`."""
+    return Store(
+        table_prefix=table_prefix,
+        client=boto3.client("dynamodb", config=bounded_client_config()),
+    )
 
 
 def _fingerprint(payload: Mapping[str, object]) -> str:
@@ -368,6 +398,46 @@ class Store:
             raise wrap_aws_error(exc, operation=f"put_if_absent:{table}") from exc
         except BotoCoreError as exc:
             raise _wrap_sdk_error(exc, operation=f"put_if_absent:{table}") from exc
+        return True
+
+    def put_conditional(
+        self, table: str, item: Mapping[str, object], *, expected_version: int | None
+    ) -> bool:
+        """Write ``item`` only if the stored item is at ``expected_version`` (optimistic lock).
+
+        With ``expected_version=None`` the write succeeds only when no item exists at the key;
+        otherwise only when the stored item's ``version`` attribute equals ``expected_version``.
+        Derived index attributes are recomputed before the write. The caller sets the new
+        ``version`` on ``item``.
+
+        Returns:
+            ``True`` if this call wrote the item, ``False`` if the condition failed (a lost race).
+        """
+        schema = table_schema(table)
+        condition: dict[str, Any]
+        if expected_version is None:
+            condition = {
+                "ConditionExpression": "attribute_not_exists(#pk)",
+                "ExpressionAttributeNames": {"#pk": schema.partition_key},
+            }
+        else:
+            condition = {
+                "ConditionExpression": "#version = :expected",
+                "ExpressionAttributeNames": {"#version": VERSION_ATTRIBUTE},
+                "ExpressionAttributeValues": {":expected": {"N": str(expected_version)}},
+            }
+        try:
+            self._client.put_item(
+                TableName=self._physical_name(table),
+                Item=_encode_item(derive(table, item)),
+                **condition,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                return False
+            raise wrap_aws_error(exc, operation=f"put_conditional:{table}") from exc
+        except BotoCoreError as exc:
+            raise _wrap_sdk_error(exc, operation=f"put_conditional:{table}") from exc
         return True
 
     def update_item(
@@ -1007,5 +1077,5 @@ def _set_members(members: object) -> list[Any]:
 def _is_int(raw: str) -> bool:
     try:
         return float(raw) == int(raw)
-    except (ValueError, OverflowError):
+    except ValueError, OverflowError:
         return False

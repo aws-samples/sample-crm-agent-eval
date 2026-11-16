@@ -604,6 +604,45 @@ def test_provider_event_to_agent_event_truncates_an_oversized_tool_result_items_
     assert event.truncated is True
 
 
+def test_provider_event_to_agent_event_bounds_the_largest_list_under_a_body() -> None:
+    from agents.events import TOOL_OUTPUT_TRUNCATED_KEY, TRUNCATION_MARKER
+
+    activities = [{"activity_id": f"act-{i:04d}", "note": "x" * 700} for i in range(60)]
+    raw: dict[str, object] = {
+        "statusCode": 200,
+        "body": {"opportunity": {"opportunity_id": "opp-0000"}, "activities": activities},
+    }
+    event = provider_event_to_agent_event(ProviderEvent(type="tool_result", tool_output=raw))
+    assert event is not None and event.truncated is True
+    assert event.tool_output is not None
+    body = event.tool_output["body"]
+    assert isinstance(body, dict)
+    assert body[TOOL_OUTPUT_TRUNCATED_KEY] is True
+    assert body["activities"][-1] == {TRUNCATION_MARKER: True}
+    assert body["activities"][:-1] == activities[: len(body["activities"]) - 1]
+    assert body["opportunity"] == {"opportunity_id": "opp-0000"}
+    assert describe_truncation(event.tool_output, event_truncated=event.truncated) is not None
+
+
+def test_a_bound_flag_without_examined_count_reads_as_the_byte_ceiling_notice() -> None:
+    notice = describe_truncation({"body": {"items": [], "truncated": True}}, event_truncated=False)
+    assert notice == "The tool result was too large to include in full and was truncated."
+
+
+def test_the_search_notice_needs_its_examined_count() -> None:
+    notice = describe_truncation(
+        {"body": {"items": [], "truncated": True, "examined_count": 7}}, event_truncated=True
+    )
+    assert notice is not None and notice.startswith("Search stopped early after examining 7")
+
+
+def test_provider_event_to_agent_event_passes_a_small_tool_result_through_unflagged() -> None:
+    raw: dict[str, object] = {"items": [{"opportunity_id": "opp-1"}]}
+    event = provider_event_to_agent_event(ProviderEvent(type="tool_result", tool_output=raw))
+    assert event is not None and event.truncated is False
+    assert event.tool_output == raw
+
+
 def test_provider_event_to_agent_event_maps_usage_and_completed() -> None:
     usage_event = provider_event_to_agent_event(
         ProviderEvent(type="usage", input_tokens=10, output_tokens=5)

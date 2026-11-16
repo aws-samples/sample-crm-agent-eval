@@ -7,13 +7,14 @@ fake provisioner over an in-memory store, so the real tenant guards and turn bud
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 import scripts.smoke.agents as agents_smoke
 import scripts.smoke.three_tier_chat as three_tier_chat
+from botocore.exceptions import ClientError
 from fixtures.demo_seed import demo_account_ids
 from scripts.smoke.agents import (
     GRID_DEFER_REASONS,
@@ -29,6 +30,7 @@ from scripts.smoke.harness import CheckResult
 from agents.registry import tool_registry_for
 from agents.subagents import ALL_SUBAGENT_SPECS
 from agents.supervisor import SUPERVISOR_ROLE
+from crm.store.keys import history_key
 from crm.toolspec.definitions import BY_NAME
 
 _ROLES: tuple[str, ...] = tuple(spec.role for spec in ALL_SUBAGENT_SPECS)
@@ -374,17 +376,46 @@ class _FakeProvisioner:
         )
 
 
+class _FakeHistoryItems:
+    """In-memory `reps` history items; records every delete and when it ran."""
+
+    def __init__(self, log: list[str], keys: Sequence[str] = ()) -> None:
+        self.items: dict[str, dict[str, Any]] = {key: {"rep_id": key} for key in keys}
+        self.deleted: list[str] = []
+        self._log = log
+
+    def get(self, rep_id: str) -> dict[str, Any] | None:
+        return self.items.get(rep_id)
+
+    def delete(self, rep_id: str) -> None:
+        self._log.append("delete_history")
+        self.deleted.append(rep_id)
+        self.items.pop(rep_id, None)
+
+
+class _Orchestrated(NamedTuple):
+    results: list[CheckResult]
+    log: list[str]
+    turn: Any
+    sessions: list[str]
+    history: _FakeHistoryItems
+
+
 def _orchestrate(
-    *, fail_provision: bool = False, runner: Any = None
-) -> tuple[list[CheckResult], list[str], Any]:
+    *, fail_provision: bool = False, runner: Any = None, history: Any = None
+) -> _Orchestrated:
     log: list[str] = []
     store = _FakeStore()
     provisioner = _FakeProvisioner(store, log, fail=fail_provision)
     turn = runner if runner is not None else _turn(*_HEALTHY)
     tokens: list[str] = []
+    sessions: list[str] = []
+    items = history if history is not None else _FakeHistoryItems(log)
 
-    def runner_factory(_ctx: Any, token: str) -> Any:
+    def runner_factory(_ctx: Any, token: str, session_id: str) -> Any:
         tokens.append(token)
+        sessions.append(session_id)
+        items.items[history_key(provisioner.tenant(), session_id)] = {"written": True}
         return turn
 
     results = list(
@@ -392,15 +423,16 @@ def _orchestrate(
             object(),  # type: ignore[arg-type]
             provisioner_factory=lambda _ctx: provisioner,  # type: ignore[arg-type,return-value]
             runner_factory=runner_factory,
+            history_items=lambda _ctx: items,
         )
     )
-    return results, log + [f"token:{t}" for t in tokens], turn
+    return _Orchestrated(results, log + [f"token:{t}" for t in tokens], turn, sessions, items)
 
 
 def test_the_pass_path_runs_one_counted_turn_and_cleans_up(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    results, log, turn = _orchestrate()
+    results, log, turn, _sessions, _history = _orchestrate()
     rows = _rows(results)
     assert set(_turn_rows()) <= set(rows)
     assert not [key for key, row in rows.items() if row.status == "fail"]
@@ -410,13 +442,13 @@ def test_the_pass_path_runs_one_counted_turn_and_cleans_up(
     assert rows[("smoke_tenant", "tenant_left_clean")].status == "pass"
     budget = rows[("agents", "model_backed_turns_within_envelope")]
     assert budget.status == "pass" and "1 model-backed turn(s)" in budget.detail
-    assert log == ["provision", "cleanup", "token:token-1"]
+    assert log == ["provision", "delete_history", "cleanup", "token:token-1"]
     assert len(turn.prompts) == 1
     assert "model-backed turn 1/1" in capsys.readouterr().err
 
 
 def test_the_turn_names_a_real_demo_account_the_caller_cannot_see() -> None:
-    _results, _log, turn = _orchestrate()
+    turn = _orchestrate().turn
     account = out_of_book_account()
     assert account in demo_account_ids()
     assert turn.prompts == [turn_prompt(account)]
@@ -424,7 +456,7 @@ def test_the_turn_names_a_real_demo_account_the_caller_cannot_see() -> None:
 
 
 def test_a_provisioning_failure_defers_every_turn_row_and_still_cleans_up() -> None:
-    results, log, turn = _orchestrate(fail_provision=True)
+    results, log, turn, _sessions, history = _orchestrate(fail_provision=True)
     rows = _rows(results)
     assert rows[("smoke_principal", "mfa_access_token_issued")].status == "fail"
     for key in _turn_rows():
@@ -434,6 +466,7 @@ def test_a_provisioning_failure_defers_every_turn_row_and_still_cleans_up() -> N
     assert turn.prompts == []
     assert log[-1] == "cleanup"
     assert ("agents", "writes_only_under_smoke_tenant") not in rows
+    assert ("agents", "history_items_deleted") not in rows and history.deleted == []
 
 
 def test_a_spent_share_refuses_the_turn(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -442,9 +475,11 @@ def test_a_spent_share_refuses_the_turn(monkeypatch: pytest.MonkeyPatch) -> None
         "MODEL_TURN_ALLOTMENTS",
         {**three_tier_chat.MODEL_TURN_ALLOTMENTS, "agents": 0},
     )
-    results, log, turn = _orchestrate()
+    results, log, turn, sessions, history = _orchestrate()
     rows = _rows(results)
     assert turn.prompts == []
+    assert sessions == [] and history.deleted == []
+    assert ("agents", "history_items_deleted") not in rows
     assert any(
         r.check == "model_backed_turns_within_envelope" and r.status == "fail" for r in results
     )
@@ -457,10 +492,12 @@ def test_a_transport_failure_fails_the_turn_rows_and_still_cleans_up() -> None:
     def _explode(prompt: str) -> list[dict[str, Any]]:
         raise ValueError("502 from the relay")
 
-    results, log, _turn_runner = _orchestrate(runner=_explode)
+    results, log, _turn_runner, sessions, history = _orchestrate(runner=_explode)
     rows = _rows(results)
     assert {rows[key].status for key in _turn_rows()} == {"fail"}
     assert "cleanup" in log
+    assert history.deleted == [history_key("eval-smoke-abc", sessions[0])]
+    assert rows[("agents", "history_items_deleted")].status == "pass"
     assert rows[("agents", "demo_tenant_untouched")].status == "pass"
 
 
@@ -477,7 +514,8 @@ def test_a_demo_write_during_the_turn_fails_the_guard() -> None:
         agents_smoke.checks(
             object(),  # type: ignore[arg-type]
             provisioner_factory=lambda _ctx: provisioner,  # type: ignore[arg-type,return-value]
-            runner_factory=lambda _ctx, _token: writing_turn,
+            runner_factory=lambda _ctx, _token, _session: writing_turn,
+            history_items=lambda _ctx: _FakeHistoryItems(log),
         )
     )
     assert _rows(results)[("agents", "demo_tenant_untouched")].status == "fail"
@@ -524,3 +562,95 @@ def test_the_default_principal_holds_an_empty_book(monkeypatch: pytest.MonkeyPat
     row = rep_row_written_by(factory(ctx), monkeypatch)
     assert row["book"] == []
     assert row["full_visibility"] is False
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+def _planted(operation: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}}, operation
+    )
+
+
+class _DeniedProvisioner(_FakeProvisioner):
+    def provision(self) -> str:
+        raise _planted("AdminCreateUser")
+
+
+def test_a_failed_turn_names_the_aws_code_never_the_message() -> None:
+    def denied(prompt: str) -> list[dict[str, Any]]:
+        raise _planted("InvokeAgentRuntime")
+
+    rows = relay_turn_checks(denied, prompt=_PROMPT, out_of_book_account=_OUT_OF_BOOK)
+    assert rows
+    for row in rows:
+        assert row.status == "fail"
+        assert "InvokeAgentRuntime failed (AccessDeniedException)" in row.detail
+        assert _PLANTED_ARN not in row.detail
+
+
+def test_a_failed_provisioning_names_the_aws_code_never_the_message() -> None:
+    log: list[str] = []
+    provisioner = _DeniedProvisioner(_FakeStore(), log)
+    results = list(
+        agents_smoke.checks(
+            object(),  # type: ignore[arg-type]
+            provisioner_factory=lambda _ctx: provisioner,  # type: ignore[arg-type,return-value]
+            runner_factory=lambda _ctx, _token, _session: _turn(*_HEALTHY),
+        )
+    )
+    row = _rows(results)[("smoke_principal", "mfa_access_token_issued")]
+    assert row.status == "fail"
+    assert "AdminCreateUser failed (AccessDeniedException)" in row.detail
+    assert _PLANTED_ARN not in row.detail
+
+
+# -- the turn's history item ---------------------------------------------------------------------
+
+
+def test_the_turn_history_item_is_deleted_and_proved_absent_before_cleanup() -> None:
+    run = _orchestrate()
+    (session,) = run.sessions
+    key = history_key("eval-smoke-abc", session)
+    assert session.startswith("smoke-agents-")
+    assert run.history.deleted == [key]
+    assert key not in run.history.items
+    row = _rows(run.results)[("agents", "history_items_deleted")]
+    assert row.status == "pass" and "1 history key(s) deleted, 0 still present" in row.detail
+    assert run.log.index("delete_history") < run.log.index("cleanup")
+
+
+class _UndeletableHistoryItems(_FakeHistoryItems):
+    """A delete that succeeds but leaves the item in place."""
+
+    def delete(self, rep_id: str) -> None:
+        self._log.append("delete_history")
+        self.deleted.append(rep_id)
+
+
+def test_an_item_still_present_after_the_delete_fails_the_row() -> None:
+    run = _orchestrate(history=_UndeletableHistoryItems([]))
+    row = _rows(run.results)[("agents", "history_items_deleted")]
+    assert row.status == "fail" and "1 still present" in row.detail
+
+
+def test_an_unaddressable_history_table_fails_the_row_and_still_cleans_up() -> None:
+    log: list[str] = []
+    store = _FakeStore()
+    provisioner = _FakeProvisioner(store, log)
+
+    def _no_table(_ctx: Any) -> Any:
+        raise RuntimeError("dynamodb_table_names missing")
+
+    results = list(
+        agents_smoke.checks(
+            object(),  # type: ignore[arg-type]
+            provisioner_factory=lambda _ctx: provisioner,  # type: ignore[arg-type,return-value]
+            runner_factory=lambda _ctx, _token, _session: _turn(*_HEALTHY),
+            history_items=_no_table,
+        )
+    )
+    row = _rows(results)[("agents", "history_items_deleted")]
+    assert row.status == "fail" and "could not address the history items" in row.detail
+    assert log[-1] == "cleanup"

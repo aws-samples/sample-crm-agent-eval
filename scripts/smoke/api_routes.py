@@ -50,6 +50,7 @@ from scripts.smoke.harness import (
     CheckResult,
     MissingTerraformOutputError,
     SmokeContext,
+    exception_detail,
     open_https,
     run_main,
 )
@@ -1111,7 +1112,7 @@ def _teardown_check(tenant: str, do_teardown: TenantTeardown) -> Iterable[CheckR
             resource=RESOURCE_CLASS,
             check="tenant_left_clean",
             status="fail",
-            detail=f"teardown of tenant {tenant!r} failed: {exc}",
+            detail=f"teardown of tenant {tenant!r} failed: {exception_detail(exc)}",
         )
         return
     yield CheckResult(
@@ -1414,7 +1415,7 @@ def _invoke_payload(lambda_client: Any, name: str, event: Mapping[str, Any]) -> 
     raw = response["Payload"].read()
     try:
         payload: Any = json.loads(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         payload = raw
     return str(response.get("FunctionError") or "None"), payload
 

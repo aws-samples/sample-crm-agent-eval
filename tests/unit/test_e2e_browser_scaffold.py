@@ -268,6 +268,7 @@ NESTED_JOURNEY_FLOOR: Final = (
     "journeys/18-approval-rebase/approval-rebase.spec.ts",
     "journeys/19-account-opportunities/account-opportunities.spec.ts",
     "journeys/20-chat-cost/chat-cost.spec.ts",
+    "journeys/22-chat-recall/chat-recall.spec.ts",
 )
 
 

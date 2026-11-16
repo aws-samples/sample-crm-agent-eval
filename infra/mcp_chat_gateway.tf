@@ -15,7 +15,7 @@ module "lambda_action_chat_interceptor" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "gateway.identity_interceptor.lambda_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = "${var.lambda_build_dir}/identity_interceptor.zip"
   source_code_hash       = filebase64sha256("${var.lambda_build_dir}/identity_interceptor.zip")
 
@@ -87,7 +87,7 @@ module "lambda_action_chat_target" {
   vpc_subnet_ids         = module.vpc.lambda_subnet_ids
   vpc_security_group_ids = module.vpc.lambda_security_group_ids
   handler                = "gateway.chat_target.lambda_handler"
-  runtime                = "python3.13"
+  runtime                = "python3.14"
   filename               = "${var.lambda_build_dir}/chat_target.zip"
   source_code_hash       = filebase64sha256("${var.lambda_build_dir}/chat_target.zip")
 

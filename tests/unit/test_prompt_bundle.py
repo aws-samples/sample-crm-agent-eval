@@ -64,6 +64,14 @@ def test_the_bundle_carries_every_model_facing_member_at_schema_2() -> None:
     assert set(briefings) == {"entity", "list", "board", "opaque"}
 
 
+def test_the_anthropic_caching_text_names_both_points_the_limit_and_the_minimum() -> None:
+    text = prompt_caching.CACHING["anthropic"]
+    assert "last stable system block" in text
+    assert "last content block of the latest message" in text
+    assert f"at most {prompt_caching.ANTHROPIC_MAX_CACHE_POINTS} points" in text
+    assert "prompt_cache_min_checkpoint_tokens" in text
+
+
 def test_the_validation_messages_cover_every_message_branch_and_end_with_the_hint() -> None:
     messages = prompt_bundle.prompt_bundle()["validation_messages"]
     assert isinstance(messages, dict)

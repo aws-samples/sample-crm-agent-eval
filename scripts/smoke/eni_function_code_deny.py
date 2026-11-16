@@ -33,7 +33,14 @@ import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Final
 
-from scripts.smoke.harness import ExpectedCheckCount, SmokeContext, error_code, run_main
+from scripts.smoke.harness import (
+    ExpectedCheckCount,
+    SmokeContext,
+    aws_error_detail,
+    error_code,
+    run_main,
+)
+from scripts.smoke.lambda_actions import _function_error_detail
 
 from eval.verification import CheckResult
 
@@ -257,7 +264,9 @@ def _delete_if_present(lambda_client: Any, name: str) -> None:
         lambda_client.delete_function(FunctionName=name)
     except Exception as exc:
         if error_code(exc) != "ResourceNotFoundException":
-            sys.stderr.write(f"{RESOURCE_CLASS}: delete_function({name}) raised {exc}\n")
+            sys.stderr.write(
+                f"{RESOURCE_CLASS}: {aws_error_detail('lambda:DeleteFunction', exc)} for {name}\n"
+            )
 
 
 def check_live_probe(
@@ -288,7 +297,7 @@ def check_live_probe(
             attempted = True
             lambda_client.create_function(
                 FunctionName=name,
-                Runtime="python3.13",
+                Runtime="python3.14",
                 Role=source_config["Role"],
                 Handler="probe.handler",
                 Code={"ZipFile": _probe_zip()},
@@ -299,7 +308,9 @@ def check_live_probe(
                 Tags={"data-classification": "internal", PROBE_TAG: run_id},
             )
         except Exception as exc:  # noqa: BLE001 - reported as the failing row
-            yield _result(name, "probe_created_active", False, f"create_function failed: {exc}")
+            yield _result(
+                name, "probe_created_active", False, aws_error_detail("lambda:CreateFunction", exc)
+            )
             return
         config = _wait_active(lambda_client, name, clock=clock, sleeper=sleeper)
         probe_vpc = config.get("VpcConfig") or {}
@@ -326,16 +337,19 @@ def check_live_probe(
         except json.JSONDecodeError:
             payload = {}
         outcomes = payload if isinstance(payload, dict) else {}
+        probed = ("describe_subnets", "delete_network_interface")
         ok = function_error is None and all(
-            outcomes.get(call) == EXPECTED_PROBE_ERROR
-            for call in ("describe_subnets", "delete_network_interface")
+            outcomes.get(call) == EXPECTED_PROBE_ERROR for call in probed
         )
+        if function_error is not None:
+            observed = _function_error_detail(str(function_error), raw)
+        else:
+            observed = "outcomes=" + repr({call: outcomes.get(call) for call in probed})
         yield _result(
             name,
             "probe_code_denied_eni_actions",
             ok,
-            f"FunctionError={function_error!r}, outcomes={outcomes or raw[:200]!r} "
-            f"(expected {EXPECTED_PROBE_ERROR} for both)",
+            f"{observed} (expected {EXPECTED_PROBE_ERROR} for both)",
         )
     finally:
         if attempted:

@@ -165,6 +165,7 @@ def _write_stub(path: Path, tool: str, body: str, *, read_stdin: bool = False) -
 def sandbox(tmp_path: Path) -> Sandbox:
     root = tmp_path / "repo"
     (root / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", (root / "scripts") / "repo_python.sh")
     (root / "infra" / "bootstrap_account").mkdir(parents=True)
     shutil.copy2(SCRIPT, root / "scripts" / "bootstrap_account.sh")
     shutil.copy2(REGION_MAP_SCRIPT, root / "scripts" / "region_map.py")

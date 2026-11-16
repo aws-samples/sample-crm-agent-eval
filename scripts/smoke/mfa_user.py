@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from scripts.smoke.cognito_claims import auth_factor_detail, totp_code
-from scripts.smoke.harness import CheckResult, SmokeContext
+from scripts.smoke.harness import CheckResult, SmokeContext, aws_error_code, exception_detail
 
 __all__ = [
     "BareMfaUser",
@@ -181,7 +181,7 @@ class LiveBareMfaUserProvisioner:
             try:
                 idp.admin_get_user(UserPoolId=self._user_pool_id(), Username=username)
             except Exception as exc:  # noqa: BLE001 - the expected outcome is an exception
-                if "UserNotFoundException" not in f"{type(exc).__name__}: {exc}":
+                if aws_error_code(exc) != "UserNotFoundException":
                     raise
                 yield CheckResult(
                     resource=_RESOURCE,
@@ -201,5 +201,5 @@ class LiveBareMfaUserProvisioner:
                 resource=_RESOURCE,
                 check="cognito_user_deleted",
                 status="fail",
-                detail=f"could not confirm smoke user deletion: {type(exc).__name__}: {exc}",
+                detail=f"could not confirm smoke user deletion: {exception_detail(exc)}",
             )

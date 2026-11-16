@@ -875,15 +875,20 @@ def check_dynamodb_no_wildcard_action(plan: Plan) -> list[Finding]:
         if "dynamodb_kms" not in r["address"]
     ]
     managed_modules = _managed_dynamodb_modules(plan)
+    history_policies = [
+        r for r in plan.resource_changes if r.get("address") == RUNTIME_HISTORY_POLICY
+    ]
     findings.append(
         Finding(
             "dynamodb_no_wildcard_action",
             "(coverage) one grant document per dynamodb role policy",
             "pass"
-            if documents and len(documents) == len(role_policies) + len(managed_modules)
+            if documents
+            and len(documents) == len(role_policies) + len(managed_modules) + len(history_policies)
             else "fail",
             f"documents={len(documents)} inline dynamodb role policies={len(role_policies)} "
-            f"modules attaching it as managed policies={len(managed_modules)}; a "
+            f"modules attaching it as managed policies={len(managed_modules)} "
+            f"runtime history policies={len(history_policies)}; a "
             "mismatch means either a role policy renders from something this control does not read, "
             "or the documents were found while the policies were not -- in both directions the "
             "statements above are no longer a statement about every grant in the plan.",
@@ -945,6 +950,154 @@ def _source_tool_grant_actions(function: str, table: str) -> list[str] | None:
     return [a for row in rows for a in re.findall(r'"([^"]+)"', row)] if rows else None
 
 
+#: The AgentCore Runtime's conversation-history grant. It belongs to no `lambda_action` module and so
+#: has no matrix row; `check_dynamodb_leading_keys_isolation` asserts it statement by statement.
+RUNTIME_HISTORY_DOCUMENT = "data.aws_iam_policy_document.agentcore_runtime_history"
+RUNTIME_HISTORY_POLICY = "aws_iam_role_policy.agentcore_runtime_history"
+RUNTIME_HISTORY_ATTRIBUTES = (
+    "expires_at",
+    "kind",
+    "owner_rep_id",
+    "owner_tenant",
+    "rep_id",
+    "turns",
+    "updated_at",
+    "version",
+)
+_HISTORY_KEY = (("ForAllValues:StringLike", "dynamodb:LeadingKeys", ("history#*",)),)
+_HISTORY_PRESENT = (("Null", "dynamodb:LeadingKeys", ("false",)),)
+_GET_PUT = ("dynamodb:GetItem", "dynamodb:PutItem")
+
+
+def _runtime_history_expected(reps_table: str) -> dict[str, tuple[str, Any, Any, frozenset[Any]]]:
+    """sid -> (effect, actions, not_actions, conditions) of the designed history document."""
+    return {
+        "ConversationHistoryRead": (
+            "Allow",
+            ("dynamodb:GetItem",),
+            None,
+            frozenset(_HISTORY_KEY + _HISTORY_PRESENT),
+        ),
+        "ConversationHistoryWrite": (
+            "Allow",
+            ("dynamodb:PutItem",),
+            None,
+            frozenset(
+                _HISTORY_KEY
+                + _HISTORY_PRESENT
+                + (
+                    (
+                        "ForAllValues:StringEquals",
+                        "dynamodb:Attributes",
+                        RUNTIME_HISTORY_ATTRIBUTES,
+                    ),
+                )
+            ),
+        ),
+        "ConversationHistoryKms": (
+            "Allow",
+            ("kms:Decrypt", "kms:GenerateDataKey"),
+            None,
+            frozenset(
+                {
+                    ("StringEquals", "kms:EncryptionContext:aws:dynamodb:tableName", (reps_table,)),
+                    ("StringEquals", "kms:ViaService", ("dynamodb.*",)),
+                }
+            ),
+        ),
+        "DenyDynamoDbOtherTables": ("Deny", ("dynamodb:*",), None, frozenset()),
+        "DenyRepsNonGrantedActions": ("Deny", None, _GET_PUT, frozenset()),
+        "DenyRepsOutsideHistoryPrefix": (
+            "Deny",
+            _GET_PUT,
+            None,
+            frozenset({("ForAnyValue:StringNotLike", "dynamodb:LeadingKeys", ("history#*",))}),
+        ),
+        "DenyCanaryHistory": (
+            "Deny",
+            _GET_PUT,
+            None,
+            frozenset({("ForAnyValue:StringLike", "dynamodb:LeadingKeys", ("history#canary#*",))}),
+        ),
+    }
+
+
+def _sorted_or_none(values: Any) -> tuple[str, ...] | None:
+    return tuple(sorted(str(v) for v in values)) if values else None
+
+
+def _rendered_conditions(statement: dict[str, Any], region_pattern: bool) -> frozenset[Any]:
+    rendered = set()
+    for condition in statement.get("condition") or []:
+        values = tuple(sorted(str(v) for v in condition.get("values") or []))
+        if region_pattern and condition.get("variable") == "kms:ViaService":
+            values = tuple(
+                "dynamodb.*" if re.fullmatch(r"dynamodb\.[a-z0-9-]+\.amazonaws\.com", v) else v
+                for v in values
+            )
+        rendered.add((condition.get("test"), condition.get("variable"), values))
+    return frozenset(rendered)
+
+
+def _runtime_history_findings(plan: Plan) -> list[Finding]:
+    """The Runtime history document renders exactly its designed statements, and is attached."""
+    control = "dynamodb_leading_keys_isolation"
+    documents = [r for r in plan.resource_changes if r.get("address") == RUNTIME_HISTORY_DOCUMENT]
+    policies = [r for r in plan.resource_changes if r.get("address") == RUNTIME_HISTORY_POLICY]
+    if len(documents) != 1 or len(policies) != 1:
+        return [
+            Finding(
+                control,
+                RUNTIME_HISTORY_DOCUMENT,
+                "fail",
+                f"expected one {RUNTIME_HISTORY_DOCUMENT} and one {RUNTIME_HISTORY_POLICY}, found "
+                f"{len(documents)} and {len(policies)}",
+            )
+        ]
+    reps = [
+        Plan.after(r).get("name")
+        for r in plan.by_type("aws_dynamodb_table")
+        if str(r.get("address", "")).endswith(".aws_dynamodb_table.reps")
+    ]
+    expected = _runtime_history_expected(str(reps[0]) if len(reps) == 1 else "<no reps table>")
+    statements = {str(s.get("sid")): s for s in Plan.after(documents[0]).get("statement") or []}
+    findings = []
+    if set(statements) != set(expected):
+        findings.append(
+            Finding(
+                control,
+                f"{RUNTIME_HISTORY_DOCUMENT} (statements)",
+                "fail",
+                f"sids={sorted(statements)!r} expected exactly {sorted(expected)!r}",
+            )
+        )
+    for sid, (effect, actions, not_actions, conditions) in expected.items():
+        statement = statements.get(sid)
+        if statement is None:
+            continue
+        rendered = (
+            statement.get("effect"),
+            _sorted_or_none(statement.get("actions")),
+            _sorted_or_none(statement.get("not_actions")),
+            _rendered_conditions(statement, region_pattern=True),
+        )
+        wanted = (
+            effect,
+            tuple(sorted(actions)) if actions else None,
+            tuple(sorted(not_actions)) if not_actions else None,
+            conditions,
+        )
+        findings.append(
+            Finding(
+                control,
+                f"{RUNTIME_HISTORY_DOCUMENT}#{sid}",
+                "pass" if rendered == wanted else "fail",
+                f"rendered={rendered!r}" + ("" if rendered == wanted else f" expected={wanted!r}"),
+            )
+        )
+    return findings
+
+
 def check_dynamodb_leading_keys_isolation(plan: Plan) -> list[Finding]:
     """Every grant's `LeadingKeys` disposition matches `table_action_role_matrix.json` exactly.
 
@@ -986,7 +1139,10 @@ def check_dynamodb_leading_keys_isolation(plan: Plan) -> list[Finding]:
     pending_conditions_seen: set[str] = set()
     zero_grant = {str(f) for f in matrix.get("functions_without_dynamodb_grants", [])}
 
+    findings.extend(_runtime_history_findings(plan))
     for address, statements in _dynamodb_policy_documents(plan):
+        if address == RUNTIME_HISTORY_DOCUMENT:
+            continue
         function = _lambda_action_function_name(address)
         if function is None:
             findings.append(
@@ -3080,7 +3236,8 @@ def check_relay_denies_command_execution(_plan: Plan) -> list[Finding]:
 #: whereas `EXPECTED_RESOURCE_COUNTS` counts plan instances.
 DECLARED_INFRA_BLOCK_COUNTS: dict[str, tuple[int, str]] = {
     'resource "aws_iam_role_policy"': (
-        23,
+        24,
+        "`agentcore_runtime_history`, the Runtime's conversation-history grant, is one. "
         "The lambda_action module's `config_parameter_kms` is one, decrypting the allowlist "
         "SecureString. `eval_trigger_artifacts` is one. One was removed with eval_worker: "
         "`eval_trigger_invoke_worker`. Six more are `sweep_control_artifacts`, "
@@ -3111,8 +3268,9 @@ DECLARED_INFRA_BLOCK_COUNTS: dict[str, tuple[int, str]] = {
         "module's `frontend`; `EXPECTED_RESOURCE_COUNTS` expects the same five in the plan.",
     ),
     'data "aws_iam_policy_document"': (
-        44,
-        "The lambda_action module's `config_parameter_kms` is one. `eval_trigger_artifacts` is one. Four were removed with eval_worker: "
+        45,
+        "`agentcore_runtime_history` is one. The lambda_action module's `config_parameter_kms` "
+        "is one. `eval_trigger_artifacts` is one. Four were removed with eval_worker: "
         "`eval_trigger_invoke_worker`, "
         "`eval_worker_invoke_tools` and the deleted async_failure_destination module's two. "
         "Nine more are `sweep_control_artifacts`, `sweep_task_invoke_runtime`, "
@@ -3572,6 +3730,8 @@ DYNAMODB_KEY_ADMIN_ACTIONS: tuple[str, ...] = (
 
 #: The root local listing every data-plane Lambda role, and the operator variable.
 DYNAMODB_DATA_PLANE_LOCAL = "dynamodb_data_plane_role_arns"
+#: The one data-plane entry that is not a `lambda_action` role: the AgentCore Runtime's role.
+RUNTIME_DATA_PLANE_ROLE = "aws_iam_role.agentcore_runtime.arn"
 CRM_OPERATOR_PRINCIPALS_VAR = "var.crm_operator_principal_arns"
 _LAMBDA_ACTION_SOURCE = "./modules/lambda_action"
 
@@ -4000,11 +4160,17 @@ def _data_plane_local_finding() -> Finding:
         expression = _root_local_expression(DYNAMODB_DATA_PLANE_LOCAL)
     except ValueError as exc:
         return Finding(control, resource, "fail", str(exc))
-    named, unrecognised = _data_plane_local_modules(expression)
+    named, entries = _data_plane_local_modules(expression)
     granted, _ = _lambda_action_grant_modules()
     problems = []
+    unrecognised = [entry for entry in entries if entry != RUNTIME_DATA_PLANE_ROLE]
     if unrecognised:
         problems.append(f"entries that are not a module role ARN: {unrecognised!r}")
+    if entries.count(RUNTIME_DATA_PLANE_ROLE) != 1:
+        problems.append(
+            f"{RUNTIME_DATA_PLANE_ROLE} appears {entries.count(RUNTIME_DATA_PLANE_ROLE)} time(s); "
+            "the Runtime role must be listed exactly once"
+        )
     if granted - named:
         problems.append(
             f"grant-holding modules missing from the local: {sorted(granted - named)!r}"
@@ -4021,7 +4187,8 @@ def _data_plane_local_finding() -> Finding:
         "fail" if problems else "pass",
         "; ".join(problems)
         if problems
-        else f"names exactly the {len(granted)} lambda_action calls holding the DynamoDB/KMS grant",
+        else f"names exactly the {len(granted)} lambda_action calls holding the DynamoDB/KMS grant "
+        f"and {RUNTIME_DATA_PLANE_ROLE}",
     )
 
 
@@ -6196,7 +6363,7 @@ def plan_is_stale_against_source() -> bool:
     """
     try:
         document = compliant_fixture()
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return True
     recorded = recorded_infra_digest(document)
     if recorded is None:
@@ -6780,16 +6947,17 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
     ),
     "aws_iam_role_policy": ExpectedCount(
         per_tool=5,
-        fixed=53,
+        fixed=54,
         basis="FIVE per action Lambda -- `dynamodb`, `dynamodb_kms`, `logs`, `config_parameter_kms` "
         "(decrypting the allowlist SecureString), and the `vpc_access` Hyperplane ENI grant, without "
-        "which the apply is green and every invocation fails -- plus 53 elsewhere: the "
+        "which the apply is green and every invocation fails -- plus 54 elsewhere: the "
         "`config_parameter_kms` policies of eval_trigger, capabilities and user_settings (3), less "
-        "one for the agent-only `get_page_context`, which reads no parameter; and the 51 that follow: four each on the interceptor, pre-token-generation, eval_trigger, "
+        "one for the agent-only `get_page_context`, which reads no parameter; and the 52 that follow: four each on the interceptor, pre-token-generation, eval_trigger, "
         "chat_interceptor, chat_target, user_settings, sweep_control and sweep_task lambda_action "
         "instantiations (32), capabilities' `logs`, `vpc_access` and `dynamodb` (3), the relay's four "
-        "(invoke-runtime, logs, read-audience-parameter, vpc_access), nine at the root "
-        "(`agentcore_gateway`, the Runtime's `agentcore_runtime` holding ECR + Bedrock and "
+        "(invoke-runtime, logs, read-audience-parameter, vpc_access), ten at the root "
+        "(`agentcore_gateway`, the Runtime's `agentcore_runtime` holding ECR + Bedrock, "
+        "`agentcore_runtime_history` holding its conversation-history grant and "
         "`agentcore_runtime_logs` holding CloudWatch, `chat_target_invoke_runtime`, `eval_sweep`, "
         "`eval_trigger_artifacts`, `eval_trigger_states`, `sweep_control_artifacts`, `sweep_task_invoke_runtime`), the chat "
         "Gateway's `gateway`, CodeBuild's, and the flow-log delivery policy. The SPLIT is asserted, "
@@ -6801,12 +6969,12 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
     ),
     "aws_iam_policy_document": ExpectedCount(
         per_tool=4,
-        fixed=53,
+        fixed=54,
         basis="one document behind each of an action Lambda's `dynamodb`, `dynamodb_kms`, `logs` and "
-        "`config_parameter_kms` role policies, plus 53: the `config_parameter_kms` documents of "
+        "`config_parameter_kms` role policies, plus 54: the `config_parameter_kms` documents of "
         "eval_trigger, capabilities and user_settings (3), less one for the agent-only "
-        "`get_page_context`; and the 51 that follow: ten at the root (agentcore_gateway permissions, agentcore_runtime "
-        "permissions and logs, the two agent-runtime relay-only resource policies, "
+        "`get_page_context`; and the 52 that follow: eleven at the root (agentcore_gateway permissions, agentcore_runtime "
+        "permissions, history and logs, the two agent-runtime relay-only resource policies, "
         "chat_target_invoke_runtime, eval_sweep_permissions, eval_trigger_artifacts, sweep_control_artifacts, "
         "sweep_task_invoke_runtime), two in agent_relay, two in agentcore, one in api (its resource "
         "policy), three in frontend_cdn (origin, frontend KMS, logs TLS-deny), three in observability "
@@ -7981,7 +8149,7 @@ PLAN_TIME_INEXPRESSIBLE: list[dict[str, str]] = [
         "spec_row": "Runtime inbound auth = IAM (asserted from the deployed resource, not from "
         "the Terraform source)",
         "reason": "The provider models IAM inbound auth as the ABSENCE of an authorizer block, not "
-        "as a value: `aws_bedrockagentcore_agent_runtime` in hashicorp/aws 6.71.0 has no "
+        "as a value: `aws_bedrockagentcore_agent_runtime` in hashicorp/aws 6.72.0 has no "
         "IAM enum and its only authorizer sub-block is `custom_jwt_authorizer` (verified "
         "against `terraform providers schema -json`). So source or plan "
         "inspection cannot distinguish `IAM` from a runtime whose authorizer block was "

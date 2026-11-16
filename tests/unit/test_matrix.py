@@ -20,6 +20,7 @@ from eval import matrix
 from eval.matrix import (
     ARM_COST_TOTAL_KEY,
     ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
+    RECORD_SHAPE_VERSION_KEY,
     ArmResult,
     MatrixResult,
     RunProvenance,
@@ -63,6 +64,7 @@ def _sample_provenance(
         price_table_version="v0-provisional",
         answer_style_sha256="0" * 64,
         prompt_bundle_sha256="1" * 64,
+        prompt_caching="explicit cache points",
     )
 
 
@@ -130,6 +132,37 @@ def _sample_arm(
             _sample_task_score_fields("gt-01-investigation-x"),
             _sample_task_score_fields("gt-04-enrichment-y"),
         ),
+    )
+
+
+def _sample_tier_summary_fields() -> dict[str, object]:
+    """An all-zero record shape 3 ``tier_summary``, as :mod:`eval.metrics` emits it."""
+    from eval.metrics import aggregate_tier_summary, not_measured_latency_metrics
+
+    return aggregate_tier_summary(
+        (), not_measured_latency_metrics(), (), withhold_cost=True
+    ).to_report_fields()
+
+
+def _sample_tier_task_metrics_fields() -> dict[str, object]:
+    """An empty record shape 3 ``tier_task_metrics`` block, as :mod:`eval.metrics` emits it."""
+    from eval.metrics import aggregate_tier_task_metrics
+
+    model_id = "us.anthropic.claude-opus-5-v1:0"
+    return aggregate_tier_task_metrics(
+        (),
+        measured=False,
+        family="anthropic",
+        configured_model_ids={"supervisor": model_id, "subagent": model_id, "tool": model_id},
+    ).to_report_fields()
+
+
+def _archivable_arm(**kwargs: object) -> ArmResult:
+    """:func:`_sample_arm` with the blocks a raw archive must carry to be re-read."""
+    return dataclasses.replace(
+        _sample_arm(**kwargs),  # type: ignore[arg-type]
+        tier_summary_fields=_sample_tier_summary_fields(),
+        tier_task_metrics_fields=_sample_tier_task_metrics_fields(),
     )
 
 
@@ -250,7 +283,7 @@ def _sample_task_spread_fields() -> list[dict[str, object]]:
 
 
 def _sample_arm_with_aggregations(*, withheld: bool = True) -> ArmResult:
-    """`_sample_arm` extended with the three per-arm aggregations."""
+    """`_sample_arm` extended with the three per-arm aggregations and a `tier_summary`."""
     base = _sample_arm(withheld=withheld)
     return ArmResult(
         provenance=base.provenance,
@@ -260,6 +293,8 @@ def _sample_arm_with_aggregations(*, withheld: bool = True) -> ArmResult:
         tier_role_model_fields=tuple(_sample_tier_role_model_fields(withheld=withheld)),
         tool_fields=tuple(_sample_tool_fields()),
         task_spread_fields=tuple(_sample_task_spread_fields()),
+        tier_summary_fields=_sample_tier_summary_fields(),
+        tier_task_metrics_fields=_sample_tier_task_metrics_fields(),
     )
 
 
@@ -668,6 +703,7 @@ def test_raw_archive_file_names_do_not_collide_across_repeated_runs(tmp_path: Pa
             price_table_version=arm_two_provenance.price_table_version,
             answer_style_sha256=arm_two_provenance.answer_style_sha256,
             prompt_bundle_sha256=arm_two_provenance.prompt_bundle_sha256,
+            prompt_caching=arm_two_provenance.prompt_caching,
         ),
         model_metrics_fields=_sample_model_metrics_fields(),
         aggregate_score_fields=_sample_aggregate_score_fields(),
@@ -794,6 +830,7 @@ def test_arm_heading_names_live_mode_when_provenance_is_live() -> None:
             price_table_version=live_provenance.price_table_version,
             answer_style_sha256=live_provenance.answer_style_sha256,
             prompt_bundle_sha256=live_provenance.prompt_bundle_sha256,
+            prompt_caching=live_provenance.prompt_caching,
         ),
         model_metrics_fields=_sample_model_metrics_fields(),
         aggregate_score_fields=_sample_aggregate_score_fields(),
@@ -834,6 +871,7 @@ def test_stub_mode_disclosure_precedes_the_aggregate_score_table() -> None:
             price_table_version=live_provenance.price_table_version,
             answer_style_sha256=live_provenance.answer_style_sha256,
             prompt_bundle_sha256=live_provenance.prompt_bundle_sha256,
+            prompt_caching=live_provenance.prompt_caching,
         ),
         model_metrics_fields=_sample_model_metrics_fields(),
         aggregate_score_fields=_sample_aggregate_score_fields(),
@@ -1053,7 +1091,12 @@ def test_rendered_json_carries_the_figure_semantics_block_additively() -> None:
     """`matrix.json` carries the figure-semantics block and leaves `arms` unchanged."""
     matrix = _sample_matrix()
     payload = json.loads(render_json(matrix))
-    assert list(payload) == ["tier_comparison", "arms", "figure_semantics"]
+    assert list(payload) == [
+        RECORD_SHAPE_VERSION_KEY,
+        "tier_comparison",
+        "arms",
+        "figure_semantics",
+    ]
     assert len(payload["arms"]) == 1
     semantics = payload["figure_semantics"]
     assert semantics["source"] == "src/eval/matrix.py"
@@ -1470,12 +1513,12 @@ def test_tool_call_correct_rate_note_states_expected_reads_is_only_necessary() -
 
 
 def test_arm_round_trips_through_its_raw_archive_fields() -> None:
-    arm = _sample_arm()
+    arm = _archivable_arm()
     assert matrix.arm_from_report_fields(arm.to_report_fields()) == arm
 
 
 def test_arm_from_report_fields_refuses_an_archive_missing_a_block() -> None:
-    fields = _sample_arm().to_report_fields()
+    fields = _archivable_arm().to_report_fields()
     del fields["model_metrics"]
     with pytest.raises(ValueError, match="model_metrics"):
         matrix.arm_from_report_fields(fields)
@@ -1494,20 +1537,31 @@ def test_provenance_records_the_prompt_bundle_hash_after_the_answer_style_hash()
     assert fields["prompt_bundle_sha256"] == "1" * 64
     names = list(fields)
     assert names.index("prompt_bundle_sha256") == names.index("answer_style_sha256") + 1
-    assert list(matrix._PROVENANCE_FIELDS) == [name for name in names if name != "temperature"]
+    assert list(matrix._PROVENANCE_FIELDS) == names
 
 
-def test_an_archive_without_the_prompt_bundle_hash_reads_none_and_renders_a_dash() -> None:
-    fields = _sample_arm().to_report_fields()
+def test_an_archive_without_the_prompt_bundle_hash_is_refused() -> None:
+    fields = _archivable_arm().to_report_fields()
     del cast(dict[str, object], fields["provenance"])["prompt_bundle_sha256"]
-    arm = matrix.arm_from_report_fields(fields)
-    assert arm.provenance.prompt_bundle_sha256 is None
-    assert "| prompt_bundle_sha256 | — |" in render_markdown(build_matrix_result([arm]))
+    with pytest.raises(
+        matrix.RecordShapeRefused, match="missing required field provenance.prompt_bundle_sha256"
+    ):
+        matrix.arm_from_report_fields(fields)
+
+
+def test_a_null_prompt_bundle_hash_reads_none_and_renders_a_dash() -> None:
+    arm = dataclasses.replace(
+        _archivable_arm(),
+        provenance=dataclasses.replace(_sample_provenance(), prompt_bundle_sha256=None),
+    )
+    rebuilt = matrix.arm_from_report_fields(arm.to_report_fields())
+    assert rebuilt.provenance.prompt_bundle_sha256 is None
+    assert "| prompt_bundle_sha256 | — |" in render_markdown(build_matrix_result([rebuilt]))
 
 
 def test_arm_from_report_fields_refuses_an_archive_missing_the_answer_style_hash() -> None:
     """A raw archive with no answer-style hash is refused, never defaulted."""
-    fields = _sample_arm().to_report_fields()
+    fields = _archivable_arm().to_report_fields()
     provenance = cast(dict[str, object], fields["provenance"])
     del provenance["answer_style_sha256"]
     with pytest.raises(ValueError, match="answer_style_sha256"):
@@ -1517,7 +1571,7 @@ def test_arm_from_report_fields_refuses_an_archive_missing_the_answer_style_hash
 def test_re_render_from_raw_reproduces_every_artifact(tmp_path: Path) -> None:
     """A sweep's artifacts are reproduced from its raw archives alone."""
     raw_dir = tmp_path / "raw"
-    arm = _sample_arm()
+    arm = _archivable_arm()
     archive_raw_run(arm, raw_dir)
     original = write_matrix_artifacts(build_matrix_result([arm]), tmp_path / "original")
     assert matrix.main(["--raw-dir", str(raw_dir), "--output-dir", str(tmp_path / "again")]) == 0
@@ -1527,7 +1581,7 @@ def test_re_render_from_raw_reproduces_every_artifact(tmp_path: Path) -> None:
 
 def test_load_raw_archives_selects_one_sweep_by_git_revision(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
-    published = _sample_arm()
+    published = _archivable_arm()
     superseded = ArmResult(
         provenance=RunProvenance(
             mode="stub",
@@ -1539,10 +1593,13 @@ def test_load_raw_archives_selects_one_sweep_by_git_revision(tmp_path: Path) -> 
             runtime_identifier="local-stub-runtime",
             price_table_version="v0-provisional",
             answer_style_sha256="0" * 64,
+            prompt_caching="explicit cache points",
         ),
         model_metrics_fields=_sample_model_metrics_fields(),
         aggregate_score_fields=_sample_aggregate_score_fields(),
         task_score_fields=published.task_score_fields,
+        tier_summary_fields=_sample_tier_summary_fields(),
+        tier_task_metrics_fields=_sample_tier_task_metrics_fields(),
     )
     archive_raw_run(published, raw_dir)
     archive_raw_run(superseded, raw_dir)
@@ -1554,7 +1611,7 @@ def test_load_raw_archives_selects_one_sweep_by_git_revision(tmp_path: Path) -> 
 
 def test_load_raw_archives_refuses_an_empty_selection(tmp_path: Path) -> None:
     raw_dir = tmp_path / "raw"
-    archive_raw_run(_sample_arm(), raw_dir)
+    archive_raw_run(_archivable_arm(), raw_dir)
     with pytest.raises(ValueError, match="no raw archive"):
         matrix.load_raw_archives(raw_dir, git_revision="0000000")
     assert matrix.main(["--raw-dir", str(raw_dir), "--git-revision", "0000000"]) == 2
@@ -1902,17 +1959,8 @@ def test_real_assert_artifacts_accepts_a_full_artifact_dir_with_the_new_fields(
 
 
 # ---------------------------------------------------------------------------------------------
-# Temperature-era archives stay readable
+# Temperature is not a provenance field
 # ---------------------------------------------------------------------------------------------
-
-_LEGACY_ARTIFACT = (
-    Path(__file__).resolve().parents[1] / "fixtures" / "eval" / "legacy_matrix_artifact.json"
-)
-
-
-def _legacy_arm_fields() -> list[dict[str, object]]:
-    payload = json.loads(_LEGACY_ARTIFACT.read_text(encoding="utf-8"))
-    return cast(list[dict[str, object]], payload["arms"])
 
 
 def test_a_new_provenance_carries_no_temperature_key_or_markdown_row() -> None:
@@ -1921,65 +1969,6 @@ def test_a_new_provenance_carries_no_temperature_key_or_markdown_row() -> None:
     assert "temperature" not in _sample_provenance().to_report_fields()
     assert "temperature" not in json.loads(render_json(matrix_result))["arms"][0]["provenance"]
     assert "| temperature |" not in render_markdown(matrix_result)
-
-
-def test_a_legacy_archive_re_renders_its_temperature_as_recorded() -> None:
-    """A temperature-era arm, retired tier models included, keeps its provenance key for key."""
-    for fields in _legacy_arm_fields():
-        recorded = cast(dict[str, object], fields["provenance"])
-        assert "temperature" in recorded
-        arm = matrix.arm_from_report_fields(fields)
-        assert arm.provenance.records_legacy_temperature
-        assert "prompt_bundle_sha256" not in recorded
-        assert arm.provenance.prompt_bundle_sha256 is None
-        assert arm.provenance.to_report_fields() == {**recorded, "prompt_bundle_sha256": None}
-        assert list(arm.provenance.to_report_fields()) == [*recorded, "prompt_bundle_sha256"]
-        assert arm.tier_role_model_fields == tuple(
-            cast(list[dict[str, object]], fields["tier_role_model_metrics"])
-        )
-
-
-def test_a_legacy_numeric_temperature_renders_in_json_and_markdown() -> None:
-    fields = _legacy_arm_fields()[0]
-    pinned = {**fields, "provenance": {**cast(dict[str, object], fields["provenance"])}}
-    cast(dict[str, object], pinned["provenance"])["temperature"] = 0.2
-    arm = matrix.arm_from_report_fields(pinned)
-    matrix_result = build_matrix_result([arm])
-
-    assert json.loads(render_json(matrix_result))["arms"][0]["provenance"]["temperature"] == 0.2
-    assert "| temperature | 0.200000 |" in render_markdown(matrix_result)
-
-
-def test_a_legacy_artifact_publishes_and_passes_assert_artifacts(tmp_path: Path) -> None:
-    from eval.harness import FR93_INVENTORY_RELATIVE_PATH, assert_artifacts
-
-    arms = [matrix.arm_from_report_fields(fields) for fields in _legacy_arm_fields()]
-    write_matrix_artifacts(build_matrix_result(arms), tmp_path)
-    raw_paths = tuple(archive_raw_run(arm, tmp_path / "raw") for arm in arms)
-    inventory = tmp_path / FR93_INVENTORY_RELATIVE_PATH
-    inventory.parent.mkdir(parents=True)
-    inventory.write_text(
-        json.dumps(
-            {
-                "resource_class": "eval_sweep",
-                "layer": 6,
-                "checks": [
-                    {"check": "demo_tenant_untouched", "status": "pass", "detail": "0 rows"},
-                    {"check": "writes_only_under_smoke_tenant", "status": "pass", "detail": "1"},
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-    aggregate = cast(dict[str, int], _legacy_arm_fields()[0]["aggregate_score"])
-
-    assert_artifacts(
-        output_dir=tmp_path,
-        expected_arm_count=len(arms),
-        expected_task_count=aggregate["scored_task_count"] + aggregate["unscored_task_count"],
-        raw_archive_paths=raw_paths,
-    )
-    assert render_markdown(build_matrix_result(arms)).count("| temperature | — |") == len(arms)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1994,6 +1983,8 @@ def _lower_bound_arm(*task_ids: str) -> ArmResult:
         model_metrics_fields=arm.model_metrics_fields,
         aggregate_score_fields=arm.aggregate_score_fields,
         task_score_fields=arm.task_score_fields,
+        tier_summary_fields=_sample_tier_summary_fields(),
+        tier_task_metrics_fields=_sample_tier_task_metrics_fields(),
         usage_lower_bound_task_ids=task_ids,
     )
 
@@ -2027,9 +2018,9 @@ def test_the_lower_bound_ids_round_trip_through_a_raw_archive() -> None:
     assert rebuilt.usage_lower_bound_task_ids == ("gt-01-investigation-x", "gt-04-enrichment-y")
 
 
-def test_a_legacy_archive_without_the_key_reads_as_complete_usage() -> None:
-    """An archive written before the key existed re-renders with no lower-bound note."""
-    fields = _sample_arm(withheld=False).to_report_fields()
+def test_an_archive_without_the_key_reads_as_complete_usage() -> None:
+    """An archive of an arm with complete usage carries no key and re-renders with no note."""
+    fields = _archivable_arm(withheld=False).to_report_fields()
     assert matrix.USAGE_LOWER_BOUND_TASK_IDS_KEY not in fields
     assert matrix.arm_from_report_fields(fields).usage_lower_bound_task_ids == ()
 
@@ -2055,7 +2046,7 @@ def test_the_csv_flags_each_task_row_whose_usage_is_a_lower_bound() -> None:
 
 def test_the_csv_lower_bound_column_reads_no_for_a_complete_or_legacy_arm() -> None:
     """An arm with complete usage, or an archive without the key, renders the column as no."""
-    legacy = matrix.arm_from_report_fields(_sample_arm(withheld=False).to_report_fields())
+    legacy = matrix.arm_from_report_fields(_archivable_arm(withheld=False).to_report_fields())
     rows = _csv_rows(build_matrix_result([_sample_arm(withheld=False), legacy]))
     assert rows
     assert {row["usage_lower_bound"] for row in rows} == {"no"}
@@ -2101,7 +2092,7 @@ def test_the_artifact_verdict_scan_finds_nothing_in_the_errored_items_note() -> 
 
 def _arm_with_totals(*, withheld: bool, cost: float | None = 0.25, count: int = 3) -> ArmResult:
     return dataclasses.replace(
-        _sample_arm(withheld=withheld),
+        _archivable_arm(withheld=withheld),
         arm_totals_fields={
             ARM_COST_TOTAL_KEY: None if withheld else cost,
             ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY: count,
@@ -2166,7 +2157,7 @@ def test_the_arm_totals_round_trip_through_a_raw_archive() -> None:
     arm = _arm_with_totals(withheld=False)
     rebuilt = arm_from_report_fields(json.loads(json.dumps(arm.to_report_fields())))
     assert rebuilt.arm_totals_fields == arm.arm_totals_fields
-    legacy = arm_from_report_fields(json.loads(json.dumps(_sample_arm().to_report_fields())))
+    legacy = arm_from_report_fields(json.loads(json.dumps(_archivable_arm().to_report_fields())))
     assert legacy.arm_totals_fields == {}
 
 

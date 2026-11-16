@@ -11,6 +11,7 @@ import json
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from scripts.smoke import chat_path_iam as mod
 from scripts.smoke.harness import CheckResult, context_for_test
 
@@ -352,3 +353,26 @@ def test_the_other_table_denies_hold_under_the_permitted_conversation_key() -> N
     extra = (_CT_ROLE, "dynamodb:GetItem", "table/crm-agent-eval-accounts")
     by_check = _run(iam=FakeIam(frozenset({extra})))
     assert by_check["ct_denies_GetItem@accounts"].status == "fail"
+
+
+def test_a_failed_policy_read_names_the_code_never_the_message() -> None:
+    planted_arn = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+    class _Denied:
+        def get_policy(self, **_: Any) -> dict[str, Any]:
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": f"User: {planted_arn}"}},
+                "GetPolicy",
+            )
+
+    row = mod.check_resource_policy(
+        _Denied(),
+        function_name="f",
+        check="c",
+        gateway_role_arn="arn:aws:iam::123456789012:role/g",
+        gateway_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/g",
+        account_id="123456789012",
+        require_service_grant=False,
+    )
+    assert row.status == "fail"
+    assert row.detail == "lambda:GetPolicy failed (AccessDeniedException)"

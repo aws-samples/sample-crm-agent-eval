@@ -316,8 +316,8 @@ done
 # The supported set is read from infra/regions.json; a region missing from it refuses.
 if [[ -n "$RUNTIME_SUBNET_IDS" ]]; then
     REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-    PYTHON="${REPO_ROOT}/.venv/bin/python3"
-    [[ -x "$PYTHON" ]] || PYTHON="python3"
+    PYTHON="$("${REPO_ROOT}/scripts/repo_python.sh" --print)" \
+        || die "no interpreter for the repository's Python scripts (see above); nothing was checked"
     az_rc=0
     SUPPORTED_AZ_IDS=$("$PYTHON" "${REPO_ROOT}/scripts/region_map.py" az-ids --region "$RESOLVED_REGION") || az_rc=$?
     case "$az_rc" in

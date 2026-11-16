@@ -16,17 +16,21 @@ from moto import mock_aws
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval.harness import ArmSpec, run_sweep
+from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
+from eval.metrics import attribution_prompt_tokens
 from eval.reprice import (
     ARCHIVED_PRICING_KEYS,
     INFERENCE_PROFILE_KEY,
     PRE_AGGREGATION_DIRNAME,
     REPRICE_RECORD_FILENAME,
+    UNIT_STAMPED_ENTRY_KINDS,
     RepriceRefused,
     attribution_from_entry,
     main,
     reprice_run,
     with_archived_pricing,
 )
+from eval.sweep_units import UNIT_REPEAT_INDEX_KEY, UNIT_TASK_ID_KEY
 
 _SONNET = "anthropic.claude-sonnet-5-5"
 _HAIKU = "anthropic.claude-haiku-5-5"
@@ -97,16 +101,20 @@ def _record_in_arm_archive(sweep_dir: Path, entries: list[dict[str, Any]]) -> No
                     "output_tokens": 0,
                     "cache_read_tokens": 0,
                     "cache_write_tokens": 0,
+                    "prompt_tokens": 0,
                 }
             )
             rows = arm["tier_role_model_metrics"][-1:]
         (row,) = rows
+        prompt = attribution_prompt_tokens(attribution_from_entry(entry))
         row["included_invocation_count"] += 1
         row["input_tokens"] += entry["tokens"]["input_tokens"]
         row["output_tokens"] += entry["tokens"]["output_tokens"]
+        row["prompt_tokens"] += prompt
         summary = arm["tier_summary"][entry["tier"]]
         summary["input_tokens"] += entry["tokens"]["input_tokens"]
         summary["output_tokens"] += entry["tokens"]["output_tokens"]
+        summary["total_prompt_tokens"] += prompt
     path.write_text(json.dumps(arm), encoding="utf-8")
 
 
@@ -131,6 +139,8 @@ def _entry(model_id: str, input_tokens: int, tier: str = "supervisor") -> dict[s
         "tokens": {"input_tokens": input_tokens, "output_tokens": 10},
         "cache": {"read_tokens": 0, "write_tokens": 0},
         "latency_ms": None,
+        "task_id": "gt-added",
+        "repeat_index": 0,
     }
 
 
@@ -356,3 +366,191 @@ def test_an_arm_archive_without_rows_cannot_be_cross_checked(
     path.write_text(json.dumps(arm), encoding="utf-8")
     with pytest.raises(RepriceRefused, match="cannot be cross-checked"):
         reprice_run(sweep_dir / "raw", tmp_path / "repriced")
+
+
+def test_a_stub_archive_records_tier_prompt_and_cache_totals(sweep_dir: Path) -> None:
+    arm = json.loads(_arm_archive_path(sweep_dir).read_text(encoding="utf-8"))
+    for tier, entry in arm["tier_summary"].items():
+        for key in ("total_prompt_tokens", "cache_read_tokens", "cache_write_tokens"):
+            assert isinstance(entry[key], int), (tier, key)
+    for row in arm["tier_role_model_metrics"]:
+        assert isinstance(row["prompt_tokens"], int), row
+
+
+@pytest.mark.parametrize("key", ["total_prompt_tokens", "cache_read_tokens", "cache_write_tokens"])
+def test_a_tier_summary_token_total_that_disagrees_with_the_calls_is_refused(
+    sweep_dir: Path, tmp_path: Path, key: str
+) -> None:
+    path = _arm_archive_path(sweep_dir)
+    arm = json.loads(path.read_text(encoding="utf-8"))
+    arm["tier_summary"]["supervisor"][key] += 1
+    path.write_text(json.dumps(arm), encoding="utf-8")
+    with pytest.raises(RepriceRefused, match=rf"tier_summary\['supervisor'\] {key}: archived"):
+        reprice_run(sweep_dir / "raw", tmp_path / "repriced")
+
+
+def test_a_row_prompt_total_that_disagrees_with_the_calls_is_refused(
+    sweep_dir: Path, tmp_path: Path
+) -> None:
+    path = _arm_archive_path(sweep_dir)
+    arm = json.loads(path.read_text(encoding="utf-8"))
+    arm["tier_role_model_metrics"][0]["prompt_tokens"] += 1
+    path.write_text(json.dumps(arm), encoding="utf-8")
+    with pytest.raises(RepriceRefused, match="prompt_tokens: archived"):
+        reprice_run(sweep_dir / "raw", tmp_path / "repriced")
+
+
+def test_per_call_cache_tokens_that_differ_from_the_tier_summary_are_refused(
+    sweep_dir: Path, tmp_path: Path
+) -> None:
+    def _add_cache_read(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        first = {**entries[0], "cache": {**entries[0]["cache"]}}
+        first["cache"]["read_tokens"] += 7
+        return [first, *entries[1:]]
+
+    _rewrite_entries(sweep_dir, _add_cache_read)
+    with pytest.raises(RepriceRefused) as refused:
+        reprice_run(sweep_dir / "raw", tmp_path / "repriced")
+    assert "cache_read_tokens: archived" in str(refused.value)
+
+
+# -- record shape and unit ids ------------------------------------------------------------------
+
+
+def _rewrite_payload(sweep_dir: Path, edit: Any) -> None:
+    path = _pre_aggregation_path(sweep_dir)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    edit(payload)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_the_archive_names_the_record_shape_and_every_entrys_unit(sweep_dir: Path) -> None:
+    payload = json.loads(_pre_aggregation_path(sweep_dir).read_text(encoding="utf-8"))
+    assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION
+    for key in UNIT_STAMPED_ENTRY_KINDS:
+        assert payload[key], key
+        for entry in payload[key]:
+            assert isinstance(entry[UNIT_TASK_ID_KEY], str) and entry[UNIT_TASK_ID_KEY]
+            assert entry[UNIT_REPEAT_INDEX_KEY] == 0
+
+
+def test_the_unit_stamped_kinds_are_exactly_the_archives_id_carrying_lists(
+    sweep_dir: Path,
+) -> None:
+    payload = json.loads(_pre_aggregation_path(sweep_dir).read_text(encoding="utf-8"))
+    id_carrying = {
+        key
+        for key, value in payload.items()
+        if isinstance(value, list)
+        and value
+        and all(isinstance(entry, dict) and UNIT_REPEAT_INDEX_KEY in entry for entry in value)
+    }
+    assert id_carrying == set(UNIT_STAMPED_ENTRY_KINDS)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        None,
+        RECORD_SHAPE_VERSION - 1,
+        RECORD_SHAPE_VERSION + 1,
+        True,
+        str(RECORD_SHAPE_VERSION),
+        float(RECORD_SHAPE_VERSION),
+    ],
+    ids=repr,
+)
+def test_an_archive_at_another_record_shape_is_refused(
+    sweep_dir: Path, tmp_path: Path, version: object
+) -> None:
+    def _set_version(payload: dict[str, Any]) -> None:
+        if version is None:
+            del payload[RECORD_SHAPE_VERSION_KEY]
+        else:
+            payload[RECORD_SHAPE_VERSION_KEY] = version
+
+    _rewrite_payload(sweep_dir, _set_version)
+    with pytest.raises(RepriceRefused, match=RECORD_SHAPE_VERSION_KEY):
+        reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert not (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+
+
+def test_an_earlier_shape_archive_without_task_score_repeats_is_refused_by_its_version(
+    sweep_dir: Path, tmp_path: Path
+) -> None:
+    def _as_earlier_shape(payload: dict[str, Any]) -> None:
+        payload[RECORD_SHAPE_VERSION_KEY] = RECORD_SHAPE_VERSION - 1
+        for score in payload["task_scores"]:
+            del score[UNIT_REPEAT_INDEX_KEY]
+
+    _rewrite_payload(sweep_dir, _as_earlier_shape)
+    with pytest.raises(RepriceRefused, match=f"{RECORD_SHAPE_VERSION_KEY} is") as refused:
+        reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert "carries no" not in str(refused.value)
+    assert not (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        (UNIT_TASK_ID_KEY, None),
+        (UNIT_TASK_ID_KEY, ""),
+        (UNIT_TASK_ID_KEY, 7),
+        (UNIT_REPEAT_INDEX_KEY, None),
+        (UNIT_REPEAT_INDEX_KEY, -1),
+        (UNIT_REPEAT_INDEX_KEY, True),
+        (UNIT_REPEAT_INDEX_KEY, "0"),
+    ],
+    ids=repr,
+)
+@pytest.mark.parametrize("kind", UNIT_STAMPED_ENTRY_KINDS)
+def test_an_entry_without_its_units_ids_is_refused(
+    sweep_dir: Path, tmp_path: Path, kind: str, key: str, value: object
+) -> None:
+    def _break_last(payload: dict[str, Any]) -> None:
+        entries = payload[kind]
+        last = dict(entries[-1])
+        if value is None:
+            del last[key]
+        else:
+            last[key] = value
+        payload[kind] = [*entries[:-1], last]
+
+    _rewrite_payload(sweep_dir, _break_last)
+    with pytest.raises(RepriceRefused, match=rf"{kind}\[\d+\] carries no {key}"):
+        reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert not (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+
+
+@pytest.mark.parametrize("kind", UNIT_STAMPED_ENTRY_KINDS)
+@pytest.mark.parametrize("replacement", [None, {}, "entries"], ids=repr)
+def test_an_archive_without_a_unit_stamped_list_is_refused(
+    sweep_dir: Path, tmp_path: Path, kind: str, replacement: object
+) -> None:
+    def _replace(payload: dict[str, Any]) -> None:
+        if replacement is None:
+            del payload[kind]
+        else:
+            payload[kind] = replacement
+
+    _rewrite_payload(sweep_dir, _replace)
+    with pytest.raises(RepriceRefused, match=kind):
+        reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert not (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+
+
+@pytest.mark.parametrize("kind", UNIT_STAMPED_ENTRY_KINDS)
+def test_a_non_object_entry_is_refused(sweep_dir: Path, tmp_path: Path, kind: str) -> None:
+    def _append_scalar(payload: dict[str, Any]) -> None:
+        payload[kind] = [*payload[kind], 7]
+
+    _rewrite_payload(sweep_dir, _append_scalar)
+    with pytest.raises(RepriceRefused, match=rf"{kind}\[\d+\] is not an object"):
+        reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert not (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+
+
+def test_the_unmutated_archive_reprices(sweep_dir: Path, tmp_path: Path) -> None:
+    record = reprice_run(sweep_dir / "raw", tmp_path / "out")
+    assert (tmp_path / "out" / REPRICE_RECORD_FILENAME).exists()
+    assert record["arms"]

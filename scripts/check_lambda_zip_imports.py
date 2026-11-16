@@ -21,17 +21,17 @@ describes the nested layout (:data:`EVAL_TRIGGER_LAYOUT`). The checks run in sev
 2. ``vendored_record`` -- every file a vendored distribution's ``*.dist-info/RECORD`` lists is
    present in the zip.
 3. ``wheel_platform`` -- every vendored wheel tag and compiled extension ABI tag targets the Lambda
-   platform (``manylinux``/``linux_x86_64``, CPython 3.13 or ``abi3``).
+   platform (``manylinux``/``linux_x86_64``, CPython 3.14 or ``abi3``).
 4. ``marker_requires`` -- every vendored ``Requires-Dist`` whose environment marker holds for the
    Lambda environment (:data:`LAMBDA_MARKER_ENVIRONMENT`) names a distribution the zip carries or
    the runtime provides.
 5. ``isolated_import`` -- import the handler module in a subprocess whose ``sys.path`` is the zip
-   plus a sandbox of the runtime-provided distributions, under a discovered CPython 3.13 when one
-   exists (``PYTHON313``, ``python3.13`` on ``PATH``, ``uv python find 3.13``, ``pyenv which
-   python3.13``) and otherwise under the build host's interpreter. The status suffix names which:
-   ``pass…_target_python313`` or ``pass…_host_python<XY>``. Compiled distributions that cannot load
+   plus a sandbox of the runtime-provided distributions, under a discovered CPython 3.14 when one
+   exists (``PYTHON314``, ``python3.14`` on ``PATH``, ``uv python find 3.14``, ``pyenv which
+   python3.14``) and otherwise under the build host's interpreter. The status suffix names which:
+   ``pass…_target_python314`` or ``pass…_host_python<XY>``. Compiled distributions that cannot load
    on the build host are substituted from ``infra/build/target-python-shadow`` at the zip's own
-   vendored version; ``target_python313`` names the interpreter version, never the platform. On a
+   vendored version; ``target_python314`` names the interpreter version, never the platform. On a
    build host that matches the Lambda platform the zip is extracted and imported from that
    directory, as the runtime does, so its own compiled extensions load.
 6. ``source_parity`` -- every first-party module in the zip is byte-identical to the same path
@@ -68,7 +68,7 @@ some expected zips exist it fails on the missing ones.
 ``--print-missing-required-distributions DIR`` prints, one per line, the distributions the Lambda
 target environment requires that a pip ``--target`` directory does not contain;
 ``scripts/package_lambdas.sh`` loops on it to close its vendored set. ``--print-target-python``
-prints the discovered CPython 3.13.
+prints the discovered CPython 3.14.
 
 Requires no AWS credential and makes no network call.
 """
@@ -117,7 +117,7 @@ DEFAULT_BUILD_DIR = REPO_ROOT / "infra" / "build" / "lambda"
 #: `scripts/run_gates.py`'s `GATE_SKIP_EXIT_STATUS`.
 SKIP_EXIT_STATUS = 3
 
-#: Top-level modules the Lambda Python 3.13 runtime provides: boto3 and its dependency closure.
+#: Top-level modules the Lambda Python 3.14 runtime provides: boto3 and its dependency closure.
 RUNTIME_PROVIDED_MODULES = frozenset(
     {
         "boto3",
@@ -133,31 +133,32 @@ RUNTIME_PROVIDED_MODULES = frozenset(
 #: Top-level packages of this repository's own source; the closure walk recurses only through these.
 FIRST_PARTY_PACKAGES = frozenset({"crm", "gateway", "agents", "providers", "eval", "fixtures"})
 
-#: Wheel python tag and platform-tag prefixes the Lambda python3.13 x86_64 runtime can load.
-TARGET_PYTHON_TAG = "cp313"
+#: Wheel python tag and platform-tag prefixes the Lambda python3.14 x86_64 runtime can load.
+TARGET_PYTHON_TAG = "cp314"
 TARGET_PLATFORM_PREFIXES = ("manylinux", "linux_x86_64", "linux_i686")
 
 #: The Lambda runtime's `(major, minor)` Python version.
-TARGET_PYTHON_VERSION = (3, 13)
+TARGET_PYTHON_VERSION = (3, 14)
 
-#: PEP 508 environment of the Lambda python3.13 x86_64 runtime, used to evaluate ``Requires-Dist``
+#: PEP 508 environment of the Lambda python3.14 x86_64 runtime, used to evaluate ``Requires-Dist``
 #: markers; ``extra`` is empty, so extras-only dependencies are not required.
 LAMBDA_MARKER_ENVIRONMENT: dict[str, str] = {
     "extra": "",
     "implementation_name": "cpython",
-    "implementation_version": "3.13.0",
+    "implementation_version": "3.14.0",
     "os_name": "posix",
     "platform_machine": "x86_64",
     "platform_python_implementation": "CPython",
     "platform_release": "",
     "platform_system": "Linux",
     "platform_version": "",
-    "python_full_version": "3.13.0",
-    "python_version": "3.13",
+    "python_full_version": "3.14.0",
+    "python_version": "3.14",
     "sys_platform": "linux",
 }
 
-#: PEP 503 normalised distribution names the Lambda python3.13 runtime provides.
+#: PEP 503 normalised distribution names the Lambda python3.14 runtime provides: boto3 and its
+#: dependency closure, as measured in the AWS Lambda python3.14 base image.
 RUNTIME_PROVIDED_DISTRIBUTIONS = frozenset(
     {
         "boto3",
@@ -165,7 +166,6 @@ RUNTIME_PROVIDED_DISTRIBUTIONS = frozenset(
         "jmespath",
         "python-dateutil",
         "s3transfer",
-        "setuptools",
         "six",
         "urllib3",
     }
@@ -648,7 +648,7 @@ def check_closure(spec: ZipSpec, index: ZipModuleIndex, result: ZipResult) -> No
             continue
         result.violations.append(
             f"module {module!r} (imported by {unresolved[module]!r}) is neither vendored in the "
-            "zip nor provided by the Lambda python3.13 runtime"
+            "zip nor provided by the Lambda python3.14 runtime"
         )
     if result.allowed_unvendored:
         if allowance is None:
@@ -740,8 +740,11 @@ def check_wheel_platforms(index: ZipModuleIndex, result: ZipResult) -> None:
             # abi3 / untagged extension: its platform is checked through its wheel's Tag: line.
             continue
         major_minor, abi_platform = match.groups()
-        if major_minor != "313":
-            result.violations.append(f"extension {member!r} targets CPython {major_minor}, not 313")
+        target_abi = "".join(str(part) for part in TARGET_PYTHON_VERSION)
+        if major_minor != target_abi:
+            result.violations.append(
+                f"extension {member!r} targets CPython {major_minor}, not {target_abi}"
+            )
         if not any(abi_platform.startswith(p) for p in ("x86_64-linux", "linux")):
             result.violations.append(
                 f"extension {member!r} targets platform {abi_platform!r}, not x86_64 Linux"
@@ -749,7 +752,7 @@ def check_wheel_platforms(index: ZipModuleIndex, result: ZipResult) -> None:
 
 
 def _tag_targets_lambda(tag: str) -> bool:
-    """True when a wheel tag (``py3-none-any``, ``cp313-abi3-manylinux…``) can load on Lambda."""
+    """True when a wheel tag (``py3-none-any``, ``cp314-abi3-manylinux…``) can load on Lambda."""
     for single in tag.split("."):
         parts = single.split("-")
         if len(parts) != 3:
@@ -872,7 +875,7 @@ def check_marker_required_distributions(index: ZipModuleIndex, result: ZipResult
             f"environment (python_version={LAMBDA_MARKER_ENVIRONMENT['python_version']}, "
             f"sys_platform={LAMBDA_MARKER_ENVIRONMENT['sys_platform']}, "
             f"platform_machine={LAMBDA_MARKER_ENVIRONMENT['platform_machine']}) but is neither "
-            "vendored in the zip nor provided by the Lambda python3.13 runtime"
+            "vendored in the zip nor provided by the Lambda python3.14 runtime"
         )
     if not missing and not unparseable:
         result.marker_requirements_resolved = len(metadata)
@@ -893,7 +896,7 @@ _HOST_PYTHON_DIFFERS = sys.version_info[:2] != TARGET_PYTHON_VERSION
 
 #: Environment variable naming an interpreter for the ``isolated_import`` phase, tried first and
 #: validated like every other candidate.
-TARGET_PYTHON_ENV_VAR = "PYTHON313"
+TARGET_PYTHON_ENV_VAR = "PYTHON314"
 
 _TARGET_PROBE_PROGRAM = (
     "import json, sys, sysconfig\n"
@@ -921,7 +924,7 @@ _RESOLVE_PROGRAM = (
 
 @dataclass(frozen=True)
 class TargetInterpreter:
-    """A validated CPython 3.13 the ``isolated_import`` phase can execute under."""
+    """A validated CPython 3.14 the ``isolated_import`` phase can execute under."""
 
     executable: str
     discovered_via: str
@@ -957,7 +960,7 @@ def _run_capture(command: list[str], *, env: dict[str, str] | None = None) -> st
         completed = proc_run.run(
             command, capture_output=True, text=True, check=False, timeout=60, env=env
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
     if completed.returncode != 0:
         return None
@@ -988,7 +991,7 @@ def _probe_interpreter(executable: str) -> tuple[tuple[str, ...] | None, str]:
         probe = json.loads(raw)
         version = tuple(int(part) for part in probe["version"])
         stdlib = tuple(str(part) for part in probe["stdlib"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None, f"{executable} produced unreadable version output {raw!r}"
     if version != TARGET_PYTHON_VERSION:
         return None, (
@@ -1005,15 +1008,15 @@ def _discovery_candidates() -> list[tuple[str, str | None]]:
     """
     return [
         (f"env:{TARGET_PYTHON_ENV_VAR}", os.environ.get(TARGET_PYTHON_ENV_VAR) or None),
-        ("PATH:python3.13", shutil.which("python3.13")),
-        ("uv python find 3.13", _candidate_from_tool(["uv", "python", "find", "3.13"])),
-        ("pyenv which python3.13", _candidate_from_tool(["pyenv", "which", "python3.13"])),
+        ("PATH:python3.14", shutil.which("python3.14")),
+        ("uv python find 3.14", _candidate_from_tool(["uv", "python", "find", "3.14"])),
+        ("pyenv which python3.14", _candidate_from_tool(["pyenv", "which", "python3.14"])),
     ]
 
 
 @functools.cache
 def discover_target_interpreter() -> InterpreterDiscovery:
-    """Find a CPython 3.13 to run the ``isolated_import`` phase under, or report why none was found.
+    """Find a CPython 3.14 to run the ``isolated_import`` phase under, or report why none was found.
 
     The build host interpreter is accepted only when it is itself the target version; every
     candidate tried is recorded in `attempts`.
@@ -1076,7 +1079,7 @@ def _resolve_in_interpreter(
 
 
 #: Verification-only directory `scripts/package_lambdas.sh` populates with the zips' pinned
-#: distributions built for CPython 3.13 at the build host's platform; never packaged or deployed.
+#: distributions built for CPython 3.14 at the build host's platform; never packaged or deployed.
 DEFAULT_TARGET_SHADOW_DIR = REPO_ROOT / "infra" / "build" / "target-python-shadow"
 
 
@@ -1113,7 +1116,7 @@ def _shadow_supplies(shadow: Path, distributions: list[str]) -> str | None:
 def _annotate_pass(base: str, *, ran_on_target: bool) -> str:
     """Fold *which interpreter actually ran* into a passing ``isolated_import`` status.
 
-    Returns ``…_target_python313`` when it ran on the target version, ``…_host_python<XY>`` when it
+    Returns ``…_target_python314`` when it ran on the target version, ``…_host_python<XY>`` when it
     ran on a different host version, and the bare base otherwise.
     """
     if ran_on_target:
@@ -1178,7 +1181,7 @@ def _build_runtime_sandbox(directory: Path) -> list[str]:
     for name in sorted(RUNTIME_PROVIDED_MODULES):
         try:
             found = importlib.util.find_spec(name)
-        except (ImportError, ValueError):  # pragma: no cover - defensive
+        except ImportError, ValueError:  # pragma: no cover - defensive
             continue
         if found is None:
             continue
@@ -1205,7 +1208,7 @@ def _resolve_host_native(top_levels: list[str]) -> tuple[tuple[str, str], ...] |
     for name in top_levels:
         try:
             found = importlib.util.find_spec(name)
-        except (ImportError, ValueError):
+        except ImportError, ValueError:
             return None
         if found is None:
             return None
@@ -1329,7 +1332,7 @@ def check_isolated_import(
 
     The child's `sys.path` is an optional shadow of substituted compiled distributions, the zip, a
     sandbox of the runtime-provided distributions, and the standard library. The child runs under
-    the discovered CPython 3.13 when there is one and it can load any needed substitutes, and
+    the discovered CPython 3.14 when there is one and it can load any needed substitutes, and
     otherwise under the build host's interpreter. Substitutes come from :func:`target_shadow_dir`
     at the zip's vendored version on the target path, and from the build host's environment,
     unversioned, on the fallback; when the fallback has none either, the phase reports ``skip``.
@@ -1388,7 +1391,7 @@ def check_isolated_import(
                 )
                 attempt = None
     else:
-        declined_reason = "no CPython 3.13 was discoverable on this build host"
+        declined_reason = "no CPython 3.14 was discoverable on this build host"
 
     if attempt is None:
         host_shadow: tuple[tuple[str, str], ...] = ()
@@ -1456,7 +1459,7 @@ def check_isolated_import(
     result.isolated_import_status = IMPORT_FAIL
     result.violations.append(
         f"isolated import of {spec.module!r} from the zip failed under "
-        f"{'the target CPython 3.13' if attempt.ran_on_target else 'the build host interpreter'} "
+        f"{'the target CPython 3.14' if attempt.ran_on_target else 'the build host interpreter'} "
         f"(exit {attempt.completed.returncode}): {attempt.detail}"
     )
 
@@ -1816,7 +1819,7 @@ def _foreign_work_tree_reason(root: Path) -> str:
         named = fields[0]
         if not named or (len(fields) == 2 and not fields[1]):
             return ""
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return ""
     return (
         f"`git rev-parse --show-toplevel` names {named} as the work tree containing {root}, which is "
@@ -2259,7 +2262,8 @@ def _run_level_note(report: dict[str, object]) -> str | None:
         if on_host:
             note += (
                 f" {len(on_host)}/{len(statuses)} zip(s) fell back to the build host's CPython "
-                f"{sys.version_info[0]}.{sys.version_info[1]} because that 3.13 has no importable "
+                f"{sys.version_info[0]}.{sys.version_info[1]} because that "
+                f"{TARGET_PYTHON_VERSION[0]}.{TARGET_PYTHON_VERSION[1]} has no importable "
                 "substitute for their vendored compiled distribution(s); each says so in its own "
                 "status and note, and for them the marker_requires phase remains the "
                 "host-independent cover for that class."
@@ -2280,7 +2284,7 @@ def _run_level_note(report: dict[str, object]) -> str | None:
         "host-independently, and every passing status carries "
         f"'_host_python{sys.version_info[0]}{sys.version_info[1]}' so this is never read as "
         f"target-verified. Candidate interpreters: {attempts_text or 'none tried'}. Set "
-        f"{TARGET_PYTHON_ENV_VAR}=/path/to/python3.13, or put python3.13 on PATH, to execute the "
+        f"{TARGET_PYTHON_ENV_VAR}=/path/to/python3.14, or put python3.14 on PATH, to execute the "
         "phase under the target version. The platform class is unexecuted either way: this host is "
         f"{sys.platform}/{platform.machine()}."
     )

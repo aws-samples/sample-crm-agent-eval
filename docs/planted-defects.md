@@ -8,13 +8,14 @@ Each defect has a stable identifier (`PD-NN`) referenced by `src/eval/golden_tas
 `derived_from` field; the identifiers must never be renumbered once a golden task depends on them.
 
 Each defect is applied by a dedicated `_plant_pdNN_...` function in `fixtures/generate.py`, in the
-fixed order `PD-01` … `PD-07`, over an already-generated base corpus. Each function touches a
+fixed order `PD-01` … `PD-08`, over an already-generated base corpus. Each function touches a
 disjoint set of records, so the defects cannot interact regardless of order;
 `tests/unit/test_planted_evidence.py` pins every planted value for two tenants and checks that
 disabling any one planting changes only its own records.
 
 PD-01 and PD-02 were rewritten so that their notes state the evidence a correct proposal needs.
 PD-04 … PD-07 were added for the multi-field, report-only, ambiguity and multi-step-write tasks.
+PD-08 was added so that gt-05's large-tool-result task receives a result over the tool-result bound.
 
 | Defect | Records | Golden task |
 |---|---|---|
@@ -25,6 +26,7 @@ PD-04 … PD-07 were added for the multi-field, report-only, ambiguity and multi
 | PD-05 | `opp-0056`, `note-defect-pd05` | gt-22 |
 | PD-06 | `cont-0077`, `cont-0078` | gt-23 |
 | PD-07 | `opp-0088` | gt-24 |
+| PD-08 | `act-defect-pd08-00` … `act-defect-pd08-54` (on `opp-0000`) | gt-05 (and every other read of `opp-0000`) |
 
 **The `-demo-` ids below are tenant-relative, not literal.** `fixtures/generate.py` prefixes every
 record id with the tenant it seeds, so `acct-demo-0000`, `cont-demo-0001` and so on are the `demo`
@@ -150,9 +152,25 @@ in `Qualification` and has **no** seeded note and **no** seeded `meeting` activi
 **Expected handling.** Logging a meeting and then adding a note creates two new rows, and they are
 the only rows that can satisfy the task's new-row assertions.
 
+## PD-08 — Activity history larger than one page
+
+**What's planted.** Opportunity `opp-demo-0000` gains 55 activities, `act-demo-defect-pd08-00` …
+`act-demo-defect-pd08-54`, each with a multi-sentence `body`. They are appended after the base
+corpus, drawn from a generator seeded separately from the base corpus, and dated at UTC midnight
+between the opportunity's `created_at` and its recorded `last_touch`. No other record changes.
+
+**Why it matters.** `opp-demo-0000` now has 57 activities. Any 50 of them, the default
+`list_activities` page, exceed the agents' tool-result bound (`TOOL_RESULT_BYTE_CEILING`,
+32,768 bytes of `repr`). So does a `get_opportunity` on it, which carries the whole timeline. Such a
+result reaches the model with its activity list trimmed and a truncation disclosure. The
+opportunity record and its notes are not trimmed.
+
+**Expected handling.** The turn reports the activity listing as truncated rather than presenting it
+as complete. gt-04 and gt-05 check this with `forbidden_outcomes: [silent_truncation]`.
+
 ## Regeneration and verification
 
 `scripts/verify_fixtures.sh` regenerates the full corpus from `fixtures/generate.py` into a scratch
 directory and diffs every file against the committed `fixtures/*.json`, failing on any divergence.
-All seven defects are covered by that byte-identical check, because they are applied
+All eight defects are covered by that byte-identical check, because they are applied
 deterministically inside `generate_dataset()`; there is no separate defect-injection step.

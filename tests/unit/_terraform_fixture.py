@@ -28,7 +28,7 @@ MODULES_DIR = REPO_ROOT / "infra" / "modules"
 CAPABILITIES_YAML = REPO_ROOT / "config" / "model_capabilities.yaml"
 
 #: The aws provider version the fixture root pins.
-AWS_PROVIDER_VERSION = "6.71.0"
+AWS_PROVIDER_VERSION = "6.72.0"
 
 REQUIRE_TERRAFORM_ENV_VAR = "CRM_REQUIRE_TERRAFORM"
 

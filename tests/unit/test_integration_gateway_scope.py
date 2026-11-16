@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 import scripts.smoke.integration_gateway_scope as smoke
+from botocore.exceptions import ClientError
 from scripts.smoke.demo_tenant_guard import DEMO_TENANT, WATCHED_TABLES
 from scripts.smoke.gateway_tools import ServicePrincipalFixture
 from scripts.smoke.harness import CheckResult, context_for_test
@@ -1363,3 +1364,55 @@ def test_an_unadvertised_filter_tool_fails_both_rows() -> None:
     )
     assert {row.status for row in rows.values()} == {"fail"}
     assert all(FILTER_TOOL in row.detail for row in rows.values())
+
+
+_PLANTED_ARN = "arn:aws:sts::123456789012:assumed-role/x/y"
+
+
+class _DeniedProvisioner(_FakeProvisioner):
+    """Provisioning and cleanup both raise an AWS error whose message carries a planted ARN."""
+
+    def __init__(self, *, fail_provision: bool) -> None:
+        super().__init__()
+        self._fail_provision = fail_provision
+
+    def provision(self) -> ServicePrincipalFixture:
+        if self._fail_provision:
+            raise self._denied("PutItem")
+        return super().provision()
+
+    def cleanup(self) -> list[CheckResult]:
+        super().cleanup()
+        raise self._denied("DeleteItem")
+
+    @staticmethod
+    def _denied(operation: str) -> ClientError:
+        return ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": f"User: {_PLANTED_ARN}"}},
+            operation,
+        )
+
+
+@pytest.mark.parametrize(
+    ("fail_provision", "check", "text"),
+    [
+        (True, "provision_service_principal", "PutItem failed (AccessDeniedException)"),
+        (False, "cleanup_service_principal", "DeleteItem failed (AccessDeniedException)"),
+    ],
+    ids=["provision", "cleanup"],
+)
+def test_aws_failures_name_the_code_never_the_message(
+    fail_provision: bool, check: str, text: str
+) -> None:
+    published = {
+        r.check: r
+        for r in checks(
+            _ctx(),
+            mcp_caller=_FakeGateway(token_identity=_VERIFIED_IDENTITY),
+            provisioner=_DeniedProvisioner(fail_provision=fail_provision),
+            row_reader=_FakeRowReader(smoke_rows=3),
+        )
+    }
+    assert published[check].status == "fail"
+    assert text in published[check].detail
+    assert _PLANTED_ARN not in published[check].detail

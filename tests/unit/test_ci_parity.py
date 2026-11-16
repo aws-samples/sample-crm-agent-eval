@@ -1990,8 +1990,8 @@ def _pip_pin_violations(doc: dict[str, Any]) -> list[str]:
             problems.append(
                 f"{name}: venv at {venv_at}, pip pin at {pin_at}, lock install at {lock_at}"
             )
-        if not re.fullmatch(r"\d+\.\d+\.\d+", str(_env_of(doc, job).get("PIP_VERSION", ""))):
-            problems.append(f"{name}: PIP_VERSION is not an exact X.Y.Z pin")
+        if not re.fullmatch(r"\d+\.\d+(\.\d+)?", str(_env_of(doc, job).get("PIP_VERSION", ""))):
+            problems.append(f"{name}: PIP_VERSION is not an exact X.Y or X.Y.Z release")
     return problems
 
 
@@ -2015,6 +2015,12 @@ def test_every_venv_installs_the_pinned_pip_before_the_lock() -> None:
         floating = text.replace('PIP_VERSION: "', 'PIP_VERSION: ">=', 1)
         assert _pip_pin_violations(yaml.safe_load(floating)), (
             f"{path.name}: a range PIP_VERSION went unseen"
+        )
+        pinned = str(_env_of(doc, _verify_job_of(path, doc)).get("PIP_VERSION"))
+        major_only = text.replace(f'PIP_VERSION: "{pinned}"', 'PIP_VERSION: "26"', 1)
+        assert major_only != text, f"{path.name}: the PIP_VERSION anchor is absent"
+        assert _pip_pin_violations(yaml.safe_load(major_only)), (
+            f"{path.name}: a major-only PIP_VERSION went unseen"
         )
 
 
@@ -2098,6 +2104,91 @@ def test_gitlab_node_is_a_digest_verified_release_on_the_relay_runtime_major() -
     assert "command -v node" in block, "the install never asserts which node PATH resolves"
     assert '"v${NODE_VERSION}"' in block, "the install never compares node --version with the pin"
     assert "apt-get" not in block, "Node comes from the distribution, not the pinned release"
+
+
+#: Shared libraries the official Node linux tarball links against that a python slim image lacks.
+_NODE_TARBALL_APT_LIBS = frozenset({"libatomic1"})
+
+
+def _frontend_missing_node_libs(doc: dict[str, Any]) -> set[str]:
+    """Node runtime libraries no `apt-get install` in the GitLab frontend job provides."""
+    job = _ci_jobs_from_doc(doc)["frontend"]
+    installed: set[str] = set().union(*_apt_install_sets(job))
+    return set(_NODE_TARBALL_APT_LIBS - installed)
+
+
+def test_gitlab_frontend_job_installs_the_libraries_the_node_tarball_needs() -> None:
+    """The pinned Node binary cannot start on the python slim image without `libatomic1`."""
+    assert _frontend_missing_node_libs(_gitlab_doc()) == set()
+
+    text = GITLAB_CI_PATH.read_text(encoding="utf-8")
+    anchor = "curl ca-certificates libatomic1"
+    assert text.count(anchor) == 1, "the frontend apt line is not where this control expects it"
+    dropped = yaml.safe_load(text.replace(anchor, "curl ca-certificates"))
+    assert _frontend_missing_node_libs(dropped) == {"libatomic1"}, (
+        "a frontend job without libatomic1 went unseen"
+    )
+
+
+def test_gitlab_frontend_node_is_a_digest_verified_release_asserted_against_nvmrc() -> None:
+    """The GitLab frontend job runs a python image and installs Node from a pinned tarball."""
+    doc = _gitlab_doc()
+    job = _ci_jobs_from_doc(doc)[_FRONTEND_JOB]
+    assert str(job.get("image", "")).startswith("python:"), (
+        f"frontend job image {job.get('image')!r} is not a python image"
+    )
+    for packages in _apt_install_sets(job):
+        assert not {"python3", "python3-venv"} & packages, (
+            f"the frontend job apt-installs the distribution Python: {sorted(packages)}"
+        )
+    env = _env_of(doc, job)
+    for arch in ("X64", "ARM64"):
+        digest = str(env.get(f"FRONTEND_NODE_SHA256_{arch}", ""))
+        assert re.fullmatch(r"[0-9a-f]{64}", digest), (
+            f"FRONTEND_NODE_SHA256_{arch} is not a literal sha256"
+        )
+    assert env["FRONTEND_NODE_SHA256_X64"] != env["FRONTEND_NODE_SHA256_ARM64"]
+
+    block, _ = _pinned_install(GITLAB_CI_PATH, _NODE_RELEASE_HOST, doc, _FRONTEND_JOB)
+    nvmrc_at = block.find("frontend/.nvmrc")
+    verify_at = block.find("sha256sum --check --strict")
+    unpack_at = block.find("tar -xJf")
+    run_at = block.find("node --version")
+    assert -1 < nvmrc_at < verify_at < unpack_at < run_at, (
+        "the frontend Node is unpacked or run before its pin and digest are checked"
+    )
+    assert "SHASUMS256" not in block, "the digest is fetched beside the asset rather than pinned"
+    assert "command -v node" in block, "the install never asserts which node PATH resolves"
+    assert '"v${pinned}"' in block, "the install never compares node --version with .nvmrc"
+
+
+def _frontend_pin_prefix(doc: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    block, env = _pinned_install(GITLAB_CI_PATH, _NODE_RELEASE_HOST, doc, _FRONTEND_JOB)
+    return block[: block.index('case "$(uname -m)"')], env
+
+
+@pytest.mark.parametrize(("nvmrc", "expect_ok"), [(None, True), ("26.0.0", False)])
+def test_the_frontend_node_pin_assertion_runs_against_nvmrc(
+    nvmrc: str | None, expect_ok: bool, tmp_path: Path
+) -> None:
+    """Executed: the frontend install stops before any download when .nvmrc differs from the pin."""
+    prefix, env = _frontend_pin_prefix(_gitlab_doc())
+    (tmp_path / "frontend").mkdir()
+    pinned = (REPO_ROOT / "frontend" / ".nvmrc").read_text(encoding="utf-8")
+    (tmp_path / "frontend" / ".nvmrc").write_text(
+        pinned if nvmrc is None else nvmrc + "\n", encoding="utf-8"
+    )
+    result = proc_run.run(
+        ["bash", "-c", "set -euo pipefail\n" + prefix],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is expect_ok, result.stderr[-300:]
+    if not expect_ok:
+        assert "FRONTEND_NODE_VERSION" in result.stderr, result.stderr[-300:]
 
 
 def test_github_node_is_the_exact_pinned_release_and_is_asserted_on_path() -> None:
@@ -2272,14 +2363,23 @@ def test_the_verify_job_builds_the_zips_its_gates_verify() -> None:
 # `tar` and `uname` replaced, so a swallowed or misdirected check is observed rather than read.
 # ---------------------------------------------------------------------------
 
-#: `(definition, release host)` for each install verified against a pinned digest.
-_PINNED_RELEASE_INSTALLS = (
-    (GITLAB_CI_PATH, GITLEAKS_RELEASE_HOST),
-    (GITLAB_CI_PATH, _SHELLCHECK_RELEASE_HOST),
-    (GITLAB_CI_PATH, _NODE_RELEASE_HOST),
-    (WORKFLOW_PATH, GITLEAKS_RELEASE_HOST),
-    (WORKFLOW_PATH, _SHELLCHECK_RELEASE_HOST),
+#: GitLab jobs that install a pinned Node release: the relay's in `verify`, the SPA's in `frontend`.
+_GITLAB_NODE_JOBS = ("verify", "frontend")
+
+#: `(definition, release host, job or None for any)` for each install verified against a digest.
+_PINNED_RELEASE_INSTALLS: tuple[tuple[Path, str, str | None], ...] = (
+    (GITLAB_CI_PATH, GITLEAKS_RELEASE_HOST, None),
+    (GITLAB_CI_PATH, _SHELLCHECK_RELEASE_HOST, None),
+    *((GITLAB_CI_PATH, _NODE_RELEASE_HOST, job) for job in _GITLAB_NODE_JOBS),
+    (WORKFLOW_PATH, GITLEAKS_RELEASE_HOST, None),
+    (WORKFLOW_PATH, _SHELLCHECK_RELEASE_HOST, None),
 )
+
+
+def _release_install_id(path: Path, host: str, job: str | None) -> str:
+    tool = host.split("/")[-3] if "github" in host else "node"
+    return f"{path.name}:{tool}" + (f":{job}" if job else "")
+
 
 _VERIFIED_PATH_RE = re.compile(r'echo "\$\{?\w+\}?  ([^"]+)" \| sha256sum\b')
 _EXTRACTED_PATH_RE = re.compile(r'\btar -x\w*f "([^"]+)"')
@@ -2288,12 +2388,14 @@ _STAND_IN_ARTEFACT = "stand-in release artefact\n"
 
 
 def _pinned_install(
-    path: Path, host: str, doc: dict[str, Any] | None = None
+    path: Path, host: str, doc: dict[str, Any] | None = None, job_name: str | None = None
 ) -> tuple[str, dict[str, str]]:
-    """Return the shell block installing from `host` and the variables it runs with."""
+    """Return the shell block installing from `host` (in `job_name`, if given) and its variables."""
     doc = _load_ci(path) if doc is None else doc
     found: list[tuple[str, dict[str, str]]] = []
-    for job in _ci_jobs_from_doc(doc).values():
+    for name, job in _ci_jobs_from_doc(doc).items():
+        if job_name is not None and name != job_name:
+            continue
         job_env = {str(k): str(v) for k, v in _env_of(doc, job).items()}
         if "steps" in job:
             for step in job.get("steps") or []:
@@ -2444,18 +2546,15 @@ def _effective_digest_problems(
 
 
 @pytest.mark.parametrize(
-    ("path", "host"),
+    ("path", "host", "job_name"),
     _PINNED_RELEASE_INSTALLS,
-    ids=[
-        f"{p.name}:{h.split('/')[-3] if 'github' in h else 'node'}"
-        for p, h in _PINNED_RELEASE_INSTALLS
-    ],
+    ids=[_release_install_id(*entry) for entry in _PINNED_RELEASE_INSTALLS],
 )
 def test_each_pinned_release_install_verifies_the_file_it_unpacks(
-    path: Path, host: str, tmp_path: Path
+    path: Path, host: str, job_name: str | None, tmp_path: Path
 ) -> None:
     """Static shape plus an executed run: a wrong digest never reaches tar, the right one does."""
-    script, env = _pinned_install(path, host)
+    script, env = _pinned_install(path, host, job_name=job_name)
     assert _digest_check_problems(script) == [], path.name
     assert _effective_digest_problems(path, script, env, tmp_path) == [], path.name
 
@@ -2474,62 +2573,71 @@ _DIGEST_CHECK_MUTANTS: dict[str, Callable[[str], str]] = {
 
 @pytest.mark.parametrize("mutant", sorted(_DIGEST_CHECK_MUTANTS))
 @pytest.mark.parametrize(
-    ("path", "host"),
+    ("path", "host", "job_name"),
     _PINNED_RELEASE_INSTALLS,
-    ids=[
-        f"{p.name}:{h.split('/')[-3] if 'github' in h else 'node'}"
-        for p, h in _PINNED_RELEASE_INSTALLS
-    ],
+    ids=[_release_install_id(*entry) for entry in _PINNED_RELEASE_INSTALLS],
 )
 def test_non_vacuity_a_disabled_digest_check_is_caught(
-    path: Path, host: str, mutant: str, tmp_path: Path
+    path: Path, host: str, job_name: str | None, mutant: str, tmp_path: Path
 ) -> None:
     """Each mutant of each install's digest line is reported, statically or by the executed run."""
     text = path.read_text(encoding="utf-8")
-    original, _ = _pinned_install(path, host)
+    original, _ = _pinned_install(path, host, job_name=job_name)
     line = next(line for line in original.splitlines() if "sha256sum" in line)
     mutated_line = _DIGEST_CHECK_MUTANTS[mutant](line)
     assert mutated_line != line, f"{mutant}: the mutant changed nothing"
     assert text.count(line) == 1, f"{path.name}: the digest line is not unique in the file"
-    script, env = _pinned_install(path, host, yaml.safe_load(text.replace(line, mutated_line)))
+    script, env = _pinned_install(
+        path, host, yaml.safe_load(text.replace(line, mutated_line)), job_name=job_name
+    )
     caught = _digest_check_problems(script) + _effective_digest_problems(
         path, script, env, tmp_path
     )
     assert caught, f"{path.name} {host}: the {mutant!r} mutant went unseen"
 
 
-#: GitLab installs that select their asset by `uname -m`: host -> {machine: (digest var, asset)}.
-_GITLAB_PER_ARCH_INSTALLS: dict[str, dict[str, tuple[str, str]]] = {
-    GITLEAKS_RELEASE_HOST: {
+#: GitLab installs that select their asset by `uname -m`:
+#: (host, job or None for any) -> {machine: (digest var, asset)}.
+_GITLAB_PER_ARCH_INSTALLS: dict[tuple[str, str | None], dict[str, tuple[str, str]]] = {
+    (GITLEAKS_RELEASE_HOST, None): {
         "x86_64": ("GITLEAKS_SHA256_X64", "_linux_x64.tar.gz"),
         "aarch64": ("GITLEAKS_SHA256_ARM64", "_linux_arm64.tar.gz"),
     },
-    _SHELLCHECK_RELEASE_HOST: {
+    (_SHELLCHECK_RELEASE_HOST, None): {
         "x86_64": ("SHELLCHECK_SHA256_X86_64", ".linux.x86_64.tar.xz"),
         "aarch64": ("SHELLCHECK_SHA256_AARCH64", ".linux.aarch64.tar.xz"),
     },
-    _NODE_RELEASE_HOST: {
+    (_NODE_RELEASE_HOST, "verify"): {
         "x86_64": ("NODE_SHA256_X64", "-linux-x64.tar.xz"),
         "aarch64": ("NODE_SHA256_ARM64", "-linux-arm64.tar.xz"),
+    },
+    (_NODE_RELEASE_HOST, "frontend"): {
+        "x86_64": ("FRONTEND_NODE_SHA256_X64", "-linux-x64.tar.xz"),
+        "aarch64": ("FRONTEND_NODE_SHA256_ARM64", "-linux-arm64.tar.xz"),
     },
 }
 
 
+def _from_arch_case(host: str, script: str) -> str:
+    """A Node install's script from its arch `case` on, past the version assertions above it."""
+    return script[script.index('case "$(uname -m)"') :] if host == _NODE_RELEASE_HOST else script
+
+
 @pytest.mark.parametrize("machine", ["x86_64", "aarch64"])
 @pytest.mark.parametrize(
-    "host",
-    sorted(_GITLAB_PER_ARCH_INSTALLS),
-    ids=lambda h: h.split("/")[-3] if "github" in h else "node",
+    "install",
+    sorted(_GITLAB_PER_ARCH_INSTALLS, key=str),
+    ids=lambda i: _release_install_id(GITLAB_CI_PATH, *i).split(":", 1)[1],
 )
 def test_each_gitlab_install_fetches_and_verifies_the_asset_of_the_runner_arch(
-    host: str, machine: str, tmp_path: Path
+    install: tuple[str, str | None], machine: str, tmp_path: Path
 ) -> None:
     """On each runner arch the install fetches that arch's asset and accepts only that arch's digest."""
-    script, env = _pinned_install(GITLAB_CI_PATH, host)
-    if host == _NODE_RELEASE_HOST:
-        script = script[script.index('case "$(uname -m)"') :]
-    own_var, asset_suffix = _GITLAB_PER_ARCH_INSTALLS[host][machine]
-    other_var = next(v for m, (v, _) in _GITLAB_PER_ARCH_INSTALLS[host].items() if m != machine)
+    host, job_name = install
+    script, env = _pinned_install(GITLAB_CI_PATH, host, job_name=job_name)
+    script = _from_arch_case(host, script)
+    own_var, asset_suffix = _GITLAB_PER_ARCH_INSTALLS[install][machine]
+    other_var = next(v for m, (v, _) in _GITLAB_PER_ARCH_INSTALLS[install].items() if m != machine)
     assert {own_var, other_var} <= set(env), (
         f"{host}: the job does not define {own_var}/{other_var}"
     )
@@ -2566,10 +2674,9 @@ def test_each_gitlab_install_fetches_and_verifies_the_asset_of_the_runner_arch(
 
 def test_an_unpinned_runner_arch_stops_each_gitlab_install(tmp_path: Path) -> None:
     """A runner arch with no pinned digest fails the install before anything is fetched."""
-    for host in sorted(_GITLAB_PER_ARCH_INSTALLS):
-        script, env = _pinned_install(GITLAB_CI_PATH, host)
-        if host == _NODE_RELEASE_HOST:
-            script = script[script.index('case "$(uname -m)"') :]
+    for host, job_name in sorted(_GITLAB_PER_ARCH_INSTALLS, key=str):
+        script, env = _pinned_install(GITLAB_CI_PATH, host, job_name=job_name)
+        script = _from_arch_case(host, script)
         genuine = hashlib.sha256(_STAND_IN_ARTEFACT.encode()).hexdigest()
         rc, stderr, downloaded, tar_args = _run_install_prefix(
             GITLAB_CI_PATH, script, env, tmp_path, genuine, machine="riscv64"
@@ -2593,9 +2700,10 @@ def test_gitlab_gitleaks_pins_the_github_release_and_a_digest_per_arch() -> None
     assert arm64 != x64, "the arm64 digest is the x64 digest"
 
 
-def test_non_vacuity_extracting_before_verifying_is_caught(tmp_path: Path) -> None:
-    """Moving the Node tar ahead of its digest check is reported."""
-    script, env = _pinned_install(GITLAB_CI_PATH, _NODE_RELEASE_HOST)
+@pytest.mark.parametrize("job_name", _GITLAB_NODE_JOBS)
+def test_non_vacuity_extracting_before_verifying_is_caught(job_name: str, tmp_path: Path) -> None:
+    """Moving a Node tar ahead of its digest check is reported."""
+    script, env = _pinned_install(GITLAB_CI_PATH, _NODE_RELEASE_HOST, job_name=job_name)
     lines = _logical_lines(script)
     check_at = next(i for i, line in enumerate(lines) if "sha256sum" in line)
     tar_at = next(i for i, line in enumerate(lines) if _EXTRACTED_PATH_RE.search(line))
@@ -2693,6 +2801,7 @@ TS_CONTRACTS_REQUIRE_ENV_VAR = "CRM_REQUIRE_TS_CONTRACTS"
 TS_CONTRACT_FILES = (
     "tests/integration/test_envelope_groups_contract.py",
     "tests/integration/test_eval_envelopes_contract.py",
+    "tests/integration/test_resume_contract.py",
 )
 _FRONTEND_JOB = "frontend"
 
@@ -2706,10 +2815,8 @@ def _sets_ts_contracts(path: Path, job: dict[str, Any]) -> bool:
 
 
 def _runs_every_ts_contract(job: dict[str, Any]) -> bool:
-    return any(
-        "pytest" in scalar and all(name in scalar for name in TS_CONTRACT_FILES)
-        for scalar in _job_scalars(job)
-    )
+    pytest_steps = [scalar for scalar in _job_scalars(job) if "pytest" in scalar]
+    return all(any(name in step for step in pytest_steps) for name in TS_CONTRACT_FILES)
 
 
 def _ts_contract_violations(path: Path, jobs: dict[str, Any]) -> list[str]:
@@ -2723,7 +2830,7 @@ def _ts_contract_violations(path: Path, jobs: dict[str, Any]) -> list[str]:
             f"{path.name}: the frontend job does not set {TS_CONTRACTS_REQUIRE_ENV_VAR}=1"
         )
     if not _runs_every_ts_contract(frontend):
-        problems.append(f"{path.name}: the frontend job does not run both TS contract files")
+        problems.append(f"{path.name}: the frontend job does not run every TS contract file")
     for name, job in jobs.items():
         if name != _FRONTEND_JOB and _sets_ts_contracts(path, job):
             problems.append(
@@ -2740,8 +2847,19 @@ def test_the_ts_contracts_variable_has_a_reader_under_tests() -> None:
 
 @pytest.mark.parametrize("path", [WORKFLOW_PATH, GITLAB_CI_PATH], ids=lambda p: p.name)
 def test_only_the_frontend_job_runs_the_ts_contracts_and_requires_them(path: Path) -> None:
-    """The frontend job sets the variable and runs both files; no Node-22 job sets it."""
+    """The frontend job sets the variable and runs every file; no Node-22 job sets it."""
     assert _ts_contract_violations(path, _ci_jobs(path)) == []
+
+
+@pytest.mark.parametrize("path", [WORKFLOW_PATH, GITLAB_CI_PATH], ids=lambda p: p.name)
+@pytest.mark.parametrize("contract", TS_CONTRACT_FILES)
+def test_dropping_a_ts_contract_step_is_a_violation(path: Path, contract: str) -> None:
+    """Removing the lines that name one contract file leaves the frontend job in violation."""
+    text = path.read_text(encoding="utf-8")
+    assert contract in text
+    stripped = "\n".join(line for line in text.splitlines() if contract not in line)
+    violations = _ts_contract_violations(path, _ci_jobs_from_doc(yaml.safe_load(stripped)))
+    assert any("does not run every TS contract file" in v for v in violations), violations
 
 
 def test_make_verify_does_not_export_the_ts_contracts_variable() -> None:
@@ -2850,3 +2968,80 @@ def test_non_vacuity_a_missing_or_early_wire_tuning_diff_is_detected(path: Path)
 
     early = [e for e in entries if is_diff(e)] + dropped
     assert _wire_tuning_violations(path, {**jobs, _FRONTEND_JOB: {**frontend, key: early}})
+
+
+# ---------------------------------------------------------------------------
+# The tier-comparison UI contract rewrites the frontend's fixture, and the rewrite is diffed against
+# the committed copy, in both CI frontend jobs.
+# ---------------------------------------------------------------------------
+
+TIER_COMPARISON_FIXTURE = "frontend/src/pages/evals/__fixtures__/tierComparison.json"
+_TIER_COMPARISON_WRITER = "tests/integration/test_tier_comparison_ui_contract.py"
+_TIER_COMPARISON_DIFF = f"git diff --exit-code -- {TIER_COMPARISON_FIXTURE}"
+
+
+def _tier_comparison_violations(path: Path, jobs: dict[str, Any]) -> list[str]:
+    """Why the frontend job does not diff the fixture after the contract test that writes it."""
+    frontend = jobs.get(_FRONTEND_JOB)
+    if not isinstance(frontend, dict):
+        return [f"{path.name}: no `{_FRONTEND_JOB}` job"]
+    commands = _job_commands(frontend)
+    writer = [i for i, c in enumerate(commands) if "pytest" in c and _TIER_COMPARISON_WRITER in c]
+    diff = [i for i, c in enumerate(commands) if c.strip() == _TIER_COMPARISON_DIFF]
+    if not writer:
+        return [f"{path.name}: the frontend job never runs `{_TIER_COMPARISON_WRITER}`"]
+    if not diff:
+        return [f"{path.name}: the frontend job never runs `{_TIER_COMPARISON_DIFF}`"]
+    if max(diff) < min(writer):
+        return [f"{path.name}: `{_TIER_COMPARISON_DIFF}` runs before the contract test"]
+    return []
+
+
+def test_the_tier_comparison_fixture_is_tracked_and_written_by_the_contract_test() -> None:
+    """The diffed path is tracked, and the contract test still writes exactly that path."""
+    tracked = proc_run.run(
+        ["git", "ls-files", "--error-unmatch", TIER_COMPARISON_FIXTURE],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert tracked.returncode == 0, TIER_COMPARISON_FIXTURE
+    from tests.integration import test_tier_comparison_ui_contract as writer
+
+    assert writer.FRONTEND_FIXTURE == REPO_ROOT / TIER_COMPARISON_FIXTURE
+
+
+@pytest.mark.parametrize("path", [WORKFLOW_PATH, GITLAB_CI_PATH], ids=lambda p: p.name)
+def test_the_frontend_job_diffs_the_tier_comparison_fixture_after_its_contract_test(
+    path: Path,
+) -> None:
+    """A regenerated fixture that differs from the committed copy fails the frontend job."""
+    assert _tier_comparison_violations(path, _ci_jobs(path)) == []
+
+
+@pytest.mark.parametrize("path", [WORKFLOW_PATH, GITLAB_CI_PATH], ids=lambda p: p.name)
+def test_non_vacuity_a_missing_or_early_tier_comparison_diff_is_detected(path: Path) -> None:
+    """Dropping the diff, dropping the writer, or diffing before the writer each reads as a
+    violation."""
+    jobs = _ci_jobs(path)
+    assert _tier_comparison_violations(path, jobs) == [], "fixture assumption broken"
+    frontend = jobs[_FRONTEND_JOB]
+    key = "steps" if isinstance(frontend.get("steps"), list) else "script"
+    entries = list(frontend[key])
+
+    def is_diff(entry: Any) -> bool:
+        return _TIER_COMPARISON_DIFF in json.dumps(entry)
+
+    def is_writer(entry: Any) -> bool:
+        return _TIER_COMPARISON_WRITER in json.dumps(entry)
+
+    no_diff = [e for e in entries if not is_diff(e)]
+    assert len(no_diff) == len(entries) - 1
+    assert _tier_comparison_violations(path, {**jobs, _FRONTEND_JOB: {**frontend, key: no_diff}})
+
+    no_writer = [e for e in entries if not is_writer(e)]
+    assert len(no_writer) == len(entries) - 1
+    assert _tier_comparison_violations(path, {**jobs, _FRONTEND_JOB: {**frontend, key: no_writer}})
+
+    early = [e for e in entries if is_diff(e)] + no_diff
+    assert _tier_comparison_violations(path, {**jobs, _FRONTEND_JOB: {**frontend, key: early}})

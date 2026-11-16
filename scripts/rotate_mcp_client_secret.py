@@ -246,7 +246,7 @@ def mint(transport: TokenTransport, endpoint: str, client_id: str, secret: str) 
         raise RotationError(f"token endpoint unreachable: {type(exc).__name__}") from None
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except UnicodeDecodeError, ValueError:
         payload = None
     if not isinstance(payload, dict):
         return MintResult(status=status, error="unparseable_response")
@@ -312,7 +312,7 @@ def _roll_back_unreadable_add(
             idp.delete_user_pool_client_secret(
                 UserPoolId=target.user_pool_id, ClientId=target.client_id, ClientSecretId=secret_id
             )
-        except (BotoCoreError, ClientError):
+        except BotoCoreError, ClientError:
             failed.append(secret_id)
     if failed:
         return RotationError(

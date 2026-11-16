@@ -911,7 +911,8 @@ def test_in_scope_function_error_fails_never_silently_passes() -> None:
     stubber.deactivate()
 
     assert result.status == "fail"
-    assert "FunctionError" in result.detail
+    assert "FunctionError=Unhandled" in result.detail
+    assert "boom" not in result.detail
 
 
 # ---------------------------------------------------------------------------
@@ -1439,7 +1440,8 @@ def test_a_function_error_on_the_refused_update_fails_never_reads_as_a_pass() ->
     ctx = context_for_test(clients={"lambda": fake}, tenant=_TEST_TENANT)
     results = {r.check: r for r in _departed_contact_checks(ctx, tenant=_TEST_TENANT)}
     assert results[DEPARTED_REFUSED_CHECK].status == "fail"
-    assert "FunctionError" in results[DEPARTED_REFUSED_CHECK].detail
+    assert "FunctionError=Unhandled" in results[DEPARTED_REFUSED_CHECK].detail
+    assert "boom" not in results[DEPARTED_REFUSED_CHECK].detail
 
 
 # ---------------------------------------------------------------------------
@@ -2097,3 +2099,131 @@ def test_a_refused_declared_agent_identity_fails_the_control_row() -> None:
     rows = _principal_type_rows(_CursorLambda(refuse_agent_channel=True))
     assert rows[AGENT_PRINCIPAL_TYPE_DECLARED_CHECK].status == "fail"
     assert rows[AGENT_PRINCIPAL_TYPE_ABSENT_CHECK].status == "pass"
+
+
+# ---------------------------------------------------------------------------
+# AWS failures are reported by operation and code, never by message.
+# ---------------------------------------------------------------------------
+
+_PLANTED_ARN = "arn:aws:sts::" + "1234" + "5678" + "9012" + ":assumed-role/x/y"
+
+
+def _planted_client_error(operation: str) -> Exception:
+    """An AccessDenied `ClientError` whose message names a caller ARN."""
+    from botocore.exceptions import ClientError
+
+    exc: Exception = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": f"User: {_PLANTED_ARN} is not authorized"}},
+        operation,
+    )
+    assert _PLANTED_ARN in str(exc)
+    return exc
+
+
+class _DeniedKms(_Kms):
+    """Every KMS read answers with a planted AccessDenied."""
+
+    def get_key_rotation_status(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_client_error("GetKeyRotationStatus")
+
+    def describe_key(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_client_error("DescribeKey")
+
+    def list_resource_tags(self, *, KeyId: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_client_error("ListResourceTags")
+
+    def get_key_policy(self, *, KeyId: str, PolicyName: str) -> dict[str, Any]:  # noqa: N803
+        raise _planted_client_error("GetKeyPolicy")
+
+
+def test_denied_kms_reads_fail_their_rows_without_the_aws_error_message() -> None:
+    rows = _rows(_extra_ctx(kms=_DeniedKms()))
+    failing = [r for r in rows if r.status == "fail"]
+    assert {r.check for r in failing} >= {
+        "cursor_key_rotation_enabled",
+        "cursor_key_shape",
+        "cursor_key_classified",
+        KMS_ADMIN_DENIED_CHECK,
+    }, sorted({r.check for r in failing})
+    assert any("kms:GetKeyPolicy failed (AccessDenied)" in r.detail for r in failing)
+    for row in rows:
+        assert _PLANTED_ARN not in row.detail and "assumed-role" not in row.detail, row
+
+
+def test_a_failed_teardown_omits_the_wrapped_aws_error_message() -> None:
+    from scripts.smoke import lambda_actions
+
+    def denied_teardown(_store: Any, smoke_tenant: SmokeTenant) -> dict[str, int]:
+        cause = _planted_client_error("BatchWriteItem")
+        raise TenantTeardownError(smoke_tenant.tenant, deleted=None, cause=cause) from cause
+
+    store: Any = object()
+    rows = list(lambda_actions._teardown_check(store, _TEST_SMOKE_TENANT, denied_teardown))
+    assert [r.status for r in rows] == ["fail"]
+    assert "(AccessDenied)" in rows[0].detail, rows[0].detail
+    assert _PLANTED_ARN not in rows[0].detail, rows[0].detail
+
+
+class TestFunctionErrorDetail:
+    """A FunctionError is reported by its type, never by the payload's message or trace."""
+
+    def _planted_payload(self, error_type: Any = "AccessDeniedException") -> bytes:
+        return json.dumps(
+            {
+                "errorType": error_type,
+                "errorMessage": f"User: {_PLANTED_ARN} is not authorized to perform: dynamodb:Query",
+                "stackTrace": [f'  File "/var/task/handler.py", line 1, in {_PLANTED_ARN}'],
+            }
+        ).encode("utf-8")
+
+    def test_the_detail_names_the_function_error_and_error_type_only(self) -> None:
+        from scripts.smoke.lambda_actions import _function_error_detail
+
+        detail = _function_error_detail("Unhandled", self._planted_payload())
+        assert detail == "FunctionError=Unhandled errorType=AccessDeniedException"
+
+    @pytest.mark.parametrize(
+        "error_type",
+        [f"Denied: {_PLANTED_ARN}", 42, None, "x" * 200],
+        ids=["prose", "non-string", "absent", "too-long"],
+    )
+    def test_an_unusable_error_type_is_omitted(self, error_type: Any) -> None:
+        from scripts.smoke.lambda_actions import _function_error_detail
+
+        assert _function_error_detail("Unhandled", self._planted_payload(error_type)) == (
+            "FunctionError=Unhandled"
+        )
+
+    @pytest.mark.parametrize("raw", [b"", b"not json", b"[1, 2]"], ids=["empty", "text", "list"])
+    def test_an_unparseable_payload_yields_the_function_error_alone(self, raw: bytes) -> None:
+        from scripts.smoke.lambda_actions import _function_error_detail
+
+        assert _function_error_detail("Handled", raw) == "FunctionError=Handled"
+
+    def test_an_unrecognised_function_error_value_is_not_echoed(self) -> None:
+        from scripts.smoke.lambda_actions import _function_error_detail
+
+        detail = _function_error_detail(f"weird {_PLANTED_ARN}", b"")
+        assert detail == "FunctionError=<unrecognised>"
+
+    def test_an_invoke_check_omits_the_planted_arn(self) -> None:
+        tool = ALL_TOOLS[0]
+        client = _lambda_client()
+        stubber = Stubber(client)
+        stubber.add_response(
+            "invoke",
+            {
+                "StatusCode": 200,
+                "FunctionError": "Unhandled",
+                "Payload": BytesIO(self._planted_payload()),
+            },
+        )
+        stubber.activate()
+        ctx = context_for_test(clients={"lambda": client}, tenant=_TEST_TENANT)
+        from scripts.smoke.lambda_actions import _check_in_scope, function_name_for
+
+        result = _check_in_scope(ctx, tool, function_name_for(tool), tenant=_TEST_TENANT)
+        stubber.deactivate()
+        assert result.status == "fail"
+        assert "FunctionError=Unhandled errorType=AccessDeniedException" in result.detail
+        assert _PLANTED_ARN not in result.detail and "is not authorized" not in result.detail

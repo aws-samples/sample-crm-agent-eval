@@ -39,9 +39,17 @@ _LUNA = "openai.gpt-6-1-luna"
 _TIERS = ("supervisor", "subagent", "tool")
 
 
-def _summary_entry(met: int, applicable: int, tokens: tuple[int, int]) -> dict[str, object]:
+def _summary_entry(
+    family: str, met: int, applicable: int, tokens: tuple[int, int]
+) -> dict[str, object]:
+    """A tier summary entry; Anthropic's reported input excludes cache tokens, OpenAI's includes."""
+    cache_read, cache_write = tokens[0] // 2, tokens[0] // 10
+    total_prompt = tokens[0] + cache_read + cache_write if family == "anthropic" else tokens[0]
     return {
         "input_tokens": tokens[0],
+        "total_prompt_tokens": total_prompt,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
         "output_tokens": tokens[1],
         "cost_total": None,
         "latency_p50_ms": None,
@@ -75,6 +83,13 @@ def _stub_arm(
     if family == "anthropic":
         for tier in _TIERS:
             by_tier[tier]["retry_count"] = 0
+    for index, tier in enumerate(_TIERS):
+        truncated = None if tier == "subagent" else index
+        by_tier[tier].update(
+            budget_exhausted_task_count=1 if tier == "supervisor" else 0,
+            truncated_tool_call_count=truncated,
+            truncated_task_count=truncated,
+        )
     tasks: tuple[dict[str, object], ...] = tuple(
         {
             "task_id": f"gt-{index:02d}",
@@ -100,6 +115,7 @@ def _stub_arm(
             runtime_identifier="local-stub-runtime",
             price_table_version="v1",
             answer_style_sha256="0" * 64,
+            prompt_caching="explicit cache points",
         ),
         model_metrics_fields={
             "cost_withheld_provisional": True,
@@ -125,7 +141,7 @@ def _stub_arm(
             for tier, model_id in zip(_TIERS, models, strict=True)
         ),
         tier_summary_fields={
-            tier: _summary_entry(met, applicable, (100 * (i + 1), 10 * (i + 1)))
+            tier: _summary_entry(family, met, applicable, (100 * (i + 1), 10 * (i + 1)))
             for i, (tier, (met, applicable)) in enumerate(zip(_TIERS, completions, strict=True))
         },
         tier_task_metrics_fields={

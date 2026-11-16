@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -312,7 +313,7 @@ def _clone_for_ref_mode(work: Path) -> Path:
 
 
 def _clone_for_subject_selection(work: Path) -> Path:
-    """The clone recipe :class:`TestSubjectSelection` reads: copies four worktree files into the
+    """The clone recipe :class:`TestSubjectSelection` reads: copies five worktree files into the
     clone and syncs the index to them."""
     proc_run.run(
         ["git", "clone", "--quiet", "--shared", str(REPO_ROOT), str(work)],
@@ -324,10 +325,12 @@ def _clone_for_subject_selection(work: Path) -> Path:
     for relative in (
         ("scripts", "check_no_account_id.sh"),
         ("scripts", "check_no_vendor_keys.sh"),
+        ("scripts", "repo_python.sh"),
         ("githooks", "pre-commit"),
         ("tests", "unit", "test_hygiene_gates.py"),
     ):
         (work / Path(*relative)).write_bytes((REPO_ROOT / Path(*relative)).read_bytes())
+    (work / "scripts" / "repo_python.sh").chmod(0o755)
     proc_run.run(["git", "-C", str(work), "add", "-A"], check=True, capture_output=True)
     return work
 
@@ -1222,6 +1225,7 @@ class TestPreCommitHook:
         # The hook resolves its scripts and any local .gitleaks.toml relative to the repo root.
         scripts_dir = tmp_path / "scripts"
         scripts_dir.mkdir()
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         for name in (
             "check_no_account_id.sh",
             "check_no_vendor_keys.sh",
@@ -1290,6 +1294,7 @@ class TestThePreCommitHookScansTheStagedTree:
         hook_dest.chmod(0o755)
         scripts_dir = root / "scripts"
         scripts_dir.mkdir()
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts_dir / "repo_python.sh")
         for name in (
             "check_no_account_id.sh",
             "check_no_vendor_keys.sh",
@@ -1428,7 +1433,7 @@ class TestThePreCommitHookScansTheStagedTree:
         """Both the staged and worktree scans are named in the hook and in `.pre-commit-config.yaml`."""
         hook_text = PRE_COMMIT_HOOK.read_text(encoding="utf-8")
         assert "protect --staged" in hook_text
-        assert "python3 scripts/check_secret_scan.py" in hook_text
+        assert "scripts/repo_python.sh scripts/check_secret_scan.py" in hook_text
         assert "detect --no-git" not in hook_text, "the hook still runs a raw working-tree scan"
 
         import yaml
@@ -1436,9 +1441,10 @@ class TestThePreCommitHookScansTheStagedTree:
         config = yaml.safe_load(PRE_COMMIT_CONFIG_YAML.read_text(encoding="utf-8"))
         entries = [hook["entry"] for repo in config["repos"] for hook in repo["hooks"]]
         assert any("protect --staged" in entry for entry in entries), entries
-        assert any(entry.endswith("python3 scripts/check_secret_scan.py") for entry in entries), (
-            entries
-        )
+        assert any(
+            entry.endswith("scripts/repo_python.sh scripts/check_secret_scan.py")
+            for entry in entries
+        ), entries
         assert not any("detect --no-git" in entry for entry in entries), entries
 
     def test_a_gitignored_secret_does_not_block_the_hook(self, tmp_path: Path) -> None:
@@ -1821,6 +1827,9 @@ class TestTheSubjectIsNotDecidedByTheEnvironment:
         violation."""
         work = tmp_path / "subject"
         (work / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (work / "scripts") / "repo_python.sh"
+        )
         source = (
             gate_source
             if gate_source is not None
@@ -2334,6 +2343,9 @@ class TestTheLocaleDoesNotDecideWhatTheGateCanSee:
         """A scratch repo holding one tracked text file whose violating line carries an invalid byte."""
         work.mkdir(parents=True)
         (work / "scripts").mkdir()
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (work / "scripts") / "repo_python.sh"
+        )
         (work / "scripts" / "check_no_account_id.sh").write_text(
             gate_text if gate_text is not None else CHECK_NO_ACCOUNT_ID.read_text(encoding="utf-8"),
             encoding="utf-8",
@@ -2449,6 +2461,9 @@ class TestCheckLicenseHeadersSubjectSubstitution:
     def _repo(tmp_path: Path, *, headerless: bool) -> Path:
         work = tmp_path / "subject"
         (work / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (work / "scripts") / "repo_python.sh"
+        )
         (work / "src").mkdir(parents=True)
         gate = REPO_ROOT / "scripts" / "check_license_headers.sh"
         (work / "scripts" / "check_license_headers.sh").write_text(
@@ -2537,6 +2552,9 @@ class TestGitIndexFileIsValidatedNotRemoved:
         """A scratch repository whose pre-commit hook runs only this gate."""
         work = tmp_path / "subject"
         (work / "scripts").mkdir(parents=True)
+        shutil.copy2(
+            REPO_ROOT / "scripts" / "repo_python.sh", (work / "scripts") / "repo_python.sh"
+        )
         (work / "githooks").mkdir(parents=True)
         source = (
             gate_source
@@ -2805,6 +2823,7 @@ class TestThePreCommitHookSubjectIsNotDecidedByTheEnvironment:
         hook.chmod(0o755)
         scripts = root / "scripts"
         scripts.mkdir()
+        shutil.copy2(REPO_ROOT / "scripts" / "repo_python.sh", scripts / "repo_python.sh")
         for gate in (CHECK_NO_ACCOUNT_ID, CHECK_NO_VENDOR_KEYS, CHECK_SECRET_SCAN, PROC_RUN):
             dest = scripts / gate.name
             dest.write_text(gate.read_text(encoding="utf-8"), encoding="utf-8")

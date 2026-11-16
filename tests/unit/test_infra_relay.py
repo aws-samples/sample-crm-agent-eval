@@ -390,7 +390,7 @@ def test_the_role_is_this_function_s_own(plan: Plan) -> None:
     ("overrides", "expected_message"),
     [
         pytest.param(
-            {"runtime": '"python3.13"'},
+            {"runtime": '"python3.14"'},
             "only Node.js managed runtimes support response streaming",
             id="python-runtime-cannot-stream",
         ),
