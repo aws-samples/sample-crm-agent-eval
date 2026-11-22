@@ -28,7 +28,7 @@ PRICING_PATH = REPO_ROOT / "config" / "pricing.yaml"
 CAPABILITIES_PATH = REPO_ROOT / "config" / "model_capabilities.yaml"
 
 ANTHROPIC_MODEL = "anthropic.claude-sonnet-5-5"
-OPENAI_MODEL = "openai.gpt-6.1-sol"
+OPENAI_MODEL = "openai.gpt-6.2-sol"
 
 
 def _shipped_pricing() -> dict[str, Any]:
@@ -72,7 +72,7 @@ def test_shipped_pricing_table_is_final_with_real_published_rates() -> None:
 def test_shipped_pricing_table_prices_exactly_the_capability_matrix_models() -> None:
     """Every model the matrix serves is priced, and no retired model keeps a rate."""
     pricing = _shipped_pricing()
-    assert pricing["price_table_version"] == "1.3.0"
+    assert pricing["price_table_version"] == "1.4.0"
     assert set(pricing["models"]) == set(_capability_models())
 
 
@@ -97,7 +97,7 @@ def test_shipped_rates_are_what_cost_for_usage_charges(model_id: str) -> None:
     )
     assert cached_cost.cache_write == pytest.approx(0.01 * rates["cache_write"])
     assert cached_cost.cache_read == pytest.approx(0.04 * rates["cache_read"])
-    assert cached_cost.price_table_version == "1.3.0"
+    assert cached_cost.price_table_version == "1.4.0"
     assert cached_cost.pricing_tier == "standard"
 
 

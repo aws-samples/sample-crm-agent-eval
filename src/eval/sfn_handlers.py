@@ -11,7 +11,8 @@
   then repeat, then task.
 * ``seed`` -- records the catalog row with the run's unit tenants (one per ``(arm, repeat)``,
   :func:`eval.tenancy.unit_tenant`) and seeds each.
-* ``item_failed`` -- records one item ``failed`` with the state machine's error.
+* ``item_failed`` -- records one item ``failed`` with the state machine's error, classified by
+  :func:`classify_step_error`.
 * ``aggregate`` -- assembles each arm from its ``done`` items, writes ``matrix.{json,md,csv}`` and
   the raw archives under ``<EVAL_ARTIFACTS_PREFIX>/<run_id>/``, and stores ``matrix_report`` and
   ``artifact_links``. A run with no ``done`` item writes nothing.
@@ -27,6 +28,9 @@
   releases the lock on every path but a refusal: it reads no artefacts configuration, an
   unreadable ownership still releases a lock naming this run and execution, and a failure while
   summarising marks the run ``failed`` and releases the lock before raising.
+
+A step error is stored and returned only as a :class:`StepError` code and bounded detail; its raw
+text is logged once, under the run id as correlation id, and never stored.
 
 ``seed`` and ``aggregate`` raise :class:`NotRunOwner` and write nothing when another execution owns
 the run, so the state machine's Catch routes to ``teardown``; ``teardown`` and ``finalize`` return
@@ -76,6 +80,7 @@ from crm.errors import (
     ValidationFailed,
     bounded_detail_value,
 )
+from crm.metering import redact
 from crm.store.store import Store
 from eval.actor import actor_principal_type
 from eval.artefacts import artefact_object_key
@@ -95,6 +100,7 @@ from eval.pricing import is_cost_provisional, load_price_table_status
 from eval.runs import (
     ITEM_STATUSES,
     OWNING_OUTCOMES,
+    UNCLASSIFIED_ERROR_CODE,
     ItemStatus,
     RunRecord,
     claim_execution,
@@ -115,6 +121,7 @@ from eval.sweep_units import (
     TaskUnitResult,
     arm_turn_tuning,
     assemble_arm,
+    dirty_tree_for_revision,
     run_task_unit,
     task_actor,
     task_refs,
@@ -373,16 +380,106 @@ def _repeat_index(event: Mapping[str, Any], record: RunRecord) -> int:
     return value
 
 
-def _error_text(raw: object) -> str | None:
-    """Render a Step Functions error object ``{Error, Cause}`` as bounded text, or ``None``.
+#: The code of a step that hit a Step Functions or Lambda timeout.
+STEP_TIMEOUT_CODE: Final[str] = "step_timeout"
 
-    A Lambda error's ``Cause`` is JSON carrying ``errorMessage``; only that message is kept, never
-    the stack trace.
+#: The code of a step failed by Step Functions or the Lambda service rather than the handler.
+STEP_LAMBDA_ERROR_CODE: Final[str] = "step_lambda_error"
+
+#: The longest :attr:`StepError.detail`.
+STEP_ERROR_DETAIL_LIMIT: Final[int] = 200
+
+#: Step Functions error names that mean the step ran out of time.
+_TIMEOUT_ERROR_NAMES: Final[frozenset[str]] = frozenset(
+    {"States.Timeout", "States.HeartbeatTimeout", "Sandbox.Timedout", "Lambda.Timeout"}
+)
+
+#: Error-name prefixes Step Functions and the Lambda service raise.
+_SERVICE_ERROR_PREFIXES: Final[tuple[str, ...]] = ("States.", "Lambda.", "Sandbox.")
+
+#: The characters a :attr:`StepError.detail` may carry.
+_DETAIL_DISALLOWED: Final[re.Pattern[str]] = re.compile(r"[^A-Za-z0-9._:-]")
+
+#: A digit run as long as an account id, never carried in a detail.
+_LONG_DIGIT_RUN: Final[re.Pattern[str]] = re.compile(r"\d{12,}")
+
+
+@dataclass(frozen=True, slots=True)
+class StepError:
+    """A classified step failure: what a record stores and a payload returns.
+
+    Attributes:
+        code: A :mod:`crm.errors` taxonomy code, :data:`STEP_TIMEOUT_CODE`,
+            :data:`STEP_LAMBDA_ERROR_CODE` or :data:`eval.runs.UNCLASSIFIED_ERROR_CODE`.
+        detail: The error name, at most :data:`STEP_ERROR_DETAIL_LIMIT` characters of
+            ``[A-Za-z0-9._:-]``, or ``None``. Never the error message.
     """
-    if raw is None:
+
+    code: str
+    detail: str | None
+
+
+def _crm_error_codes() -> dict[str, str]:
+    """Every loaded :class:`crm.errors.CrmError` subclass name mapped to its ``code``."""
+    codes: dict[str, str] = {}
+    pending: list[type[CrmError]] = [CrmError]
+    while pending:
+        cls = pending.pop()
+        codes.setdefault(cls.__name__, cls.code)
+        pending.extend(cls.__subclasses__())
+    return codes
+
+
+def _cause_error_type(cause: object) -> str | None:
+    """The ``errorType`` a Lambda error's JSON ``Cause`` names, if any."""
+    if not isinstance(cause, str) or not cause:
         return None
+    try:
+        decoded = json.loads(cause)
+    except json.JSONDecodeError:
+        return None
+    error_type = decoded.get("errorType") if isinstance(decoded, Mapping) else None
+    return error_type if isinstance(error_type, str) and error_type else None
+
+
+def _step_error_detail(name: str) -> str | None:
+    """``name`` reduced to the detail charset and length, or ``None`` when nothing safe remains."""
+    cleaned = _DETAIL_DISALLOWED.sub("", name)[:STEP_ERROR_DETAIL_LIMIT]
+    if not cleaned or _LONG_DIGIT_RUN.search(cleaned):
+        return None
+    return cleaned
+
+
+def classify_step_error(raw: object) -> StepError:
+    """Classify a Step Functions error object ``{Error, Cause}`` without keeping its message.
+
+    The code is the :mod:`crm.errors` code of the exception the ``Error`` name (or the ``Cause``'s
+    ``errorType``) names, or the name itself when it is already a taxonomy code; a Step Functions
+    or Lambda timeout is :data:`STEP_TIMEOUT_CODE`, any other ``States.*``/``Lambda.*``/
+    ``Sandbox.*`` name :data:`STEP_LAMBDA_ERROR_CODE`, and anything else (a non-mapping included)
+    :data:`eval.runs.UNCLASSIFIED_ERROR_CODE`. The detail is the sanitised ``Error`` name.
+    """
     if not isinstance(raw, Mapping):
-        return _bounded(f"unrecognised error object {type(raw).__name__}")
+        return StepError(code=UNCLASSIFIED_ERROR_CODE, detail=None)
+    name = raw.get("Error")
+    name = name if isinstance(name, str) else ""
+    detail = _step_error_detail(name)
+    codes = _crm_error_codes()
+    known_codes = frozenset(codes.values())
+    for candidate in (name, _cause_error_type(raw.get("Cause"))):
+        if candidate in codes:
+            return StepError(code=codes[candidate], detail=detail)
+        if candidate in known_codes:
+            return StepError(code=candidate, detail=detail)
+    if name in _TIMEOUT_ERROR_NAMES:
+        return StepError(code=STEP_TIMEOUT_CODE, detail=detail)
+    if name.startswith(_SERVICE_ERROR_PREFIXES):
+        return StepError(code=STEP_LAMBDA_ERROR_CODE, detail=detail)
+    return StepError(code=UNCLASSIFIED_ERROR_CODE, detail=detail)
+
+
+def _raw_error_text(raw: Mapping[str, Any]) -> str:
+    """The error name and the ``Cause``'s ``errorMessage`` (never its stack trace), for logs only."""
     name = str(raw.get("Error") or "UnknownError")
     cause = raw.get("Cause")
     message = ""
@@ -396,6 +493,29 @@ def _error_text(raw: object) -> str | None:
                 str(decoded.get("errorMessage") or "") if isinstance(decoded, Mapping) else cause
             )
     return _bounded(f"{name}: {message}" if message else name)
+
+
+def _step_error(event: Mapping[str, Any], key: str, *, run_id: str) -> StepError | None:
+    """Classify ``event[key]``, logging its raw text once under ``run_id``; ``None`` when absent."""
+    raw = event.get(key)
+    if raw is None:
+        return None
+    classified = classify_step_error(raw)
+    raw_text = (
+        _raw_error_text(raw)
+        if isinstance(raw, Mapping)
+        else f"unrecognised error object {type(raw).__name__}"
+    )
+    _logger.warning(
+        json.dumps(
+            {
+                "event": "sweep_step_error",
+                "correlation_id": run_id,
+                "reason": redact(f"{key} {classified.code}: {raw_text}"),
+            }
+        )
+    )
+    return classified
 
 
 def _bounded(text: str) -> str:
@@ -898,11 +1018,29 @@ def _seed(store: Store, event: Mapping[str, Any], now: datetime | None) -> dict[
     return {"run_id": run_id, "seeded": True}
 
 
+#: The :attr:`StepError.detail` of an item refused because its turn ran under another prompt bundle.
+PROMPT_BUNDLE_MISMATCH_DETAIL: Final[str] = "prompt_bundle_mismatch"
+
+
+def _failed_item_fields(
+    step_error: StepError, **extra: str | int | float | None
+) -> dict[str, str | int | float | None]:
+    """The result-row fields of a ``failed`` item: its error code, its detail when set, ``extra``."""
+    fields: dict[str, str | int | float | None] = {"error_code": step_error.code}
+    if step_error.detail is not None:
+        fields["error_detail"] = step_error.detail
+    fields.update(extra)
+    return fields
+
+
 def _item_failed(store: Store, event: Mapping[str, Any]) -> dict[str, Any]:
     run_id = _required_str(event, "run_id")
     arm_index = _arm_index(event)
     task_id = _required_str(event, "task_id")
     repeat_index = _repeat_index(event, require_run(store, run_id))
+    step_error = _step_error(event, "error", run_id=run_id) or StepError(
+        code=UNCLASSIFIED_ERROR_CODE, detail=None
+    )
     recorded = record_item(
         store,
         run_id=run_id,
@@ -911,10 +1049,7 @@ def _item_failed(store: Store, event: Mapping[str, Any]) -> dict[str, Any]:
         task_id=task_id,
         arm=DEFAULT_ARM_SPECS[arm_index].family,
         item_status="failed",
-        fields={
-            "error": _error_text(event.get("error")) or "unknown failure",
-            COST_MEASURED_ATTRIBUTE: False,
-        },
+        fields=_failed_item_fields(step_error, **{COST_MEASURED_ATTRIBUTE: False}),
     )
     return {"run_id": run_id, "recorded": recorded}
 
@@ -926,9 +1061,9 @@ def _aggregate(
     _require_ownership(store, event, step="aggregate")
     record = require_run(store, run_id)
     _record_tenant(record)
-    step_error = _error_text(event.get("error"))
+    step_error = _step_error(event, "error", run_id=run_id)
     if step_error is not None:
-        _log("sweep_aggregate_after_error", run_id=run_id, reason=step_error)
+        _log("sweep_aggregate_after_error", run_id=run_id, reason=step_error.code)
     units_by_arm: dict[int, list[TaskUnitResult]] = {}
     unrecorded = 0
     for ref in _sweep_refs(record):
@@ -955,6 +1090,7 @@ def _aggregate(
     price_status = load_price_table_status()
     cost_withheld = is_cost_provisional()
     git_revision = _git_revision()
+    dirty_tree = dirty_tree_for_revision(git_revision)
     arm_runs = [
         assemble_arm(
             units,
@@ -967,6 +1103,7 @@ def _aggregate(
             price_table_version=price_status.price_table_version,
             cost_withheld=cost_withheld,
             arm_index=arm_index,
+            dirty_tree=dirty_tree,
         )
         for arm_index, units in sorted(units_by_arm.items())
     ]
@@ -1134,19 +1271,44 @@ def _isolation_failures(store: Store, run_id: str) -> list[str]:
     return list(entries)
 
 
+#: The error code of a run whose ``demo`` delta checks did not all pass.
+ISOLATION_FAILED_CODE: Final[str] = "isolation_check_failed"
+
+#: The error code of a run with at least one failed item.
+TASKS_FAILED_CODE: Final[str] = "tasks_failed"
+
+#: The error code of a run with items that were never recorded.
+TASKS_UNRECORDED_CODE: Final[str] = "tasks_unrecorded"
+
+#: The error code of a run whose ``finalize`` step could not summarise it.
+FINALIZE_FAILED_CODE: Final[str] = "finalize_failed"
+
+
 def _failure_summary(
-    store: Store, record: RunRecord, *, error: str | None, teardown_error: str | None
-) -> str | None:
+    store: Store,
+    record: RunRecord,
+    *,
+    error: StepError | None,
+    teardown_error: StepError | None,
+) -> tuple[str, StepError] | None:
     """Why the run failed, or ``None`` when it did not: a step error, a teardown failure, a
-    ``demo`` delta check that did not pass, or any failed item (counted per family)."""
+    ``demo`` delta check that did not pass, or any failed item (counted per family).
+
+    Returns the summary, which names step errors by code only, and the run's :class:`StepError`:
+    the step error, else the teardown error, else the first other cause's code with no detail.
+    """
     parts: list[str] = []
+    causes: list[StepError] = []
     if error is not None:
-        parts.append(f"step failed: {error}")
+        parts.append(f"step failed: {error.code}")
+        causes.append(error)
     if teardown_error is not None:
-        parts.append(f"teardown failed: {teardown_error}")
+        parts.append(f"teardown failed: {teardown_error.code}")
+        causes.append(teardown_error)
     isolation = _isolation_failures(store, record.run_id)
     if isolation:
         parts.append(f"isolation check(s) not passing: {', '.join(isolation)}")
+        causes.append(StepError(code=ISOLATION_FAILED_CODE, detail=None))
     if record.tasks_failed > 0:
         by_family = _failed_items_by_family(store, record)
         rendered = ", ".join(f"{family}={count}" for family, count in by_family.items())
@@ -1159,12 +1321,14 @@ def _failure_summary(
         parts.append(
             f"{record.tasks_failed} task(s) failed ({rendered or 'no failed result row found'})"
         )
+        causes.append(StepError(code=TASKS_FAILED_CODE, detail=None))
     unrecorded = record.tasks_total - (
         record.tasks_done + record.tasks_failed + record.tasks_skipped
     )
     if unrecorded > 0:
         parts.append(f"{unrecorded} task(s) never recorded")
-    return _bounded("; ".join(parts)) if parts else None
+        causes.append(StepError(code=TASKS_UNRECORDED_CODE, detail=None))
+    return (_bounded("; ".join(parts)), causes[0]) if parts else None
 
 
 def _finalize(store: Store, event: Mapping[str, Any], now: datetime | None) -> dict[str, Any]:
@@ -1176,20 +1340,23 @@ def _finalize(store: Store, event: Mapping[str, Any], now: datetime | None) -> d
         raise
     if not owned:
         return {"run_id": run_id, "status": None, "refused": True}
-    error = _error_text(event.get("error"))
-    teardown_error = _error_text(event.get("teardown_error"))
+    error = _step_error(event, "error", run_id=run_id)
+    teardown_error = _step_error(event, "teardown_error", run_id=run_id)
     try:
         record = require_run(store, run_id)
-        summary = (
+        failure = (
             None
             if record.is_terminal
             else _failure_summary(store, record, error=error, teardown_error=teardown_error)
         )
-        if summary is not None:
+        if failure is not None:
+            summary, cause = failure
             mark_failed(
                 store,
                 run_id=run_id,
                 failure_summary=summary,
+                error_code=cause.code,
+                error_detail=cause.detail,
                 teardown_status="ok" if teardown_error is None else "failed",
                 now=now,
             )
@@ -1207,9 +1374,9 @@ def _finalize(store: Store, event: Mapping[str, Any], now: datetime | None) -> d
             mark_failed(
                 store,
                 run_id=run_id,
-                failure_summary=_bounded(
-                    f"finalize could not summarise: {type(exc).__name__}: {exc}"
-                ),
+                failure_summary=f"finalize could not summarise: {type(exc).__name__}",
+                error_code=FINALIZE_FAILED_CODE,
+                error_detail=_step_error_detail(type(exc).__name__),
                 teardown_status="ok" if teardown_error is None else "failed",
                 now=now,
             )
@@ -1477,11 +1644,8 @@ def _sweep_task(
     )
     digest = unit.turn.prompt_bundle_sha256
     if run_bundle.reference_found and digest != run_bundle.reference:
-        mismatch_fields: dict[str, str | int | float | None] = {
-            "error": "prompt-bundle mismatch",
-            BUNDLE_MISMATCH_ATTRIBUTE: True,
-            PROMPT_BUNDLE_SHA256_KEY: digest,
-        }
+        mismatch = f"turn digest {digest} differs from the run's first {run_bundle.reference}"
+        _log("sweep_prompt_bundle_mismatch", run_id=run_id, reason=mismatch)
         record_item(
             store,
             run_id=run_id,
@@ -1491,11 +1655,13 @@ def _sweep_task(
             arm=arm_spec.family,
             item_status="failed",
             cost_usd=sum(usage.cost.total for usage in unit.usage_records),
-            fields=mismatch_fields,
+            fields=_failed_item_fields(
+                StepError(code=Conflict.code, detail=PROMPT_BUNDLE_MISMATCH_DETAIL),
+                **{BUNDLE_MISMATCH_ATTRIBUTE: True, PROMPT_BUNDLE_SHA256_KEY: digest},
+            ),
         )
         raise Conflict(
-            "This evaluation run's turns ran under more than one prompt bundle.",
-            detail=f"turn digest {digest} differs from the run's first {run_bundle.reference}",
+            "This evaluation run's turns ran under more than one prompt bundle.", detail=mismatch
         )
     record_item(
         store,
@@ -1727,13 +1893,19 @@ __all__ = [
     "START_RESULT_KEYS",
     "STEP_EVENT_KEYS",
     "SWEEP_TASK_EVENT_KEYS",
+    "STEP_ERROR_DETAIL_LIMIT",
+    "STEP_LAMBDA_ERROR_CODE",
+    "STEP_TIMEOUT_CODE",
     "SWEEP_TASK_RESULT_KEYS",
     "TASK_REF_KEYS",
     "EventKeys",
     "NotRunOwner",
+    "PROMPT_BUNDLE_MISMATCH_DETAIL",
+    "StepError",
     "SweepControlConfig",
     "SweepTaskConfig",
     "classify_runtime_failure",
+    "classify_step_error",
     "session_id_for",
     "sweep_control_handler",
     "sweep_task_handler",

@@ -19,6 +19,7 @@ from agents.registry import tool_registry_for
 from agents.subagents import SUBAGENT_SPECS_BY_ROLE
 from agents.supervisor import (
     DIRECT_TOOL_NAMES,
+    OUTPUT_LIMIT_NO_ANSWER_MESSAGE,
     SUPERVISOR_ROLE,
     SUPERVISOR_TIER,
     SubagentOutcome,
@@ -798,3 +799,28 @@ def _build_turn(
         budget=budget if budget is not None else TurnBudget(),
         tuning_override=tuning_override,
     )
+
+
+def test_a_textless_completed_after_a_truncated_call_maps_to_the_no_answer_event() -> None:
+    event = provider_event_to_agent_event(
+        ProviderEvent(type="completed", awaiting_tools=False), output_truncated=True
+    )
+    assert event is not None
+    assert (event.kind, event.error_kind, event.error_message) == (
+        "error",
+        "model_failure",
+        OUTPUT_LIMIT_NO_ANSWER_MESSAGE,
+    )
+
+
+def test_a_textless_completed_without_truncation_still_raises() -> None:
+    with pytest.raises(ValueError, match="no text"):
+        provider_event_to_agent_event(ProviderEvent(type="completed"), output_truncated=False)
+
+
+def test_a_truncated_completed_with_text_is_still_a_completed_event() -> None:
+    event = provider_event_to_agent_event(
+        ProviderEvent(type="completed"), accumulated_text="partial answer", output_truncated=True
+    )
+    assert event is not None
+    assert (event.kind, event.text) == ("completed", "partial answer")

@@ -40,8 +40,8 @@ from eval.matrix import (
 OPUS = "anthropic.claude-opus-5-5"
 SONNET = "anthropic.claude-sonnet-5-5"
 HAIKU = "anthropic.claude-haiku-5-5"
-ASTRA = "openai.gpt-6-astra"
-SOL = "openai.gpt-6-1-sol"
+ASTRA = "openai.gpt-6.2-astra"
+SOL = "openai.gpt-6.2-sol"
 
 _ENTRY_KEYS = [
     "model_ids",
@@ -67,6 +67,8 @@ _ENTRY_KEYS = [
     "budget_exhausted_task_count",
     "truncated_tool_call_count",
     "truncated_task_count",
+    "output_truncated_call_count",
+    "output_truncated_task_count",
 ]
 
 _ROW_LABELS = [
@@ -90,6 +92,8 @@ _ROW_LABELS = [
     "Budget-exhausted tasks",
     "Truncated tool calls",
     "Truncated tasks",
+    "Output-truncated model calls",
+    "Output-truncated tasks",
 ]
 
 
@@ -107,6 +111,8 @@ def _provenance(
         price_table_version="v1",
         answer_style_sha256="0" * 64,
         prompt_caching="explicit cache points",
+        output_token_cap=16_384,
+        dirty_tree=False,
     )
 
 
@@ -184,11 +190,14 @@ def _block(
     outcomes: tuple[int, int, int, int, int],
     retries: tuple[int, int, int] | None = None,
     counts: dict[str, tuple[int, int | None, int | None]] | None = None,
+    output_truncation: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, object]:
     """An arm's ``tier_task_metrics`` block; ``retries=None`` omits ``retry_count``.
 
     ``counts`` maps each tier to its budget-exhausted, truncated-call and truncated-task counts;
     absent, every count is zero (``None`` for the subagent truncation pair).
+    ``output_truncation`` maps each tier to its output-truncated call and task counts; absent,
+    both are zero at every tier.
     """
     tier_counts = counts or {
         "supervisor": (0, 0, 0),
@@ -218,6 +227,13 @@ def _block(
                     "truncated_task_count",
                 ),
                 tier_counts[tier],
+                strict=True,
+            )
+        )
+        by_tier[tier].update(
+            zip(
+                ("output_truncated_call_count", "output_truncated_task_count"),
+                (output_truncation or {}).get(tier, (0, 0)),
                 strict=True,
             )
         )
@@ -270,6 +286,7 @@ def _anthropic_arm() -> ArmResult:
                 "subagent": (1, None, None),
                 "tool": (0, 4, 3),
             },
+            output_truncation={"supervisor": (3, 2), "subagent": (5, 4), "tool": (7, 6)},
         ),
     )
 
@@ -348,12 +365,12 @@ def test_matrix_json_leads_with_the_tier_comparison_block() -> None:
         "arms",
         "figure_semantics",
     ]
-    assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION == 3
+    assert payload[RECORD_SHAPE_VERSION_KEY] == RECORD_SHAPE_VERSION == 4
     summary = payload["tier_comparison"]
     assert list(summary) == [RECORD_SHAPE_VERSION_KEY, "columns", "tiers", "notes"]
-    assert summary[RECORD_SHAPE_VERSION_KEY] == 3
+    assert summary[RECORD_SHAPE_VERSION_KEY] == 4
     assert all(list(arm)[0] == RECORD_SHAPE_VERSION_KEY for arm in payload["arms"])
-    assert all(arm[RECORD_SHAPE_VERSION_KEY] == 3 for arm in payload["arms"])
+    assert all(arm[RECORD_SHAPE_VERSION_KEY] == 4 for arm in payload["arms"])
     assert list(summary["tiers"]) == ["supervisor", "subagent", "tool"]
     assert all(len(entries) == 3 for entries in summary["tiers"].values())
 
@@ -684,6 +701,8 @@ def _expected_summary_columns() -> list[str]:
                 "budget_exhausted_task_count",
                 "truncated_tool_call_count",
                 "truncated_task_count",
+                "output_truncated_call_count",
+                "output_truncated_task_count",
             )
         ),
         *(
@@ -854,9 +873,9 @@ def test_the_retry_count_is_in_the_json_entry_and_the_csv_columns() -> None:
 #: sha256 of each fixture's ``## Tier comparison summary`` block; the Markdown must stay
 #: byte-identical for identical input.
 _SUMMARY_BLOCK_SHA256 = {
-    "three_arm": "923317f03b8ea3de616207dd888e9f66df692d7356ce627fe4a208c37e4259b5",
-    "single_anthropic": "359173c77c3bae8ed3c172290269f0a0ac04f132fb49018762622dac6c761bae",
-    "single_openai_stub": "86c0d38dd5b1bb4feeb44560f9951d71a5620020a05cff922e35d0dddfd24026",
+    "three_arm": "5fe630f72f1365f57ee8a38b85edaa76c4a44bcfe9b2f5ca22c12a60194fe4b3",
+    "single_anthropic": "105aa3dcbed67161741c71d0f39f6ff322f21ab00b5e884f87e4bf52425527b7",
+    "single_openai_stub": "25f31e2f6756f35aa20e350b5aca1c6cbfc5d0a37858ed60c6812cb1a922bed9",
 }
 
 
@@ -1223,3 +1242,59 @@ def test_a_record_shape_3_summary_missing_a_token_or_cost_key_is_refused() -> No
         del summary["tiers"]["tool"][1][key]
         with pytest.raises(matrix.RecordShapeRefused, match=rf"tiers\.tool\[1\]\.{key}"):
             matrix.tier_comparison_table(summary)
+
+
+# --------------------------------------------------------------------------------------------
+# Output-truncated model calls and tasks
+# --------------------------------------------------------------------------------------------
+
+_OUTPUT_TRUNCATION_KEYS = ("output_truncated_call_count", "output_truncated_task_count")
+
+
+def test_the_output_truncation_counts_are_copied_into_every_tiers_entry() -> None:
+    """Each tier's entry carries its own counts, the subagent tier included (not null there)."""
+    summary = tier_comparison(_three_arm_matrix())
+    expected = {"supervisor": (3, 2), "subagent": (5, 4), "tool": (7, 6)}
+    for tier, counts in expected.items():
+        entry = _entry(summary, tier, 0)
+        assert tuple(entry[key] for key in _OUTPUT_TRUNCATION_KEYS) == counts
+
+
+def test_the_output_truncation_rows_follow_truncated_tasks_and_apply_at_every_tier() -> None:
+    table = _table(_three_arm_matrix())
+    expected = {"supervisor": ("3", "2"), "subagent": ("5", "4"), "tool": ("7", "6")}
+    for tier, (calls, tasks) in expected.items():
+        section = next(
+            cast(list[list[str]], s["rows"])
+            for s in cast(list[dict[str, object]], table["sections"])
+            if s["tier"] == tier
+        )
+        labels = [row[0] for row in section]
+        position = labels.index("Truncated tasks")
+        assert labels[position + 1 : position + 3] == [
+            "Output-truncated model calls",
+            "Output-truncated tasks",
+        ]
+        rows = _section_rows(table, tier)
+        assert rows["Output-truncated model calls"][0] == calls
+        assert rows["Output-truncated tasks"][0] == tasks
+
+
+def test_the_csv_carries_each_tiers_output_truncation_columns() -> None:
+    first = _csv_rows(_three_arm_matrix())[0]
+    assert first["summary_supervisor_output_truncated_call_count"] == "3"
+    assert first["summary_supervisor_output_truncated_task_count"] == "2"
+    assert first["summary_subagent_output_truncated_call_count"] == "5"
+    assert first["summary_subagent_output_truncated_task_count"] == "4"
+    assert first["summary_tool_output_truncated_call_count"] == "7"
+    assert first["summary_tool_output_truncated_task_count"] == "6"
+
+
+def test_the_definitions_note_describes_the_output_truncation_rows_without_a_verdict() -> None:
+    notes = cast(list[str], tier_comparison(_three_arm_matrix())["notes"])
+    definitions = next(note for note in notes if "Output-truncated model calls" in note)
+    assert "Output-truncated tasks" in definitions
+    assert "output token cap" in definitions
+    lowered = definitions.lower()
+    for word in ("pass", "fail", "verdict", "better", "worse", "winner", "recommend"):
+        assert re.search(rf"\b{word}\b", lowered) is None, word

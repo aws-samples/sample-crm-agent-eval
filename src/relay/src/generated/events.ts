@@ -5,7 +5,7 @@
 // `scripts/check_sse_schema_parity.py` fails the build on drift.
 
 /** Version of the frame contract this build was generated against. */
-export const SCHEMA_VERSION = "3.0.0";
+export const SCHEMA_VERSION = "3.1.0";
 
 /** Prefix and delimiter of one SSE frame, as `format_sse_line` emits them. */
 export const FRAME_PREFIX = "data: ";
@@ -18,7 +18,7 @@ export const TRUNCATION_MARKER = "__truncated__";
 export const TOOL_RESULT_BYTE_CEILING = 32768;
 
 /** The closed set of event kinds. */
-export const EVENT_KINDS = ["tool_call", "tool_result", "proposal", "usage", "completed", "error", "text_delta", "heartbeat"] as const;
+export const EVENT_KINDS = ["tool_call", "tool_result", "proposal", "usage", "completed", "error", "text_delta", "heartbeat", "replay_unavailable"] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 
 /** The closed set of terminal error kinds, carried inside an `error` event. */

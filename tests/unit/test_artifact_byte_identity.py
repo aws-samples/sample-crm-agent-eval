@@ -111,6 +111,8 @@ def _arm_at_timestamp(timestamp: str) -> ArmResult:
             answer_style_sha256=provenance.answer_style_sha256,
             prompt_bundle_sha256=provenance.prompt_bundle_sha256,
             prompt_caching=provenance.prompt_caching,
+            output_token_cap=provenance.output_token_cap,
+            dirty_tree=provenance.dirty_tree,
         ),
         model_metrics_fields=base.model_metrics_fields,
         aggregate_score_fields=base.aggregate_score_fields,

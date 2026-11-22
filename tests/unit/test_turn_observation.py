@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 from collections.abc import AsyncIterator, Mapping
 from typing import Any
@@ -472,7 +473,8 @@ def _mutated(path: tuple[object, ...], value: object, *, delete: bool = False) -
 @pytest.mark.parametrize(
     ("path", "value", "delete"),
     [
-        (("schema",), 4, False),
+        (("schema",), 5, False),
+        (("schema",), 3, False),
         (("schema",), 2, False),
         (("schema",), True, False),
         (("outcome",), None, True),
@@ -496,6 +498,11 @@ def _mutated(path: tuple[object, ...], value: object, *, delete: bool = False) -
         (("exclusions", 0, "category"), "meteor", False),
         (("exclusions", 0, "invocation_id"), "", False),
         (("turn_latency_ms",), "fast", False),
+        (("outcome", "output_truncated"), None, True),
+        (("outcome", "output_truncated"), "no", False),
+        (("outcome", "output_truncated"), True, False),
+        (("records", "invocations", 0, "output_truncated"), None, True),
+        (("records", "invocations", 0, "output_truncated"), 1, False),
     ],
     ids=lambda value: str(value),
 )
@@ -506,9 +513,9 @@ def test_deserialise_refuses_a_malformed_payload(
         deserialise_turn(_mutated(path, value, delete=delete))
 
 
-def test_the_writer_emits_schema_3() -> None:
-    assert SERIALISED_TURN_SCHEMA == 3
-    assert serialise_turn(_rich_turn())["schema"] == 3
+def test_the_writer_emits_schema_4() -> None:
+    assert SERIALISED_TURN_SCHEMA == 4
+    assert serialise_turn(_rich_turn())["schema"] == 4
 
 
 def test_the_writer_emits_the_exhaustion_tier_in_the_outcome() -> None:
@@ -540,7 +547,7 @@ def test_a_schema_2_body_from_a_skewed_runtime_is_refused_with_a_named_mismatch(
     del stale["outcome"]["budget_exhausted_tier"]
     with pytest.raises(ValueError) as refused:
         deserialise_turn(stale)
-    assert str(refused.value) == "turn.schema must be 3, got 2"
+    assert str(refused.value) == "turn.schema must be 4, got 2"
 
 
 def test_a_schema_3_body_without_the_exhaustion_tier_is_refused_naming_the_key() -> None:
@@ -664,3 +671,83 @@ def test_a_result_under_the_byte_ceiling_is_not_observed_as_truncated() -> None:
         calls=[("list_activities", {"opportunity_id": "opp-0000"})],
     )
     assert observed.outcome(tenant="t", budget_exhausted=False).truncated is False
+
+
+# --- output truncation (schema 4) ----------------------------------------------------------------
+
+
+def _truncated_rich_turn() -> ObservedTurn:
+    turn = _rich_turn()
+    supervisor, tool = turn.invocations
+    return dataclasses.replace(
+        turn,
+        outcome=dataclasses.replace(turn.outcome, output_truncated=True),
+        invocations=(dataclasses.replace(supervisor, output_truncated=True), tool),
+    )
+
+
+def test_an_untruncated_outcome_defaults_to_not_output_truncated() -> None:
+    assert TurnOutcome(tenant="eval-abc").output_truncated is False
+
+
+def test_a_truncated_turn_round_trips_with_per_invocation_flags() -> None:
+    turn = _truncated_rich_turn()
+    wire = serialise_turn(turn)
+    assert wire["outcome"]["output_truncated"] is True
+    assert [i["output_truncated"] for i in wire["records"]["invocations"]] == [True, False]
+    assert deserialise_turn(json.loads(json.dumps(wire))) == turn
+
+
+def test_an_untruncated_turn_writes_both_keys_false() -> None:
+    wire = serialise_turn(_rich_turn())
+    assert wire["outcome"]["output_truncated"] is False
+    assert [i["output_truncated"] for i in wire["records"]["invocations"]] == [False, False]
+
+
+def test_a_schema_3_body_is_refused_naming_output_truncated() -> None:
+    stale = _mutated(("schema",), 3)
+    del stale["outcome"]["output_truncated"]
+    for invocation in stale["records"]["invocations"]:
+        del invocation["output_truncated"]
+    with pytest.raises(ValueError, match="output_truncated"):
+        deserialise_turn(stale)
+
+
+def test_an_outcome_flag_that_disagrees_with_its_invocations_is_refused() -> None:
+    wire = serialise_turn(_truncated_rich_turn())
+    wire["records"]["invocations"][0]["output_truncated"] = False
+    with pytest.raises(ValueError, match="output_truncated"):
+        deserialise_turn(wire)
+
+
+_TRUNCATED_TEXTLESS_SUPERVISOR = [
+    ProviderEvent(type="usage", input_tokens=30, output_tokens=0, provisional=True),
+    ProviderEvent(type="usage", input_tokens=30, output_tokens=16_384, output_truncated=True),
+    ProviderEvent(type="completed", awaiting_tools=False),
+]
+
+
+def test_observe_turn_records_a_textless_truncated_supervisor_round_as_output_truncated() -> None:
+    turn = _observed(_Scripted([_TRUNCATED_TEXTLESS_SUPERVISOR]))
+    assert turn.outcome.output_truncated is True
+    assert [(i.tier, i.tokens.output_tokens, i.output_truncated) for i in turn.invocations] == [
+        ("supervisor", 16_384, True)
+    ]
+    assert turn.outcome.budget_exhausted is False
+    assert deserialise_turn(serialise_turn(turn)) == turn
+
+
+def test_observe_turn_carries_a_truncated_subagent_round_into_the_outcome() -> None:
+    truncated_subagent = [
+        ProviderEvent(type="usage", input_tokens=9, output_tokens=16_384, output_truncated=True),
+        ProviderEvent(type="completed", awaiting_tools=False),
+    ]
+    turn, _dispatched = _delegated_turn(_DELEGATE, truncated_subagent, _DONE)
+    assert turn.outcome.output_truncated is True
+    assert [i.tier for i in turn.invocations if i.output_truncated] == ["subagent"]
+
+
+def test_observe_turn_reports_no_output_truncation_for_an_ordinary_turn() -> None:
+    turn = _observed(_Scripted([_DONE]))
+    assert turn.outcome.output_truncated is False
+    assert not any(i.output_truncated for i in turn.invocations)

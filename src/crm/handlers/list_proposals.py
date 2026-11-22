@@ -5,7 +5,9 @@ A proposal's scope comes from its ``before_snapshot``, decided by :func:`crm.aut
 proposal whose snapshot is not a mapping, has no determinable scope, or names another tenant is
 withheld. A caller with an empty book and no full visibility is denied before any read;
 ``next_cursor`` is bound to the caller and the ``status`` filter it was issued for
-(:mod:`crm.cursor`).
+(:mod:`crm.cursor`). A page over :data:`crm.paging.HANDLER_PAGE_BYTE_BUDGET` is cut in query order,
+marked ``truncated: True``, and its ``next_cursor`` resumes after the index entry of the last
+proposal returned, as queried rather than as re-read.
 """
 
 from __future__ import annotations
@@ -15,11 +17,13 @@ from typing import Any
 from crm.authz import Identity, is_in_scope, require_listing_scope
 from crm.cursor import bound_operation, decode_cursor, encode_cursor
 from crm.handlers._common import build_handler
+from crm.paging import bound_page, resume_key
 from crm.store.keys import tenant_prefixed
 from crm.store.store import Store
 
 _DEFAULT_LIMIT = 50
 _OPERATION = "list_proposals"
+_TABLE = "proposals"
 
 
 def _visible(identity: Identity, proposal: dict[str, object]) -> bool:
@@ -59,7 +63,10 @@ def _list_proposals(store: Store, identity: Identity, arguments: dict[str, Any])
     # Re-read the base items: neither `gsi_status` nor `gsi_tenant` projects `before_snapshot`,
     # which `_visible` decides on. Order follows the index query; the batch response is unordered.
     schema_key = "proposal_id"
-    ordered_ids = [item[schema_key] for item in items if isinstance(item.get(schema_key), str)]
+    index_by_id = {
+        str(item[schema_key]): item for item in items if isinstance(item.get(schema_key), str)
+    }
+    ordered_ids = list(index_by_id)
     full_by_id = {
         str(item[schema_key]): item
         for item in store.batch_get_items(
@@ -73,10 +80,17 @@ def _list_proposals(store: Store, identity: Identity, arguments: dict[str, Any])
         if (full := full_by_id.get(str(proposal_id))) is not None and _visible(identity, full)
     ]
 
-    return {
+    visible, cut = bound_page(visible)
+    if cut:
+        next_key = resume_key(_TABLE, index_name, index_by_id[str(visible[-1][schema_key])])
+
+    result: dict[str, Any] = {
         "proposals": visible,
         "next_cursor": encode_cursor(next_key, identity=identity, operation=binding),
     }
+    if cut:
+        result["truncated"] = True
+    return result
 
 
 handler = build_handler(_list_proposals)

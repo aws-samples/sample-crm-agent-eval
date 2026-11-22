@@ -1,6 +1,6 @@
 /**
  * `aws_bedrockagentcore_gateway` with `authorizer_type = "CUSTOM_JWT"` and a REQUEST interceptor
- * pointed at `identity_interceptor`. Arguments match the pinned 6.72.0 provider schema:
+ * pointed at `identity_interceptor`. Arguments match the pinned 6.73.0 provider schema:
  * `authorizer_type`, `authorizer_configuration.custom_jwt_authorizer.{discovery_url,
  * allowed_clients, allowed_audience, allowed_scopes, custom_claim}`,
  * `interceptor_configuration.{interception_points, input_configuration.pass_request_headers,

@@ -13,6 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from agents import prompt_bundle, tool_actor
+from agents.budget import TurnBudget, TurnBudgetSpec
 from agents.registry import RegisteredTool, full_registry
 from agents.runtime_server import agent_identity_event
 from agents.supervisor import classify_tool_result
@@ -345,3 +346,81 @@ class TestActorDirective:
         current = prompt_bundle.prompt_bundle_sha256()
         monkeypatch.setattr(tool_actor, "_ACTOR_DIRECTIVE", _PRE_AP5_DIRECTIVE)
         assert prompt_bundle.prompt_bundle_sha256() != current
+
+
+def _invoke_with_budget(
+    events: list[ProviderEvent], budget: TurnBudget, dispatch: Any
+) -> ToolActorResult:
+    return asyncio.run(
+        formulate_and_invoke(
+            _tool(),
+            "look up the account",
+            ROLE,
+            provider=FakeProvider(events),
+            resolved=resolve_turn(MATRIX, session_turn_tuning(TUNING))["tool"],
+            dispatch=dispatch,
+            budget=budget,
+        )
+    )
+
+
+def _provisional_usage() -> ProviderEvent:
+    return ProviderEvent(
+        type="usage", input_tokens=50, output_tokens=0, cache_read_tokens=2, provisional=True
+    )
+
+
+def _fresh_budget() -> TurnBudget:
+    return TurnBudget.from_spec(TurnBudgetSpec(max_tool_calls=5, max_wall_clock_seconds=60.0))
+
+
+class TestProvisionalUsageAndTruncation:
+    def test_the_final_usage_supersedes_the_provisional_one(self) -> None:
+        budget = _fresh_budget()
+        result = _invoke_with_budget(
+            [_provisional_usage(), *_tool_call_stream({"account_id": "acc-1"})],
+            budget,
+            RecordingDispatch(),
+        )
+        assert (result.invocation.tokens.input_tokens, result.invocation.tokens.output_tokens) == (
+            50,
+            8,
+        )
+        assert result.invocation.output_truncated is False
+        assert budget.calls_without_usage == 0
+
+    def test_a_truncated_final_usage_marks_the_invocation(self) -> None:
+        events = _tool_call_stream({"account_id": "acc-1"})
+        events[1] = replace(events[1], output_truncated=True)
+        result = _invoke_with_budget(events, _fresh_budget(), RecordingDispatch())
+        assert result.invocation.output_truncated is True
+
+    def test_an_error_after_provisional_usage_records_it_as_a_noted_lower_bound(self) -> None:
+        budget = _fresh_budget()
+        dispatch = RecordingDispatch()
+        result = _invoke_with_budget(
+            [_provisional_usage(), ProviderEvent(type="error", error_message="boom")],
+            budget,
+            dispatch,
+        )
+        assert (result.invocation.tokens.input_tokens, result.invocation.tokens.output_tokens) == (
+            50,
+            0,
+        )
+        assert result.invocation.cache.read_tokens == 2
+        assert budget.calls_without_usage == 1
+        assert dispatch.calls == []
+
+    def test_a_stream_ending_with_only_provisional_usage_is_noted(self) -> None:
+        budget = _fresh_budget()
+        result = _invoke_with_budget(
+            [
+                _provisional_usage(),
+                ProviderEvent(type="tool_call", tool_name="get_account", tool_input={}),
+                ProviderEvent(type="completed"),
+            ],
+            budget,
+            RecordingDispatch(),
+        )
+        assert result.invocation.tokens.input_tokens == 50
+        assert budget.calls_without_usage == 1

@@ -34,7 +34,13 @@
  *
  * Every event kind in the closed set (`tool_call`, `tool_result`, `proposal`, `usage`, `completed`,
  * `error`) is applied to the transcript. `heartbeat` is the one frame dropped: it is liveness
- * only, so it is neither applied nor counted towards `resume_from`. Nothing else is dropped:
+ * only, so it is neither applied nor counted towards `resume_from`.
+ *
+ * `replay_unavailable` arrives first on a resume the server could not replay, before it runs the turn
+ * again from the start. As the first frame of a resume it empties the transcript of the dropped
+ * attempt, is kept as the transcript's first entry, sets {@link UseAgentStreamResult.replayUnavailable}
+ * and is not counted towards `resume_from` (the server does not record it). Anywhere else it is
+ * dropped. Nothing else is dropped:
  *
  * 1. a `kind` this build does not know is appended as an `unrecognised` entry, keeping its own name;
  * 2. a frame whose JSON will not parse becomes a {@link MALFORMED_FRAME_KIND} event;
@@ -72,7 +78,7 @@ export interface AgentStreamEvent {
   readonly error_kind?: string | null;
   readonly error_message?: string | null;
   readonly partial_work?: string | null;
-  /** Groups the `text_delta` frames of one streamed answer (SSE schema 3.0.0); absent on other kinds. */
+  /** Groups the `text_delta` frames of one streamed answer; absent on other kinds. */
   readonly event_id?: string | null;
   /** `true` on every produced `text_delta` (a following `completed`/`error` settles its `event_id`,
    * so no delta arrives non-partial); `false`/absent otherwise. */
@@ -135,6 +141,11 @@ export interface UseAgentStreamResult {
   readonly sessionId: string | undefined;
   /** Populated once a terminal `completed` or `error` event has been applied. */
   readonly turnEnded: boolean;
+  /**
+   * `true` once a resume of the current turn was answered with `replay_unavailable`: the dropped
+   * attempt was discarded and the turn is running again from the start. Reset by {@link sendPrompt}.
+   */
+  readonly replayUnavailable: boolean;
   /**
    * Send a new prompt. Starts a fresh session unless one is already in flight.
    *
@@ -203,6 +214,9 @@ export const MALFORMED_FRAME_KIND = "malformed_frame";
 
 /** The liveness frame. Dropped before being applied: never in the transcript, never counted. */
 export const HEARTBEAT_KIND = "heartbeat";
+
+/** Sent first on a resume the server could not replay; see the module notes. */
+export const REPLAY_UNAVAILABLE_KIND = "replay_unavailable";
 
 /** How much of an unparseable frame is kept. Enough to identify it; not enough to flood the trace. */
 export const MALFORMED_FRAME_EXCERPT_LIMIT = 200;
@@ -287,6 +301,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [turnEnded, setTurnEnded] = useState(false);
+  const [replayUnavailable, setReplayUnavailable] = useState(false);
 
   const [failureReason, setFailureReason] = useState<StreamFailureReason | undefined>(undefined);
   const [failureMessage, setFailureMessage] = useState<string | undefined>(undefined);
@@ -323,6 +338,13 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     if (event.kind === "completed" || event.kind === "error") {
       setTurnEnded(true);
     }
+  }, []);
+
+  /** Discard the dropped attempt's entries and start the transcript with the `replay_unavailable` entry. */
+  const restartTranscript = useCallback((event: AgentStreamEvent) => {
+    const key = `evt-replay-${randomToken(6)}`;
+    setTranscript([{ key, event, unrecognised: false }]);
+    setReplayUnavailable(true);
   }, []);
 
   const runStream = useCallback(
@@ -418,7 +440,9 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
       const decoder = new TextDecoder();
       let buffer = "";
       let sawTerminalEvent = false;
+      let sawFrame = false;
       let readError: unknown;
+      const isResume = body.resume === true;
 
       try {
         for (;;) {
@@ -433,6 +457,12 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
           for (const event of events) {
             // Liveness only: not stored for resume, so it must not advance `resume_from`.
             if (event.kind === HEARTBEAT_KIND) continue;
+            const first = !sawFrame;
+            sawFrame = true;
+            if (event.kind === REPLAY_UNAVAILABLE_KIND) {
+              if (isResume && first) restartTranscript(event);
+              continue;
+            }
             applyEvent(event);
             if (event.kind === "completed" || event.kind === "error") {
               sawTerminalEvent = true;
@@ -466,7 +496,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     // `maybeReconnect` is omitted: it and `runStream` are mutually recursive, and it closes over
     // nothing that changes between renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [agentBaseUrl, agentRuntimeArn, applyEvent, getAccessToken, fetchImpl],
+    [agentBaseUrl, agentRuntimeArn, applyEvent, restartTranscript, getAccessToken, fetchImpl],
   );
 
   const maybeReconnect = useCallback(
@@ -540,6 +570,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
       setSessionId(id);
       setTranscript([]);
       setTurnEnded(false);
+      setReplayUnavailable(false);
       setFailureReason(undefined);
       setFailureMessage(undefined);
       await runStream(
@@ -599,6 +630,7 @@ export function useAgentStream(options: UseAgentStreamOptions): UseAgentStreamRe
     transcript,
     sessionId,
     turnEnded,
+    replayUnavailable,
     sendPrompt,
     reconnect,
     markTurnCancelled,

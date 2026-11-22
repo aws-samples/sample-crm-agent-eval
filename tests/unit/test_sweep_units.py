@@ -11,6 +11,7 @@ from typing import Any
 import boto3
 import pytest
 from moto import mock_aws
+from scripts import proc_run
 
 import eval.sweep_units as sweep_units
 from agents.tier_attribution import (
@@ -41,6 +42,7 @@ from eval.sweep_units import (
 from eval.turn_observation import ObservedTurn
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
 from providers.capabilities import Tier, load_capability_matrix
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.prompt_caching import CACHING
 from providers.stub import StubProvider
 from providers.tier_tuning import TierRequest, TurnTuning
@@ -109,6 +111,7 @@ def _assemble(units: list[TaskUnitResult], **overrides: Any) -> Any:
         "price_table_version": "1.0.0",
         "cost_withheld": True,
         "timestamp": "2026-01-01T00:00:00+00:00",
+        "dirty_tree": False,
     }
     kwargs.update(overrides)
     return assemble_arm(units, **kwargs)
@@ -541,6 +544,7 @@ def test_the_per_call_entries_keep_every_attribution_field(store: Store) -> None
                 "tokens": {"input_tokens": 10, "output_tokens": 2},
                 "cache": {"read_tokens": 0, "write_tokens": 0},
                 "latency_ms": None,
+                "output_truncated": False,
             }
         ]
         * 2
@@ -617,3 +621,129 @@ def test_a_raw_archive_re_render_keeps_each_task_scores_repeat_and_tier(
         (0, "supervisor"),
         (1, None),
     ]
+
+
+# --- output cap and dirty_tree provenance --------------------------------------------------------
+
+
+def _empty_unit(store: Store) -> TaskUnitResult:
+    return run_task_unit(
+        store=store,
+        task=_golden(1)[0],
+        tenant=TENANT,
+        family="anthropic",
+        turn_runner=lambda _t, _n: ObservedTurn(outcome=TurnOutcome(tenant=TENANT)),
+        repeat_index=0,
+    )
+
+
+def test_provenance_records_the_shared_output_token_cap(store: Store) -> None:
+    provenance = _assemble([_empty_unit(store)], dirty_tree=False).arm_result.provenance
+    assert provenance.output_token_cap == TURN_OUTPUT_TOKEN_CAP
+    assert provenance.to_report_fields()["output_token_cap"] == TURN_OUTPUT_TOKEN_CAP
+
+
+@pytest.mark.parametrize("dirty", [True, False])
+def test_an_explicit_dirty_tree_is_recorded_without_probing(
+    store: Store, monkeypatch: pytest.MonkeyPatch, dirty: bool
+) -> None:
+    def _no_probe(_root: Path) -> bool:
+        raise AssertionError("an explicit dirty_tree must not be probed")
+
+    monkeypatch.setattr(sweep_units, "tracked_tree_dirty", _no_probe)
+    provenance = _assemble([_empty_unit(store)], dirty_tree=dirty).arm_result.provenance
+    assert provenance.dirty_tree is dirty
+    assert provenance.to_report_fields()["dirty_tree"] is dirty
+
+
+def test_assemble_arm_requires_dirty_tree(store: Store) -> None:
+    kwargs: dict[str, Any] = {
+        "matrix": MATRIX,
+        "arm_spec": ArmSpec(family="anthropic"),
+        "mode": "stub",
+        "dataset_seed": 1,
+        "git_revision": "rev",
+        "runtime_identifier": "test",
+        "price_table_version": "1.0.0",
+        "cost_withheld": True,
+    }
+    with pytest.raises(TypeError, match="dirty_tree"):
+        assemble_arm([_empty_unit(store)], **kwargs)
+
+
+def test_a_null_dirty_tree_beside_an_unknown_revision_is_recorded(store: Store) -> None:
+    arm = _assemble([_empty_unit(store)], git_revision="unknown", dirty_tree=None).arm_result
+    assert arm.provenance.dirty_tree is None
+
+
+def test_dirty_tree_for_revision_probes_this_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed: list[Path] = []
+
+    def _probe(root: Path) -> bool:
+        probed.append(root)
+        return False
+
+    monkeypatch.setattr(sweep_units, "tracked_tree_dirty", _probe)
+    assert sweep_units.dirty_tree_for_revision("0" * 40) is False
+    assert probed == [Path(sweep_units.__file__).resolve().parents[2]]
+
+
+def test_a_null_dirty_tree_beside_a_known_revision_is_refused(store: Store) -> None:
+    with pytest.raises(ValueError, match="dirty_tree None is inconsistent"):
+        _assemble([_empty_unit(store)], dirty_tree=None)
+
+
+def test_dirty_tree_for_revision_pairs_unknown_with_null_and_probes_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sweep_units, "tracked_tree_dirty", lambda _root: True)
+    assert sweep_units.dirty_tree_for_revision("unknown") is None
+    assert sweep_units.dirty_tree_for_revision("0" * 40) is True
+
+
+def _git(repo: Path, *args: str) -> None:
+    proc_run.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def scratch_repo(tmp_path: Path) -> Path:
+    """A one-commit git repository holding a single tracked file."""
+    _git(tmp_path, "init", "--quiet")
+    (tmp_path / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _git(tmp_path, "add", "tracked.txt")
+    _git(tmp_path, "commit", "--quiet", "-m", "init")
+    return tmp_path
+
+
+def test_a_clean_checkout_is_not_dirty(scratch_repo: Path) -> None:
+    assert sweep_units.tracked_tree_dirty(scratch_repo) is False
+
+
+def test_an_untracked_file_alone_does_not_make_the_tree_dirty(scratch_repo: Path) -> None:
+    (scratch_repo / "untracked.txt").write_text("x\n", encoding="utf-8")
+    assert sweep_units.tracked_tree_dirty(scratch_repo) is False
+
+
+def test_a_modified_tracked_file_makes_the_tree_dirty(scratch_repo: Path) -> None:
+    (scratch_repo / "tracked.txt").write_text("two\n", encoding="utf-8")
+    assert sweep_units.tracked_tree_dirty(scratch_repo) is True
+
+
+def test_a_directory_outside_any_checkout_raises(tmp_path: Path) -> None:
+    outside = tmp_path / "not-a-repo"
+    outside.mkdir()
+    with pytest.raises(RuntimeError, match="git status exited"):
+        sweep_units.tracked_tree_dirty(outside)
+
+
+def test_a_missing_git_binary_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("eval.sweep_units.shutil.which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="git is not on PATH"):
+        sweep_units.tracked_tree_dirty(tmp_path)

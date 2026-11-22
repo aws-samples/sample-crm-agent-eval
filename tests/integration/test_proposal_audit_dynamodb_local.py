@@ -15,8 +15,8 @@ from typing import Any
 import pytest
 
 from crm.audit import build_audit_record, revert
-from crm.authz import Identity
-from crm.errors import Conflict
+from crm.authz import Identity, IdentitySource
+from crm.errors import Conflict, ProposalStale
 from crm.handlers.wire import put_operation
 from crm.proposals import ApprovalContext, approve_proposal, reject_proposal, submit_proposal
 from crm.store.store import Store
@@ -43,8 +43,10 @@ def proposal_store(dynamodb_local_store: tuple[Store, str]) -> Store:
     return store
 
 
-def _identity(*, rep_id: str = _REP, tenant: str = _TENANT) -> Identity:
-    return Identity(rep_id=rep_id, book=frozenset({_ACCOUNT}), tenant=tenant)
+def _identity(
+    *, rep_id: str = _REP, tenant: str = _TENANT, source: IdentitySource = "apigw"
+) -> Identity:
+    return Identity(rep_id=rep_id, book=frozenset({_ACCOUNT}), tenant=tenant, source=source)
 
 
 def _seed_account(store: Store, *, account_id: str = _ACCOUNT) -> dict[str, object]:
@@ -445,3 +447,81 @@ def test_concurrent_double_revert_resolves_to_exactly_one_winner_on_the_real_eng
     final_opportunity = proposal_store.get_item("opportunities", {"opportunity_id": opportunity_id})
     assert final_opportunity is not None
     assert final_opportunity["value"] == 1000
+
+
+# -- Proposal staleness and audit channel on the real engine ---------------------------------------
+
+
+def test_approve_refuses_a_proposal_pending_past_the_window_on_the_real_engine(
+    proposal_store: Store,
+) -> None:
+    """Approving eight days after submission raises `ProposalStale`; reject then succeeds."""
+    _seed_account(proposal_store)
+    opportunity_id = f"opp-{uuid.uuid4()}"
+    _seed_opportunity(proposal_store, opportunity_id=opportunity_id)
+    proposal_id = f"prop-aged-{uuid.uuid4()}"
+    _submit(proposal_store, proposal_id=proposal_id, target_id=opportunity_id)
+
+    with pytest.raises(ProposalStale):
+        approve_proposal(
+            proposal_store,
+            tenant=_TENANT,
+            proposal_id=proposal_id,
+            actor_rep_id=_REP,
+            transaction_key=_run_scoped_key("tx-approve-aged"),
+            now="2026-01-09T01:00:00+00:00",
+            record_audit=_record_audit_callback(_identity()),
+        )
+
+    reread = proposal_store.get_item("proposals", {"proposal_id": proposal_id})
+    assert reread is not None and reread["status"] == "pending"
+    target = proposal_store.get_item("opportunities", {"opportunity_id": opportunity_id})
+    assert target is not None and target["value"] == 1000
+
+    reject_proposal(
+        proposal_store,
+        tenant=_TENANT,
+        proposal_id=proposal_id,
+        actor_rep_id=_REP,
+        transaction_key=_run_scoped_key("tx-reject-aged"),
+        now="2026-01-09T01:00:00+00:00",
+    )
+    rejected = proposal_store.get_item("proposals", {"proposal_id": proposal_id})
+    assert rejected is not None and rejected["status"] == "rejected"
+
+
+@pytest.mark.parametrize("channel", ["apigw", "gateway", "agent"])
+def test_the_audit_channel_round_trips_through_the_real_engine(
+    proposal_store: Store, channel: IdentitySource
+) -> None:
+    """An approval's audit row, committed in the transaction, stores the approver's channel."""
+    _seed_account(proposal_store)
+    opportunity_id = f"opp-{uuid.uuid4()}"
+    _seed_opportunity(proposal_store, opportunity_id=opportunity_id)
+    proposal_id = f"prop-channel-{uuid.uuid4()}"
+    _submit(proposal_store, proposal_id=proposal_id, target_id=opportunity_id)
+    audit_id = f"audit-channel-{uuid.uuid4()}"
+
+    def _callback(context: ApprovalContext) -> dict[str, Any]:
+        audit = build_audit_record(
+            identity=_identity(source=channel),
+            target_table=context.target_table,
+            target_id=context.target_id,
+            before_snapshot=dict(context.before_snapshot),
+            after_snapshot=dict(context.after_snapshot) if context.after_snapshot else {},
+            audit_id=audit_id,
+        )
+        return put_operation("audit_records", audit.to_item())
+
+    approve_proposal(
+        proposal_store,
+        tenant=_TENANT,
+        proposal_id=proposal_id,
+        actor_rep_id=_REP,
+        transaction_key=_run_scoped_key("tx-approve-channel"),
+        now="2026-01-01T02:00:00+00:00",
+        record_audit=_callback,
+    )
+
+    stored = proposal_store.get_item("audit_records", {"audit_id": audit_id})
+    assert stored is not None and stored["channel"] == channel

@@ -17,7 +17,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast, get_args
 
-from crm.authz import Identity, require_record_scope, require_scope, require_tenant
+from crm.authz import (
+    Identity,
+    IdentitySource,
+    require_record_scope,
+    require_scope,
+    require_tenant,
+)
 from crm.domain.references import require_primary_contact_in_account
 from crm.domain.stages import REFUSED_TRANSITION_KINDS, STAGES, classify_transition
 from crm.errors import Conflict, CrmError, NotFound, ScopeDenied, ValidationFailed
@@ -66,6 +72,8 @@ class AuditRecord:
             :func:`crm.authz.filter_to_scope` can filter audit records directly.
         action: An explicit :data:`AuditAction`, or ``None`` to have :func:`audit_action` derive it
             from the snapshots. Omitted from the stored item when ``None``.
+        channel: The identity channel the write arrived on (``apigw``, ``gateway`` or ``agent``),
+            or ``None`` for a record built without one. Omitted from the stored item when ``None``.
     """
 
     audit_id: str
@@ -82,10 +90,12 @@ class AuditRecord:
     reversed_reason: str | None = None
     account_id: str | None = None
     action: AuditAction | None = None
+    channel: IdentitySource | None = None
 
     def to_item(self) -> dict[str, object]:
         """Render this record as a plain item, with index keys from :func:`crm.store.keys.derive`."""
         explicit_action: dict[str, object] = {} if self.action is None else {"action": self.action}
+        entry_channel: dict[str, object] = {} if self.channel is None else {"channel": self.channel}
         return derive(
             _TABLE,
             {
@@ -103,6 +113,7 @@ class AuditRecord:
                 "reversed_reason": self.reversed_reason,
                 "account_id": self.account_id,
                 **explicit_action,
+                **entry_channel,
             },
         )
 
@@ -144,8 +155,8 @@ def build_audit_record(
     call that commits the mutation.
 
     Args:
-        identity: The caller performing the write; ``identity.rep_id`` becomes ``actor_rep_id`` and
-            ``identity.tenant`` becomes the record's tenant.
+        identity: The caller performing the write; ``identity.rep_id`` becomes ``actor_rep_id``,
+            ``identity.tenant`` the record's tenant, and ``identity.source`` its ``channel``.
         target_table: Table the write applies to.
         target_id: Primary key value of the written record.
         before_snapshot: The record's full state immediately before the write. An empty ``dict``
@@ -176,6 +187,7 @@ def build_audit_record(
             else _account_scope_of(before_snapshot, after_snapshot)
         ),
         action=action,
+        channel=identity.source,
     )
 
 

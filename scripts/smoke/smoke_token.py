@@ -14,7 +14,8 @@ Usage:
                                              [--outputs PATH]
 
 `mint` prints one JSON object (`id_token`, `username`, `email`, `tenant`) on stdout and every
-diagnostic on stderr. `delete-user` removes the user from the caller's trap, in a separate process,
+diagnostic on stderr. A failing subcommand exits 1 with one `smoke_token <command>: <error>` line on
+stderr, where an AWS error is named by its code only, never by a traceback or its message. `delete-user` removes the user from the caller's trap, in a separate process,
 so the username travels through the caller.
 
 The tenant check is equality against this run's tenant, not a disposable-prefix check: a token
@@ -205,6 +206,15 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--tenant", required=True)
 
     args = parser.parse_args(argv)
+    try:
+        return _run(args)
+    except Exception as exc:  # noqa: BLE001 - one diagnostic line, never a traceback
+        print(f"smoke_token {args.command}: {exception_detail(exc)}", file=sys.stderr)
+        return 1
+
+
+def _run(args: argparse.Namespace) -> int:
+    """Run the parsed subcommand; raises on any failure, which `main` reports."""
     ctx = _context(args)
 
     if args.command == "assert-token":

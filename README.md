@@ -75,7 +75,7 @@ This is a demo and a research instrument, not a production CRM.
 |---|---|
 | Python | exactly the version in `.python-version` (3.14.10); a host `python3` of any other minor version makes `pip install -e .` fail |
 | Node.js | 26.13.1 for `frontend/` (`frontend/.nvmrc`); 24 or later for `src/relay/` (deployed on the `nodejs24.x` Lambda runtime) |
-| Terraform | 1.17.2 tested; 1.17.0 or later required (licensed under BUSL-1.1); the AWS provider is pinned to 6.72.0 |
+| Terraform | 1.17.2 tested; 1.17.0 or later required (licensed under BUSL-1.1); the AWS provider is pinned to 6.73.0 |
 | Docker | for DynamoDB Local (`amazon/dynamodb-local:3.3.2`, pinned by digest in `scripts/run_local_dynamodb.sh`) |
 | ShellCheck | 0.11.0 (pinned in CI); `make verify` runs it |
 | gitleaks | 8.30.1 (pinned in CI); optional locally, where `check_secret_scan` skips without it |
@@ -186,7 +186,7 @@ Runtime and NAT keys.
 
 **Bedrock model access.** Enable these inference profiles in the region you deploy to:
 `global.anthropic.claude-opus-5-5`, `global.anthropic.claude-sonnet-5-5`,
-`global.anthropic.claude-haiku-5-5`, `global.openai.gpt-6-astra`, `global.openai.gpt-6.1-sol`,
+`global.anthropic.claude-haiku-5-5`, `global.openai.gpt-6.2-astra`, `global.openai.gpt-6.2-sol`,
 `global.openai.gpt-6.1-terra` and `global.openai.gpt-6-luna`. Each model's capabilities (effort scale, prompt-cache minimum, inference
 profile) are in `config/model_capabilities.yaml`; they were measured in us-east-1. The `global.`
 profiles are cross-region, so Bedrock can serve these models from other regions. The Runtime's
@@ -195,7 +195,7 @@ per tier are in `config/models.yaml`:
 
 | Tier | Anthropic | OpenAI |
 |---|---|---|
-| supervisor | Claude Sonnet 5.5, effort `medium` | GPT-6.1 Sol, effort `medium` |
+| supervisor | Claude Sonnet 5.5, effort `medium` | GPT-6.2 Sol, effort `medium` |
 | subagent | Claude Sonnet 5.5, effort `low` | GPT-6.1 Terra, effort `low` |
 | tool | Claude Haiku 5.5, effort `low` | GPT-6 Luna, effort `low` |
 
@@ -205,7 +205,7 @@ tuning controls, in `GET /api/capabilities` and in each chat turn whose tuning n
 the web app or the MCP chat Gateway. A saved setting takes precedence over the default. Eval sweeps
 are not affected: every sweep runs both families, whatever `default_family` says.
 
-Claude Opus 5.5 and GPT-6 Astra stay in `config/model_capabilities.yaml`
+Claude Opus 5.5 and GPT-6.2 Astra stay in `config/model_capabilities.yaml`
 and remain selectable in the tuning controls, but neither is a default. Claude Sonnet 5.5 is the
 default at two tiers: its `assignable_tiers` entry in that file lists the tiers `config/models.yaml`
 may assign it to.
@@ -466,25 +466,24 @@ the backend must go before the Runtime's network interfaces are released.
 - API Gateway execution logging and method metrics are off; only access logging is on.
 - There is no X-Ray VPC endpoint, so trace segments leave through the NAT gateway, or are dropped
   when `vpc_nat_gateway_enabled` is `false`.
-- No CI job runs bandit, checkov, detect-secrets, `pip-audit` or `npm audit`. Their clean results are
-  local, point-in-time measurements.
+- The CI `sca` job runs `pip-audit` over `requirements.txt` (any known vulnerability fails it) and
+  `npm audit --audit-level=high` in each npm project, so npm findings below High pass. No CI job runs
+  bandit, checkov or detect-secrets; their clean results are local, point-in-time measurements.
 - The browser journeys under `tests/e2e/browser/` run only against a deployed stack, in the
   Playwright container (see `docs/runbook.md`). The two live-sweep journeys skip unless opted in.
 - Most `violation_*.json` plan fixtures still record AWS provider 6.62.0, the version of the plan
   they were derived from. The compliant plan fixtures and the two violation fixtures derived from
   them are built at test time by `scripts/plan_fixtures.py`, from
   `tests/fixtures/plans/compliant.base.ndjson`, which was captured from a plan under
-  Terraform 1.17.2 and the pinned 6.72.0 provider.
-- The last grype scan (grype 0.121.2) covered the pinned AWS provider's `darwin_arm64` build only,
-  `hashicorp/aws` 6.72.0 (go1.27.3, `golang.org/x/net` v0.62.0): one match against its DB built
-  2026-11-13, measured 2026-11-13. The match is GO-2026-6859 in the Go standard library, a race in
-  HTTP/1 servers that use `MaxBytesReader`, with severity unknown and the fix in go1.27.4. The
-  binary is local Terraform tooling and is never deployed.
+  Terraform 1.17.0 and the pinned 6.73.0 provider.
+- The last grype scan (grype 0.121.2) covered the AWS provider pinned at the time, and its
+  `darwin_arm64` build only: `hashicorp/aws` 6.72.0 (go1.27.3, `golang.org/x/net` v0.62.0). It
+  found one match against its DB built 2026-11-13, measured 2026-11-13: GO-2026-6859 in the Go
+  standard library, a race in HTTP/1 servers that use `MaxBytesReader`, with severity unknown and
+  the fix in go1.27.4. The binary is local Terraform tooling and is never deployed. The pin has
+  since moved to 6.73.0, which has not been scanned.
 - The JWKS fetch in `scripts/smoke/cognito_claims.py` uses PyJWT's own HTTP client, not the smoke
   harness's https-only opener.
-- When the tool-output bound trims a page of records, the page's `next_cursor` still resumes after
-  the full page, so paging on cannot reach the trimmed records. Requesting the page again with a
-  smaller `limit` does.
 - **Principal boundary.** Resource policies deny the data and administration of these stores to every
   principal outside the project roles that use them, the operators in `crm_operator_principal_arns`
   and, for administration, the account root:
@@ -523,8 +522,9 @@ the backend must go before the Runtime's network interfaces are released.
 
 ## Development
 
-`make verify` runs every offline check. `docs/development.md` lists the make targets, the gate
-inventory, the test tiers and the contributor rules.
+`make verify` runs every offline check. `make test-frontend` runs the frontend's lint, typecheck and
+unit tests on their own (after `cd frontend && npm ci`). `docs/development.md` lists the make
+targets, the gate inventory, the test tiers and the contributor rules.
 
 ## Repository layout
 

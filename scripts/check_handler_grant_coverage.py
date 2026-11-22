@@ -54,11 +54,12 @@ SOURCE_ROOTS: Final[tuple[str, ...]] = ("crm", "gateway", "eval")
 _STORE_MODULE: Final[str] = "crm.store.store"
 
 #: Harness-only modules mapped to the exact number of their store call sites no entry point reaches.
-_HARNESS_ONLY_UNREACHED_SITES: Final[dict[str, int]] = {"eval.tenancy": 2}
+_HARNESS_ONLY_UNREACHED_SITES: Final[dict[str, int]] = {"eval.harness": 1, "eval.tenancy": 2}
 
 #: Matrix function names expected to reach each exempted module (key: dotted module path; values:
 #: hyphenated matrix function names).
 _EXEMPTION_REACHED_BY: Final[dict[str, frozenset[str]]] = {
+    "eval.harness": frozenset(),
     "eval.tenancy": frozenset({"sweep-control"}),
 }
 

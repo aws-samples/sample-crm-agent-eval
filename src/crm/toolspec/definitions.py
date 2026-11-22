@@ -264,7 +264,7 @@ _READS: Final[tuple[ToolDefinition, ...]] = (
         description=(
             "Find opportunities in your book by name words, stage, account, or owner. Use this to "
             "find ids; use get_opportunity for one record's full detail. If the result has "
-            "truncated: true, pass its next_cursor as cursor to continue."
+            "truncated: true, more records follow; pass its next_cursor as cursor to continue."
         ),
         input_schema=_schema(
             {
@@ -287,8 +287,8 @@ _READS: Final[tuple[ToolDefinition, ...]] = (
         display_label="Search accounts",
         description=(
             "Find accounts in your book by name words or owner. Use this to find ids; use "
-            "get_account for one account's contact list. If the result has truncated: true, pass "
-            "its next_cursor as cursor to continue."
+            "get_account for one account's contact list. If the result has truncated: true, more "
+            "records follow; pass its next_cursor as cursor to continue."
         ),
         input_schema=_schema(
             {
@@ -346,7 +346,8 @@ _READS: Final[tuple[ToolDefinition, ...]] = (
         description=(
             "List one opportunity's activities, optionally filtered by kind, most recent first "
             "within each page, with next_cursor for the next page. Use for a complete or filtered "
-            "history; get_opportunity already includes the timeline."
+            "history; get_opportunity already includes the timeline. If the result has "
+            "truncated: true, more records follow; pass its next_cursor as cursor to continue."
         ),
         input_schema=_schema(
             {
@@ -398,7 +399,8 @@ _READS: Final[tuple[ToolDefinition, ...]] = (
         description=(
             "List proposals in your book. Set status to filter (pending = awaiting a decision); "
             "omit it to list every status. Returns up to 50 per call with next_cursor for the next "
-            "page."
+            "page. If the result has truncated: true, more records follow; pass its next_cursor as "
+            "cursor to continue."
         ),
         input_schema=_schema(
             {
@@ -419,7 +421,11 @@ _READS: Final[tuple[ToolDefinition, ...]] = (
     ToolDefinition(
         name="list_audit_records",
         display_label="List audit records",
-        description="List audited changes within your book, most recent first, with revert state.",
+        description=(
+            "List audited changes within your book, most recent first, with revert state. If the "
+            "result has truncated: true, more records follow; pass its next_cursor as cursor to "
+            "continue."
+        ),
         input_schema=_schema({"target_id": _STR, "cursor": _CURSOR}, []),
         risk="read",
         scope_arg=None,

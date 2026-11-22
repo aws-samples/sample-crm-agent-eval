@@ -599,10 +599,13 @@ def test_the_sweep_matrix_rows_cover_the_derived_grants_plus_declared_surplus(
 
 def test_harness_exemption_is_pinned_exactly() -> None:
     """The harness exemption constants hold exactly their expected values."""
-    expected_reachers: dict[str, frozenset[str]] = {"eval.tenancy": frozenset({"sweep-control"})}
+    expected_reachers: dict[str, frozenset[str]] = {
+        "eval.harness": frozenset(),
+        "eval.tenancy": frozenset({"sweep-control"}),
+    }
 
     assert gate._STORE_MODULE == "crm.store.store"
-    assert gate._HARNESS_ONLY_UNREACHED_SITES == {"eval.tenancy": 2}
+    assert gate._HARNESS_ONLY_UNREACHED_SITES == {"eval.harness": 1, "eval.tenancy": 2}
     assert expected_reachers == gate._EXEMPTION_REACHED_BY
 
 

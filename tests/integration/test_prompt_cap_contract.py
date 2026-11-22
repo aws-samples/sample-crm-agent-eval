@@ -7,10 +7,11 @@ chat Gateway target (`src/gateway/chat_target.py` `MESSAGE_MAX_CHARS`). Each is 
 a renamed or removed constant fails rather than skips.
 
 Both enforcing sides then judge the same prompts, including astral characters: the real relay
-`requests.ts`, bundled with the frontend's pinned esbuild and run under node, and the real
-`decode_invocation` on the agent channel the relay forwards. Those cases need `node` and
-`frontend/node_modules`; without them they skip, unless `CRM_REQUIRE_TS_CONTRACTS=1`, which turns
-the skip into a failure.
+`requests.ts`, bundled with the frontend's pinned esbuild (the AWS SDK aliased to a stub generated
+from `runtime.ts`'s own import names, so `src/relay/node_modules` is not needed) and run under node,
+and the real `decode_invocation` on the agent channel the relay forwards. Those cases need `node`
+and `frontend/node_modules`; without them they skip, unless `CRM_REQUIRE_TS_CONTRACTS=1`, which
+turns the skip into a failure.
 """
 
 from __future__ import annotations
@@ -34,12 +35,15 @@ from providers.capabilities import load_capability_matrix
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 RELAY_SOURCE = REPO_ROOT / "src" / "relay" / "src" / "requests.ts"
+RELAY_RUNTIME = REPO_ROOT / "src" / "relay" / "src" / "runtime.ts"
 RUNTIME_SOURCE = REPO_ROOT / "src" / "agents" / "runtime_entrypoint.py"
 CHAT_TARGET_SOURCE = REPO_ROOT / "src" / "gateway" / "chat_target.py"
 
 FRONTEND = REPO_ROOT / "frontend"
 ESBUILD = FRONTEND / "node_modules" / ".bin" / "esbuild"
 REQUIRE_ENV_VAR = "CRM_REQUIRE_TS_CONTRACTS"
+
+_SDK_IMPORT = re.compile(r'import \{([^}]*)\} from "(@aws-sdk/[\w-]+)";')
 
 _TS_CONSTANT = re.compile(r"^export const PROMPT_MAX_CHARS(?:: number)? = (\d[\d_]*);$", re.M)
 
@@ -66,6 +70,37 @@ def python_cap(source: str, name: str) -> int:
             values.append(value.value)
     assert len(values) == 1, f"expected one integer assignment to {name}, found {len(values)}"
     return values[0]
+
+
+def sdk_stub(runtime_source: str) -> tuple[str, str]:
+    """Return ``(package, stub module text)``: one inert class per name `runtime.ts` imports."""
+    imports = _SDK_IMPORT.findall(runtime_source)
+    assert len(imports) == 1, f"expected one AWS SDK import in runtime.ts, found {len(imports)}"
+    names_text, package = imports[0]
+    names = [name.strip() for name in names_text.split(",") if name.strip()]
+    assert names, "runtime.ts imports nothing from the AWS SDK"
+    return package, "".join(f"export class {name} {{}}\n" for name in names)
+
+
+def test_the_sdk_stub_names_every_class_runtime_ts_imports() -> None:
+    package, stub = sdk_stub(
+        'import {\n  ClientA,\n  CommandB,\n} from "@aws-sdk/client-example";\nconst x = 1;\n'
+    )
+    assert package == "@aws-sdk/client-example"
+    assert stub == "export class ClientA {}\nexport class CommandB {}\n"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "const x = 1;\n",
+        'import { A } from "@aws-sdk/a";\nimport { B } from "@aws-sdk/b";\n',
+        'import { } from "@aws-sdk/a";\n',
+    ],
+)
+def test_the_sdk_stub_refuses_an_absent_duplicated_or_empty_sdk_import(source: str) -> None:
+    with pytest.raises(AssertionError):
+        sdk_stub(source)
 
 
 def test_relay_runtime_and_chat_target_caps_are_equal() -> None:
@@ -137,6 +172,9 @@ def relay_verdicts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[list[bo
             pytest.fail(f"{REQUIRE_ENV_VAR}=1 and {reason}")
         pytest.skip(reason)
     work = tmp_path_factory.mktemp("prompt-cap")
+    package, stub_text = sdk_stub(RELAY_RUNTIME.read_text(encoding="utf-8"))
+    stub = work / "sdk-stub.mjs"
+    stub.write_text(stub_text, encoding="utf-8")
     bundle = work / "requests.mjs"
     proc_run.run(
         [
@@ -145,6 +183,7 @@ def relay_verdicts(tmp_path_factory: pytest.TempPathFactory) -> Iterator[list[bo
             "--bundle",
             "--platform=node",
             "--format=esm",
+            f"--alias:{package}={stub}",
             f"--outfile={bundle}",
             "--log-level=error",
         ],

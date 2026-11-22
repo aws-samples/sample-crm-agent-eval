@@ -7,7 +7,7 @@
       "tiers": {
         "supervisor": {
           "family": "openai",
-          "model": "openai.gpt-6-astra",
+          "model": "openai.gpt-6.2-astra",
           "effort": "none"
         },
         "subagent": {

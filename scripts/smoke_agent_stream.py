@@ -24,8 +24,9 @@ The transport is an injected `SseSource` seam, so the offline self-test uses a f
 bytes. A live turn makes a real, billable model call; the Runtime's provider is `AGENT_PROVIDER` in
 `infra/main.tf`.
 
-A disposable `eval-smoke-<run_id>` tenant and one Cognito user are created and removed, and the
-`demo` tenant is proved untouched. Any MFA challenge the pool issues is completed. The issued
+A disposable `eval-smoke-<run_id>` tenant and one Cognito user are created and removed, the
+history item of every session a turn was sent with is deleted, and the `demo` tenant is proved
+untouched. Any MFA challenge the pool issues is completed. The issued
 access token is signature-verified against the pool's JWKS (`scripts.smoke.verified_claims`) before
 its claims are read.
 """
@@ -60,6 +61,11 @@ from scripts.smoke.demo_tenant_guard import (  # noqa: E402
     writes_only_under_smoke_tenant_check,
 )
 from scripts.smoke.harness import CheckResult, SmokeContext, open_https, run_main  # noqa: E402
+from scripts.smoke.history_cleanup import (  # noqa: E402
+    HistoryItemsFactory,
+    LiveHistoryItems,
+    delete_session_history,
+)
 from scripts.smoke.lambda_actions import seeded_in_scope_account_id  # noqa: E402
 from scripts.smoke.runtime_invoke import verified_access_claims  # noqa: E402
 from scripts.smoke.tenant import (  # noqa: E402
@@ -1245,14 +1251,21 @@ def _deferrals_for_unemitted(results: Iterable[CheckResult]) -> list[CheckResult
     ]
 
 
-def checks(ctx: SmokeContext, *, jwks_url: str | None = None) -> Iterable[CheckResult]:
+def checks(
+    ctx: SmokeContext,
+    *,
+    jwks_url: str | None = None,
+    history_items: HistoryItemsFactory = LiveHistoryItems,
+) -> Iterable[CheckResult]:
     """Provision a disposable principal, measure the live stream, and clean up.
 
     The `demo` snapshot is taken before anything is provisioned. Every row in `_EXPECTED_CHECKS`
     is published; a check that could not run emits an explicit `defer`. Tokens are verified
-    against `jwks_url`, the pool's JWKS by default.
+    against `jwks_url`, the pool's JWKS by default. The history item of every session a turn was
+    sent with is deleted before the principal is removed.
     """
     results: list[CheckResult] = []
+    sessions: list[str] = []
     provisioner = LiveStreamPrincipalProvisioner(
         ctx, jwks_url=jwks_url, book_for_tenant=measured_turn_book
     )
@@ -1274,7 +1287,7 @@ def checks(ctx: SmokeContext, *, jwks_url: str | None = None) -> Iterable[CheckR
                 ),
             )
         )
-        results.extend(_stream_checks(ctx, token=token))
+        results.extend(_stream_checks(ctx, token=token, sessions=sessions))
     except Exception as exc:  # noqa: BLE001 - reported as a failing check, never a crash
         results.append(
             CheckResult(
@@ -1295,18 +1308,27 @@ def checks(ctx: SmokeContext, *, jwks_url: str | None = None) -> Iterable[CheckR
                     resource="agent_stream", tenant=provisioner.tenant(), reader=reader
                 )
             )
+        results.extend(
+            delete_session_history(
+                ctx, history_items, [(provisioner.tenant(), sessions)], resource="agent_stream"
+            )
+        )
         results.extend(provisioner.cleanup())
         # Last, so it sees every row any path above produced.
         results.extend(_deferrals_for_unemitted(results))
     return results
 
 
-def _stream_checks(ctx: SmokeContext, *, token: str) -> list[CheckResult]:
+def _stream_checks(
+    ctx: SmokeContext, *, token: str, sessions: list[str] | None = None
+) -> list[CheckResult]:
     """Find a tool-calling prompt, then measure that same prompt's turn through CloudFront.
 
     Both turns run on the CloudFront `/agent/*` path, the production identity path. Checks skipped
-    by an early return are reported by `_deferrals_for_unemitted` in `checks`.
+    by an early return are reported by `_deferrals_for_unemitted` in `checks`. Each session id is
+    appended to `sessions` before its turn is sent.
     """
+    sent = sessions if sessions is not None else []
     clock = time.monotonic
     chosen_prompt: str | None = None
     chosen_measurement: ArrivalMeasurement | None = None
@@ -1314,6 +1336,7 @@ def _stream_checks(ctx: SmokeContext, *, token: str) -> list[CheckResult]:
     for attempt in range(_MAX_PROMPT_CANDIDATES):
         prompt = f"Summarise my pipeline (probe {attempt})."
         session_id = f"smoke-agent-stream-{uuid.uuid4().hex}"
+        sent.append(session_id)
         measurement, failure = _measure_or_failure(
             cloudfront_source(
                 ctx, token=token, body=_turn_body(prompt, session_id), session_id=session_id
@@ -1360,6 +1383,7 @@ def _stream_checks(ctx: SmokeContext, *, token: str) -> list[CheckResult]:
         )
     )
     cf_session = f"smoke-agent-stream-cf-{uuid.uuid4().hex}"
+    sent.append(cf_session)
     # Epoch bounds around the measured turn only, scoping the CloudWatch corroboration.
     window_start_ms = int(time.time() * 1000)
     results.extend(

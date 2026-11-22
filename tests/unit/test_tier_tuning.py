@@ -473,7 +473,7 @@ class TestOneModelOnTwoTiers:
 #: Each family's selectable non-default model.
 NON_DEFAULT_MODELS: dict[Family, str] = {
     "anthropic": "anthropic.claude-opus-5-5",
-    "openai": "openai.gpt-6-astra",
+    "openai": "openai.gpt-6.2-astra",
 }
 
 

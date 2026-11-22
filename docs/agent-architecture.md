@@ -101,9 +101,12 @@ it comes from. Read the source when the two disagree.
    every identity key from the model-written arguments (`src/agents/tool_dispatch.py`). The handler
    re-checks scope exactly as it does for the web app.
 7. The Runtime streams one SSE frame per `AgentEvent` (`src/agents/events.py`: `tool_call`,
-   `tool_result`, `proposal`, `text_delta`, `usage`, `heartbeat`, `completed`, `error`). A
-   `heartbeat` goes out after each quiet interval, so an idle stream stays open. The relay forwards
-   each frame unchanged, including kinds its generated schema does not know.
+   `tool_result`, `proposal`, `text_delta`, `usage`, `heartbeat`, `completed`, `error`,
+   `replay_unavailable`). A `heartbeat` goes out after each quiet interval, so an idle stream stays
+   open. A resume the session store cannot replay gets `replay_unavailable` first, then the turn
+   runs again from the start. Event text has control characters removed (tab and newline are
+   kept). The relay forwards each frame unchanged, including kinds its generated schema does not
+   know.
 8. The turn's caps (`CHAT_BUDGET` in `src/agents/budget.py`) bound tool calls and wall-clock time.
    A turn that runs out of budget ends with a `budget_exhausted` error event and keeps the partial
    work and usage. Events are recorded per session, so a client can resume a stream from a later

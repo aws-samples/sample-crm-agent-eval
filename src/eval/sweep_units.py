@@ -15,10 +15,13 @@ Eval arms take their tuning from :class:`ArmSpec` only; no user settings are rea
 from __future__ import annotations
 
 import math
+import shutil
+import subprocess  # nosec B404 - fixed git argv, no shell
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Final, Literal, cast
 
 from agents.answer_style import answer_style_prompt_sha256
@@ -31,6 +34,7 @@ from eval.matrix import (
     ARM_LONG_CONTEXT_INVOCATION_COUNT_KEY,
     RECORD_SHAPE_VERSION,
     RECORD_SHAPE_VERSION_KEY,
+    UNKNOWN_GIT_REVISION,
     ArmResult,
     RunProvenance,
 )
@@ -67,6 +71,7 @@ from eval.scoring import (
 from eval.turn_observation import ObservedTurn
 from providers.base import Tuning, validate_tuning
 from providers.capabilities import CapabilityMatrix, Family, Tier
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.prompt_caching import CACHING
 from providers.tier_tuning import TurnTuning
 
@@ -74,6 +79,47 @@ EvalMode = Literal["stub", "live"]
 
 #: The tier whose model names an arm in provenance and the single-model metrics block.
 ARM_MODEL_TIER: Final[Tier] = "supervisor"
+
+#: The repository root :func:`dirty_tree_for_revision` probes.
+_REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
+
+
+def tracked_tree_dirty(repo_root: Path) -> bool:
+    """Return whether ``git status`` shows any change to a tracked file under ``repo_root``.
+
+    Untracked files are ignored. Raises :class:`RuntimeError` when ``git`` is not on ``PATH``,
+    cannot be launched, or exits non-zero; there is no fallback value.
+    """
+    git = shutil.which("git")
+    if git is None:
+        raise RuntimeError("cannot measure dirty_tree: git is not on PATH")
+    launch = subprocess.run
+    try:
+        completed = launch(  # nosec B603 - absolute git path, fixed argv, no shell
+            [git, "status", "--porcelain", "--untracked-files=no"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"cannot measure dirty_tree: {type(exc).__name__}") from exc
+    if completed.returncode != 0:
+        raise RuntimeError(f"cannot measure dirty_tree: git status exited {completed.returncode}")
+    return bool(completed.stdout.strip())
+
+
+def dirty_tree_for_revision(git_revision: str) -> bool | None:
+    """The ``dirty_tree`` provenance value to pair with ``git_revision``.
+
+    ``None`` when ``git_revision`` is ``"unknown"`` (no checkout to read), else this repository's
+    :func:`tracked_tree_dirty`, which raises :class:`RuntimeError` when ``git`` fails.
+    """
+    if git_revision == UNKNOWN_GIT_REVISION:
+        return None
+    return tracked_tree_dirty(_REPO_ROOT)
+
 
 #: The ``source`` recorded on every arm's tuning.
 ARM_TUNING_SOURCE: Final[str] = "eval.harness.default_sweep"
@@ -392,6 +438,7 @@ def assemble_arm(
     residual_exclusions: Sequence[Exclusion] = (),
     raw_records_writer: RawRecordsWriter | None = None,
     timestamp: str | None = None,
+    dirty_tree: bool | None,
 ) -> ArmRunResult:
     """Fold one arm's task units, in run order, into its scored, metered :class:`ArmRunResult`.
 
@@ -413,6 +460,9 @@ def assemble_arm(
             those each unit's turn carried.
         raw_records_writer: Persists the pre-aggregation raw records, or ``None``.
         timestamp: The provenance timestamp; defaults to now (UTC, ISO 8601).
+        dirty_tree: The sweep-start :func:`tracked_tree_dirty` reading recorded in provenance
+            (:func:`dirty_tree_for_revision` of ``git_revision``), ``None`` exactly when
+            ``git_revision`` is ``"unknown"``. Required.
 
     Raises:
         AssertionError: ``provider_stream_calls`` differs from the units' driven stream calls,
@@ -563,6 +613,8 @@ def assemble_arm(
         answer_style_sha256=answer_style_prompt_sha256(),
         prompt_bundle_sha256=next(iter(bundle_digests), None),
         prompt_caching=CACHING[arm_spec.family],
+        output_token_cap=TURN_OUTPUT_TOKEN_CAP,
+        dirty_tree=dirty_tree,
     )
     arm_result = ArmResult(
         provenance=provenance,

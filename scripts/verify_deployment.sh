@@ -6,7 +6,8 @@
 # module in a layer runs even if an earlier one failed. `--layer N` runs one layer and `--only`
 # runs named modules only; either marks the run PARTIAL. `--dry-run` prints what would run and makes no AWS
 # call. Provisions one smoke tenant before running and
-# tears it down on exit, failure or interrupt. Writes the per-run, unguarded
+# tears it down on exit, failure or interrupt. After the layers, scripts.smoke.history_cleanup
+# fails the run when any smoke conversation-history item remains, deleting each first. Writes the per-run, unguarded
 # results/verification-inventory.run.{json,md} for a full run, or
 # results/verification-inventory.partial.run.{json,md} for a PARTIAL run; the publishable
 # results/verification-inventory.{json,md} are written only by `--layer inventory`
@@ -213,6 +214,7 @@ LAYER_5_MODULES=(
   "scripts.smoke.integration_proposal_chain"
   "scripts.smoke.integration_teardown_privilege"
   "scripts.smoke.three_tier_chat"
+  "scripts.smoke.chat_resume"
   "scripts.smoke.eval_sfn"
   "scripts.smoke.admin_authz"
   "scripts.smoke.user_settings_api"
@@ -225,6 +227,9 @@ LAYER_6_MODULES=(
   "scripts.smoke_proposal_card"
   "scripts.smoke_text_delta_stream"
 )
+# Runs once after every layer that ran: fails when any smoke conversation-history item remains,
+# deleting each first. Its row joins the inventory as layer 0.
+HISTORY_RESIDUE_MODULE="scripts.smoke.history_cleanup"
 
 # ---------------------------------------------------------------------------
 # --only selection. Resolved here, before any AWS call or tenant: RUN_LAYER_N_MODULES hold the
@@ -368,15 +373,21 @@ from crm.store.store import Store
 from scripts.smoke.harness import assert_account_matches_outputs, smoke_context
 from scripts.smoke.tenant import allocate_smoke_tenant, seed_smoke_tenant
 
+from scripts.smoke.harness import exception_detail
+
 profile, region, outputs_path = sys.argv[1], sys.argv[2], sys.argv[3]
-ctx = smoke_context(profile=profile, region=region, outputs=outputs_path)
-assert_account_matches_outputs(ctx)
-table_names = ctx.outputs.require_mapping("dynamodb_table_names")
-# Physical table names are "<table_prefix><logical name>".
-table_prefix = table_names["eval_runs"].removesuffix("eval_runs")
-store = Store(client=ctx.client("dynamodb"), table_prefix=table_prefix)
-smoke_tenant = allocate_smoke_tenant(store)
-seed_smoke_tenant(store, smoke_tenant)
+try:
+    ctx = smoke_context(profile=profile, region=region, outputs=outputs_path)
+    assert_account_matches_outputs(ctx)
+    table_names = ctx.outputs.require_mapping("dynamodb_table_names")
+    # Physical table names are "<table_prefix><logical name>".
+    table_prefix = table_names["eval_runs"].removesuffix("eval_runs")
+    store = Store(client=ctx.client("dynamodb"), table_prefix=table_prefix)
+    smoke_tenant = allocate_smoke_tenant(store)
+    seed_smoke_tenant(store, smoke_tenant)
+except Exception as exc:
+    print(f"provision_tenant: {exception_detail(exc)}", file=sys.stderr)
+    sys.exit(1)
 print(json.dumps({"run_id": smoke_tenant.run_id, "tenant": smoke_tenant.tenant}))
 ' "${RESOLVED_PROFILE}" "${RESOLVED_REGION}" "${OUTPUTS_PATH}")"
   SMOKE_RUN_ID="$(printf '%s' "${result}" | "${PYTHON_BIN}" -c 'import json,sys; print(json.load(sys.stdin)["run_id"])')"
@@ -487,16 +498,20 @@ teardown_tenant() {
 import sys
 
 from crm.store.store import Store
-from scripts.smoke.harness import smoke_context
+from scripts.smoke.harness import exception_detail, smoke_context
 from scripts.smoke.tenant import SmokeTenant, teardown_smoke_tenant
 
 profile, region, run_id, tenant, outputs_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
-# No account assertion here: it needs a live sts call, and a transient failure would abandon rows.
-ctx = smoke_context(profile=profile, region=region, outputs=outputs_path)
-table_names = ctx.outputs.require_mapping("dynamodb_table_names")
-table_prefix = table_names["eval_runs"].removesuffix("eval_runs")
-store = Store(client=ctx.client("dynamodb"), table_prefix=table_prefix)
-teardown_smoke_tenant(store, SmokeTenant(run_id=run_id, tenant=tenant))
+try:
+    # No account assertion here: it needs a live sts call, and a transient failure would abandon rows.
+    ctx = smoke_context(profile=profile, region=region, outputs=outputs_path)
+    table_names = ctx.outputs.require_mapping("dynamodb_table_names")
+    table_prefix = table_names["eval_runs"].removesuffix("eval_runs")
+    store = Store(client=ctx.client("dynamodb"), table_prefix=table_prefix)
+    teardown_smoke_tenant(store, SmokeTenant(run_id=run_id, tenant=tenant))
+except Exception as exc:
+    print(f"teardown_tenant: {exception_detail(exc)}", file=sys.stderr)
+    sys.exit(1)
 ' "${RESOLVED_PROFILE}" "${RESOLVED_REGION}" "${SMOKE_RUN_ID}" "${SMOKE_TENANT}" "${OUTPUTS_PATH}"; then
     return 0
   fi
@@ -654,6 +669,19 @@ run_layer() {
     fi
   done
   return "${layer_failed}"
+}
+
+# Not a layer module, so it is kept out of EXECUTED_MODULES, which lists the layer modules that ran.
+run_history_residue_check() {
+  echo "${SCRIPT_NAME}: --- Whole-run check: smoke conversation-history residue ---"
+  local executed_layer_modules="${EXECUTED_MODULES}"
+  local rc=0
+  run_module "${HISTORY_RESIDUE_MODULE}" 0 || rc=$?
+  EXECUTED_MODULES="${executed_layer_modules}"
+  if [[ "${rc}" -ne 0 ]]; then
+    LAYER_EXIT_CODE=1
+    echo "${SCRIPT_NAME}: FAILED: ${HISTORY_RESIDUE_MODULE} (smoke conversation history outlived its module)" >&2
+  fi
 }
 
 write_inventory() {
@@ -841,6 +869,14 @@ if regions and resolved_region not in regions:
   if [[ -z "${ONLY_LAYER}" || "${ONLY_LAYER}" == "6" ]]; then
     print_dry_layer 6 "${RUN_LAYER_6_MODULES[@]+"${RUN_LAYER_6_MODULES[@]}"}"
   fi
+  if [[ "${ONLY_LAYER}" != "inventory" ]]; then
+    preview_args=()
+    while IFS= read -r -d '' arg; do
+      preview_args+=("${arg}")
+    done < <(build_module_args "${HISTORY_RESIDUE_MODULE}" "<smoke-run-id>" "${SMOKE_TOKEN}" "true")
+    echo "--- Whole-run check (dry-run: not executed) ---"
+    echo "would run after the layers: ${PYTHON_BIN} ${preview_args[*]}"
+  fi
   if [[ "${ONLY_LAYER}" == "inventory" ]]; then
     echo "--- Consolidated inventory (dry-run: not executed) ---"
     echo "would run: ${PYTHON_BIN} scripts/consolidate_inventory.py --profile ${RESOLVED_PROFILE} --region ${RESOLVED_REGION} --table-prefix <from ${OUTPUTS_PATH}> --outputs ${OUTPUTS_PATH} --out ${INVENTORY_MD} --json-out ${INVENTORY_JSON} --older-than 0h"
@@ -861,10 +897,14 @@ if [[ "${ONLY_LAYER}" == "inventory" ]]; then
   TABLE_PREFIX="$("${PYTHON_BIN}" -c '
 import sys
 
-from scripts.smoke.harness import load_outputs
+from scripts.smoke.harness import exception_detail, load_outputs
 
-outputs = load_outputs(sys.argv[1])
-table_names = outputs.require_mapping("dynamodb_table_names")
+try:
+    outputs = load_outputs(sys.argv[1])
+    table_names = outputs.require_mapping("dynamodb_table_names")
+except Exception as exc:
+    print(f"table prefix: {exception_detail(exc)}", file=sys.stderr)
+    sys.exit(1)
 print(table_names["eval_runs"].removesuffix("eval_runs"))
 ' "${OUTPUTS_PATH}")"
   # --outputs lets the residue query refuse a wrong account/region.
@@ -919,6 +959,7 @@ for layer in 4 5 6; do
   fi
 done
 
+run_history_residue_check
 write_inventory
 
 if [[ "${SKIPPED_CHECK_COUNT}" -gt 0 ]]; then

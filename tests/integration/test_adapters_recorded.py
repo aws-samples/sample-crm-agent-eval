@@ -25,6 +25,7 @@ from providers.anthropic_adapter import AnthropicAdapter
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation, Tuning, validate_tuning
 from providers.capabilities import CapabilityMatrix, load_capability_matrix
 from providers.openai_adapter import OpenAIAdapter
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from tests.integration._aws_eventstream import (
     FIXTURES_DIR,
     encode_chunk_event,
@@ -59,7 +60,7 @@ _OPENAI_RECORDED: dict[tuple[str, str], str] = {
 #: ``prompt_cache_options``); the Luna pair's request is not that body, so it is
 #: replayed for its response only.
 _OPENAI_CURRENT_SHAPE: tuple[str, ...] = ("supervisor", "subagent")
-#: Output-token caps the recordings set to bound their cost; the adapters send none of their own.
+#: Output-token cap keys; each recording's own value differs from the shared cap the adapters send.
 _RECORDING_CAPS: frozenset[str] = frozenset({"max_tokens", "max_output_tokens"})
 _PROFILES: list[tuple[str, str]] = [
     (family, tier)
@@ -316,6 +317,7 @@ def test_the_anthropic_request_matches_the_recorded_live_request(
         assert sent.get(key) == recorded.get(key), key
     assert not {"temperature", "top_p", "top_k", "extra_body"} & set(sent)
     assert set(sent) - {"system", "max_tokens", "stream"} == expected_keys
+    assert sent["max_tokens"] == TURN_OUTPUT_TOKEN_CAP
 
 
 @pytest.mark.parametrize(("tier", "kind"), sorted(_OPENAI_RECORDED))
@@ -355,7 +357,7 @@ def test_a_recorded_responses_stream_normalises_to_its_fixture_content(
 def test_the_responses_request_matches_the_recorded_live_request(
     tier: str, kind: str, matrix: CapabilityMatrix
 ) -> None:
-    """The adapter, given the recording's effort, sends the recorded live body, less its cap."""
+    """The adapter, given the recording's effort, sends the recorded live body with the shared cap."""
     fixture = load_wire_fixture(_OPENAI_RECORDED[(tier, kind)])
     recorded = fixture["request"]["body"]
     wire = _Wire(_fixture_response(_OPENAI_RECORDED[(tier, kind)]))
@@ -371,7 +373,10 @@ def test_the_responses_request_matches_the_recorded_live_request(
     sent = json.loads(request.content)
     assert request.url.path == fixture["request"]["path"]
     assert recorded["model"] == matrix.model_for("openai", tier).inference_profile  # type: ignore[arg-type]
-    assert sent == {k: v for k, v in recorded.items() if k not in _RECORDING_CAPS}
+    assert sent == {
+        **{k: v for k, v in recorded.items() if k not in _RECORDING_CAPS},
+        "max_output_tokens": TURN_OUTPUT_TOKEN_CAP,
+    }
     assert not {"temperature", "top_p"} & set(sent)
 
 
@@ -507,7 +512,8 @@ def test_an_in_band_bedrock_exception_frame_is_one_retryable_error_after_the_tex
         if "event" in f and f["event"]["type"] == "content_block_delta"
     )
     assert "".join(e.text or "" for e in events if e.type == "text_delta") == streamed
-    assert [e.type for e in events if e.type != "text_delta"] == ["error"]
+    assert [e.type for e in events if e.type != "text_delta"] == ["usage", "error"]
+    assert events[0].type == "usage" and events[0].provisional
     message = events[-1].error_message or ""
     assert message == prefix + fixture["decoded_events"][-1]["payload"]["message"]
     assert is_retryable_error(message)

@@ -54,6 +54,8 @@ _UNLISTED_PROFILE: Final[str] = "us.meta.llama3-1-70b-instruct-v1:0"
 RETIRED_INFERENCE_PROFILES: Final[tuple[str, ...]] = (
     "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     "global.openai.gpt-6-sol",
+    "global.openai.gpt-6.1-sol",
+    "global.openai.gpt-6-astra",
 )
 
 _ALLOWED: Final[frozenset[str]] = frozenset({"allowed"})

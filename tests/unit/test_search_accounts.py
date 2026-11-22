@@ -17,6 +17,7 @@ from crm.authz import Identity
 from crm.envelope import IDENTITY_KEY, identity_event
 from crm.errors import ValidationFailed
 from crm.handlers.search_accounts import handler as search_accounts_handler
+from crm.paging import HANDLER_PAGE_BYTE_BUDGET
 from crm.search import (
     _ACCOUNT_GSI_OWNER,
     _ACCOUNT_GSI_TENANT,
@@ -197,20 +198,47 @@ def test_a_result_set_exceeding_the_budget_cannot_come_back_looking_complete(
 def test_next_cursor_resumes_examination_past_the_first_truncated_call(
     store: Store, identity: Identity
 ) -> None:
-    total = EXAMINATION_BUDGET + 10
-    _seed_many(store, total, name="Cascadia Group")
+    for i in range(EXAMINATION_BUDGET + 5):
+        _seed_account(store, account_id=f"filler-{i:05d}", name="Beta Filler")
+    for i in range(5):
+        _seed_account(store, account_id=f"match-{i:05d}", name="Zeta Match")
 
-    first = search_accounts(store, identity, query="cascadia")
+    first = search_accounts(store, identity, query="zeta")
     assert first.truncated is True
+    assert first.items == []
     assert first.next_cursor is not None
 
-    second = search_accounts(store, identity, query="cascadia", cursor=first.next_cursor)
+    second = search_accounts(store, identity, query="zeta", cursor=first.next_cursor)
 
     assert second.truncated is False
     assert second.examined_count == 10
-    first_ids = {item["account_id"] for item in first.items}
-    second_ids = {item["account_id"] for item in second.items}
-    assert first_ids.isdisjoint(second_ids)
+    assert sorted(str(item["account_id"]) for item in second.items) == [
+        f"match-{i:05d}" for i in range(5)
+    ]
+
+
+def test_following_byte_cut_pages_reaches_every_account_exactly_once(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, 400, name="Cascadia Group")
+
+    seen: list[str] = []
+    cursor: str | None = None
+    pages = 0
+    for _ in range(100):
+        result = search_accounts(store, identity, query="cascadia", cursor=cursor)
+        pages += 1
+        assert len(repr(result.items).encode("utf-8")) <= HANDLER_PAGE_BYTE_BUDGET
+        seen.extend(str(item["account_id"]) for item in result.items)
+        cursor = result.next_cursor
+        assert (cursor is not None) is result.truncated
+        if cursor is None:
+            break
+
+    assert cursor is None
+    assert pages > 1
+    assert len(seen) == len(set(seen))
+    assert sorted(seen) == [f"acct-{i:05d}" for i in range(400)]
 
 
 def test_limit_reached_before_index_exhausted_still_marks_truncated(

@@ -14,7 +14,14 @@ Request body per model, from its :class:`~providers.capabilities.ModelCapability
 No request carries a sampling parameter. The one ``extra_body`` key is ``anthropic_version``, pinned
 to :data:`BEDROCK_ANTHROPIC_VERSION` rather than the SDK's first-party API version default.
 
-Requests address the model's inference profile, never its bare ``model_id``.
+Requests address the model's inference profile, never its bare ``model_id``, and send
+:data:`providers.output_limits.TURN_OUTPUT_TOKEN_CAP` as ``max_tokens``.
+
+Usage is reported twice per successful call: a ``provisional`` ``usage`` at ``message_start``
+(input and cache counts, output 0) and the final ``usage`` at the end of the stream, whose
+``output_truncated`` is set when the stop reason is ``max_tokens``. At a ``max_tokens`` stop a
+tool_use block whose input JSON does not parse is discarded, never emitted; on any other stop it
+ends the call in one ``error`` event, ``The model provider request failed: JSONDecodeError.``
 
 Errors become exactly one ``error`` :class:`~providers.base.ProviderEvent` whose message leads with a
 classification prefix:
@@ -24,8 +31,8 @@ classification prefix:
 * a failure the SDK already retried to exhaustion is rendered by
   :func:`providers.sdk_transport.render_exhausted_transport_error`, which is not retried again.
 
-Every ``usage`` and ``error`` event carries ``retried_attempts``: each transport attempt the SDK
-made before the last one. The ``usage`` event also carries ``latency_ms``, from the successful
+The final ``usage`` and every ``error`` event carry ``retried_attempts``: each transport attempt the
+SDK made before the last one. The provisional ``usage`` carries none, so each retry is reported once. The ``usage`` event also carries ``latency_ms``, from the successful
 attempt's request to the end of the stream.
 
 Each call first checks that the ``boto3`` credential chain resolves, and runs, from open to the end
@@ -54,6 +61,7 @@ from providers.base import (
     ResolvedInvocation,
     guard_invocation_family,
 )
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.prompt_caching import breakpoint_index, latest_message_index, select_cache_points
 from providers.sdk_transport import (
     MODEL_CALL_DEADLINE_SECONDS,
@@ -73,11 +81,14 @@ from providers.sdk_transport import (
 #: The Bedrock Messages API version sent as the body's ``anthropic_version``.
 BEDROCK_ANTHROPIC_VERSION: Final[str] = "bedrock-2023-05-31"
 
-#: Max output tokens for every Anthropic request.
-MAX_OUTPUT_TOKENS: Final[int] = 8192
-
 #: The ``status_code`` the SDK reports for an exception frame inside a 200 stream.
 _IN_BAND_STATUS: Final[int] = 200
+
+#: The stop reason the Messages API reports when the call reached ``max_tokens``.
+_MAX_TOKENS_STOP: Final[str] = "max_tokens"
+
+#: The error rendered for tool input JSON that does not parse on a stop other than ``max_tokens``.
+MALFORMED_TOOL_INPUT_MESSAGE: Final[str] = "The model provider request failed: JSONDecodeError."
 
 
 class AnthropicAdapter(ModelProvider):
@@ -224,6 +235,14 @@ class AnthropicAdapter(ModelProvider):
             finally:
                 await sdk_stream.close()
 
+            if state.malformed_tool_input and state.stop_reason != _MAX_TOKENS_STOP:
+                yield ProviderEvent(
+                    type="error",
+                    error_message=MALFORMED_TOOL_INPUT_MESSAGE,
+                    retried_attempts=recorder.retried_attempts(),
+                )
+                return
+
             latency_ms = (
                 (self._clock() - attempt_start) * 1000.0 if attempt_start is not None else None
             )
@@ -235,6 +254,7 @@ class AnthropicAdapter(ModelProvider):
                 cache_write_tokens=state.cache_write_tokens,
                 latency_ms=latency_ms,
                 retried_attempts=recorder.retried_attempts(),
+                output_truncated=state.stop_reason == _MAX_TOKENS_STOP,
             )
             yield ProviderEvent(
                 type="completed",
@@ -263,7 +283,7 @@ def build_request(
     )
     request: dict[str, Any] = {
         "model": invocation.model.inference_profile,
-        "max_tokens": MAX_OUTPUT_TOKENS,
+        "max_tokens": TURN_OUTPUT_TOKEN_CAP,
         "messages": [
             _to_messages_api_turn(message, cache_point=index in points)
             for index, message in conversation
@@ -322,7 +342,11 @@ def _in_band_error(exc: anthropic.APIStatusError) -> str | None:
 
 @dataclass(slots=True)
 class _StreamState:
-    """Accumulates one Messages stream into seam events and usage totals."""
+    """Accumulates one Messages stream into seam events and usage totals.
+
+    ``malformed_tool_input`` is set when a completed tool_use block's input JSON did not parse;
+    that block is never emitted, and the caller decides from ``stop_reason`` whether it is an error.
+    """
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -330,6 +354,7 @@ class _StreamState:
     cache_write_tokens: int = 0
     stop_reason: str | None = None
     tool_blocks: dict[int, tuple[str, str, list[str]]] = field(default_factory=dict)
+    malformed_tool_input: bool = False
 
     def consume(self, event: RawMessageStreamEvent) -> Iterator[ProviderEvent]:
         """Yield the seam events one SDK stream event produces, updating the totals."""
@@ -338,6 +363,14 @@ class _StreamState:
             self.input_tokens = usage.input_tokens or 0
             self.cache_read_tokens = usage.cache_read_input_tokens or 0
             self.cache_write_tokens = usage.cache_creation_input_tokens or 0
+            yield ProviderEvent(
+                type="usage",
+                input_tokens=self.input_tokens,
+                output_tokens=0,
+                cache_read_tokens=self.cache_read_tokens,
+                cache_write_tokens=self.cache_write_tokens,
+                provisional=True,
+            )
         elif event.type == "content_block_start":
             block = event.content_block
             if block.type == "tool_use":
@@ -353,11 +386,13 @@ class _StreamState:
             if tool is not None:
                 tool_id, name, parts = tool
                 arguments = "".join(parts)
+                try:
+                    tool_input = json.loads(arguments) if arguments else {}
+                except json.JSONDecodeError:
+                    self.malformed_tool_input = True
+                    return
                 yield ProviderEvent(
-                    type="tool_call",
-                    tool_name=name,
-                    tool_input=json.loads(arguments) if arguments else {},
-                    tool_id=tool_id,
+                    type="tool_call", tool_name=name, tool_input=tool_input, tool_id=tool_id
                 )
         elif event.type == "message_delta":
             if event.delta.stop_reason is not None:

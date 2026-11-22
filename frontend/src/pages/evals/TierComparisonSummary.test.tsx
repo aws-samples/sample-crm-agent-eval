@@ -50,6 +50,8 @@ const ROW_LABELS: readonly string[] = [
   "Budget-exhausted tasks",
   "Truncated tool calls",
   "Truncated tasks",
+  "Output-truncated model calls",
+  "Output-truncated tasks",
 ];
 
 const POLL_MS = 5;
@@ -304,7 +306,7 @@ describe("EvalDashboardPage — tier comparison summary placement", () => {
   function runWith(status: "completed" | "cancelled", table?: EvalTierComparisonTable) {
     return {
       ...jobPayload({ status }),
-      matrix: { arms: [arm("anthropic.claude-sonnet-5-5"), arm("openai.gpt-6-1-sol")] },
+      matrix: { arms: [arm("anthropic.claude-sonnet-5-5"), arm("openai.gpt-6.2-sol")] },
       ...(table === undefined ? {} : { tier_comparison_table: table }),
     };
   }

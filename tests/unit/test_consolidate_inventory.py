@@ -516,6 +516,53 @@ def test_a_run_row_left_running_still_fails_beside_job_rows() -> None:
     assert "{'running': 1}" in result.detail and "'job'" not in result.detail
 
 
+def _live_quota_row(day: str) -> dict[str, Any]:
+    """A daily live-sweep cap counter row as stored: no ``status``."""
+    return {
+        "run_id": {"S": f"{ci.LIVE_QUOTA_ROW_PREFIX}{day}"},
+        "quota_day": {"S": day},
+        "live_sweeps": {"N": "1"},
+    }
+
+
+def test_live_quota_counter_rows_are_not_counted_as_non_terminal_runs() -> None:
+    """Status-less ``livequota#<day>`` counter rows beside torn-down runs pass the check."""
+    catalogue = [
+        _ddb_row("r1", "torn_down"),
+        _live_quota_row("2026-10-20"),
+        _live_quota_row("2026-11-02"),
+    ]
+    result = ci.catalogue_terminal_check("dynamodb:eval_runs", catalogue)
+    assert result.status == "pass", result.detail
+    assert "1 run rows" in result.detail
+    assert "2 live-quota rows not counted" in result.detail
+
+
+def test_a_status_less_run_row_still_fails_beside_live_quota_rows() -> None:
+    """Only the counter prefix is excluded: a real run row with no ``status`` is non-terminal."""
+    catalogue = [
+        {"run_id": {"S": "r-missing-status"}},
+        _live_quota_row("2026-10-20"),
+    ]
+    result = ci.catalogue_terminal_check("dynamodb:eval_runs", catalogue)
+    assert result.status == "fail"
+    assert "{'<none>': 1}" in result.detail
+
+
+def test_a_running_run_row_still_fails_beside_live_quota_rows() -> None:
+    catalogue = [_ddb_row("r1", "running"), _live_quota_row("2026-10-20")]
+    result = ci.catalogue_terminal_check("dynamodb:eval_runs", catalogue)
+    assert result.status == "fail"
+    assert "{'running': 1}" in result.detail
+
+
+def test_the_live_quota_prefix_matches_the_key_the_run_store_writes() -> None:
+    """The checker's prefix is the one :mod:`eval.runs` writes quota rows under."""
+    import eval.runs as runs
+
+    assert runs._LIVE_QUOTA_ROW_PREFIX == ci.LIVE_QUOTA_ROW_PREFIX
+
+
 class _ResidueReachedError(Exception):
     """Raised by the residue stand-in once it has recorded the region it was handed."""
 

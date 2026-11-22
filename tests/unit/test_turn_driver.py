@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from typing import Any
+
+import pytest
 
 from agents.answer_style import answer_style_system_message
 from agents.budget import (
@@ -24,7 +27,7 @@ from agents.budget import (
 )
 from agents.events import AgentEvent
 from agents.registry import RegisteredTool
-from agents.supervisor import CANCELLATION_TEXT_PREFIX
+from agents.supervisor import CANCELLATION_TEXT_PREFIX, OUTPUT_LIMIT_NO_ANSWER_MESSAGE
 from agents.tier_attribution import InvocationAttribution
 from agents.turn_driver import (
     TurnRecords,
@@ -962,3 +965,253 @@ class TestAMeteredCallIsCountedOnce:
         assert terminal.error_kind == "budget_exhausted"
         assert "ended before reporting" not in (terminal.error_message or "")
         assert [inv.tier for inv in records.invocations] == ["supervisor"]
+
+
+def _supervisor_provisional(input_tokens: int = 30) -> ProviderEvent:
+    return ProviderEvent(type="usage", input_tokens=input_tokens, output_tokens=0, provisional=True)
+
+
+def _supervisor_records(records: TurnRecords) -> list[InvocationAttribution]:
+    return [inv for inv in records.invocations if inv.tier == "supervisor"]
+
+
+class TestSupervisorProvisionalUsage:
+    @pytest.mark.parametrize("truncated", [True, False])
+    def test_a_final_usage_supersedes_the_provisional_and_carries_its_truncation(
+        self, truncated: bool
+    ) -> None:
+        rounds = [
+            [
+                _supervisor_provisional(),
+                ProviderEvent(type="text_delta", text="Here is Acme."),
+                ProviderEvent(
+                    type="usage", input_tokens=30, output_tokens=9, output_truncated=truncated
+                ),
+                ProviderEvent(type="completed", awaiting_tools=False),
+            ]
+        ]
+        events, records = _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+        [terminal] = _terminal(events)
+        assert terminal.kind == "completed"
+        [record] = _supervisor_records(records)
+        assert (record.tokens.input_tokens, record.tokens.output_tokens) == (30, 9)
+        assert record.output_truncated is truncated
+        assert (terminal.input_tokens, terminal.output_tokens) == (30, 9)
+
+    def test_a_round_cut_at_the_deadline_after_provisional_usage_records_it_flagged(self) -> None:
+        provider = _PacedQueueProvider([[_supervisor_provisional(), 1.0]])
+        events, records = _drive_bounded(
+            provider=provider,
+            dispatch=_StubDispatch({"statusCode": 200, "body": {}}),
+            budget=TurnBudgetSpec(max_tool_calls=25, max_wall_clock_seconds=0.3),
+        )
+        [terminal] = _terminal(events)
+        assert terminal.error_kind == "budget_exhausted"
+        assert _unmetered_call_counts(terminal.error_message) == [1]
+        [record] = _supervisor_records(records)
+        assert (record.tokens.input_tokens, record.tokens.output_tokens) == (30, 0)
+
+    def test_a_round_stopped_before_final_usage_records_the_provisional_flagged(self) -> None:
+        call = ProviderEvent(
+            type="tool_call", tool_name="search_accounts", tool_input={}, tool_id="t1"
+        )
+        rounds = [
+            [
+                _supervisor_provisional(),
+                call,
+                ProviderEvent(type="usage", input_tokens=30, output_tokens=4),
+                ProviderEvent(type="completed", awaiting_tools=True),
+            ]
+        ]
+        events, records = _drive(
+            rounds=rounds,
+            dispatch=_StubDispatch({"statusCode": 200, "body": {"items": []}}),
+            max_tool_calls=1,
+        )
+        [terminal] = _terminal(events)
+        assert terminal.error_kind == "budget_exhausted"
+        assert _unmetered_call_counts(terminal.error_message) == [1]
+        [record] = _supervisor_records(records)
+        assert (record.tokens.input_tokens, record.tokens.output_tokens) == (30, 0)
+
+    def test_a_subagents_truncated_round_reaches_the_turn_records(self) -> None:
+        provider = _QueueProvider(
+            [
+                _supervisor_delegates(),
+                [
+                    _supervisor_provisional(40),
+                    ProviderEvent(
+                        type="usage", input_tokens=40, output_tokens=7, output_truncated=True
+                    ),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+                [
+                    ProviderEvent(type="text_delta", text="Done."),
+                    ProviderEvent(type="usage", input_tokens=5, output_tokens=2),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+            ]
+        )
+        _events, records = _drive_bounded(
+            provider=provider,
+            dispatch=_StubDispatch({"statusCode": 200, "body": {}}),
+            budget=TurnBudgetSpec(max_tool_calls=25, max_wall_clock_seconds=60.0),
+        )
+        subagent = [inv for inv in records.invocations if inv.tier == "subagent"]
+        assert [(inv.tokens.input_tokens, inv.output_truncated) for inv in subagent] == [(40, True)]
+
+
+def _truncated_final(output_tokens: int = 16_384) -> ProviderEvent:
+    return ProviderEvent(
+        type="usage", input_tokens=30, output_tokens=output_tokens, output_truncated=True
+    )
+
+
+_TEXTLESS_TRUNCATED_ROUNDS = {
+    "anthropic-thinking-only": [
+        _supervisor_provisional(),
+        _truncated_final(),
+        ProviderEvent(type="completed", awaiting_tools=False),
+    ],
+    "openai-incomplete-no-output": [
+        _truncated_final(),
+        ProviderEvent(type="completed", awaiting_tools=False),
+    ],
+}
+
+
+class TestTextlessTruncatedSupervisorRound:
+    @pytest.mark.parametrize("sequence", sorted(_TEXTLESS_TRUNCATED_ROUNDS))
+    def test_ends_in_a_classified_no_answer_event_keeping_its_usage(self, sequence: str) -> None:
+        rounds = [list(_TEXTLESS_TRUNCATED_ROUNDS[sequence])]
+        events, records = _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+
+        [terminal] = _terminal(events)
+        assert terminal.kind == "error"
+        assert terminal.error_kind == "model_failure"
+        assert terminal.error_message == OUTPUT_LIMIT_NO_ANSWER_MESSAGE
+        [usage] = [e for e in events if e.kind == "usage"]
+        assert (usage.input_tokens, usage.output_tokens) == (30, 16_384)
+        assert events.index(usage) < events.index(terminal)
+        [record] = _supervisor_records(records)
+        assert (record.tokens.input_tokens, record.tokens.output_tokens) == (30, 16_384)
+        assert record.output_truncated is True
+        assert records.calls_without_usage == 0
+
+    def test_a_textless_round_that_was_not_truncated_still_raises(self) -> None:
+        rounds = [
+            [
+                ProviderEvent(type="usage", input_tokens=30, output_tokens=5),
+                ProviderEvent(type="completed", awaiting_tools=False),
+            ]
+        ]
+        with pytest.raises(ValueError, match="no text"):
+            _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+
+    def test_a_dispatched_direct_tool_before_a_truncated_stop_is_answered_next_round(
+        self,
+    ) -> None:
+        provider = _CapturingQueueProvider(
+            [
+                [
+                    ProviderEvent(type="text_delta", text="Let me look that up."),
+                    ProviderEvent(
+                        type="tool_call", tool_name="search_accounts", tool_input={}, tool_id="t1"
+                    ),
+                    _truncated_final(),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+                [
+                    ProviderEvent(type="text_delta", text="Acme is the match."),
+                    ProviderEvent(type="usage", input_tokens=50, output_tokens=6),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+            ]
+        )
+        dispatch = _StubDispatch({"statusCode": 200, "body": {"items": [{"id": "acc-1"}]}})
+        events, _records = _drive_bounded(
+            provider=provider,
+            dispatch=dispatch,
+            budget=TurnBudgetSpec(max_tool_calls=25, max_wall_clock_seconds=60.0),
+        )
+
+        assert [name for name, _ in dispatch.calls] == ["search_accounts"]
+        [terminal] = _terminal(events)
+        assert terminal.kind == "completed"
+        assert terminal.text == "Acme is the match."
+        second_call = provider.seen[1]
+        assert second_call[-1]["role"] == "tool"
+        assert second_call[-1]["tool_results"] == [
+            {
+                "id": "t1",
+                "output": json.dumps({"statusCode": 200, "body": {"items": [{"id": "acc-1"}]}}),
+            }
+        ]
+
+    def test_a_complete_delegation_before_a_truncated_stop_is_answered_next_round(self) -> None:
+        provider = _QueueProvider(
+            [
+                [
+                    ProviderEvent(
+                        type="tool_call",
+                        tool_name="research",
+                        tool_input={"intent": "acme"},
+                        tool_id="t1",
+                    ),
+                    _truncated_final(),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+                [
+                    ProviderEvent(type="usage", input_tokens=40, output_tokens=7),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+                [
+                    ProviderEvent(type="text_delta", text="Done."),
+                    ProviderEvent(type="usage", input_tokens=5, output_tokens=2),
+                    ProviderEvent(type="completed", awaiting_tools=False),
+                ],
+            ]
+        )
+        events, records = _drive_bounded(
+            provider=provider,
+            dispatch=_StubDispatch({"statusCode": 200, "body": {}}),
+            budget=TurnBudgetSpec(max_tool_calls=25, max_wall_clock_seconds=60.0),
+        )
+        [terminal] = _terminal(events)
+        assert terminal.kind == "completed" and terminal.text == "Done."
+        truncated = [inv.output_truncated for inv in _supervisor_records(records)]
+        assert truncated == [True, False]
+
+
+class TestSupervisorProviderErrorAfterProvisionalUsage:
+    def test_the_provisional_usage_is_recorded_and_noted_as_a_lower_bound(self) -> None:
+        rounds = [
+            [
+                _supervisor_provisional(),
+                ProviderEvent(type="text_delta", text="Partial"),
+                ProviderEvent(type="error", error_message="ModelStreamErrorException: boom"),
+            ]
+        ]
+        events, records = _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+        [terminal] = _terminal(events)
+        assert terminal.kind == "error" and terminal.error_kind == "model_failure"
+        [record] = _supervisor_records(records)
+        assert (record.tokens.input_tokens, record.tokens.output_tokens) == (30, 0)
+        assert records.calls_without_usage == 1
+
+    def test_an_error_without_any_usage_is_noted_and_records_nothing(self) -> None:
+        rounds = [[ProviderEvent(type="error", error_message="ThrottlingException: slow")]]
+        _events, records = _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+        assert _supervisor_records(records) == []
+        assert records.calls_without_usage == 1
+
+    def test_an_error_after_final_usage_is_not_noted(self) -> None:
+        rounds = [
+            [
+                ProviderEvent(type="usage", input_tokens=30, output_tokens=4),
+                ProviderEvent(type="error", error_message="ModelStreamErrorException: boom"),
+            ]
+        ]
+        _events, records = _drive(rounds=rounds, dispatch=_StubDispatch({"statusCode": 200}))
+        assert len(_supervisor_records(records)) == 1
+        assert records.calls_without_usage == 0

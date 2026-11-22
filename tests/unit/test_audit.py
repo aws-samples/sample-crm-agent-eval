@@ -14,11 +14,14 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from crm.audit import build_audit_record, get_audit_record, revert
-from crm.authz import Identity
+from crm.audit import AuditRecord, build_audit_record, get_audit_record, revert
+from crm.authz import Identity, IdentitySource
+from crm.envelope import AGENT_IDENTITY_KEY, IDENTITY_KEY, REQUEST_CONTEXT_KEY, identity_event
 from crm.errors import Conflict, CrmError, NotFound, ScopeDenied, ValidationFailed
+from crm.handlers import log_activity
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
+from tests.conftest import TEST_API_CLIENT_ID
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -1172,3 +1175,90 @@ def test_delete_revert_restoring_a_dangling_primary_contact_is_a_conflict(
         revert(identity, store, audit_id=audit_id, transaction_key="tx-delete-dangling")
 
     assert store.get_item("opportunities", {"opportunity_id": "opp-1"}) is None
+
+
+@pytest.mark.parametrize("channel", ["apigw", "gateway", "agent"])
+def test_an_audit_record_carries_the_identity_channel(channel: IdentitySource) -> None:
+    """`build_audit_record` stamps `channel` from the caller identity's decoded source."""
+    caller = Identity(rep_id="rep-1", book=frozenset({"acc-1"}), tenant="demo", source=channel)
+
+    record = build_audit_record(
+        identity=caller,
+        target_table="opportunities",
+        target_id="opp-1",
+        before_snapshot={"account_id": "acc-1", "stage": "Discovery"},
+        after_snapshot={"account_id": "acc-1", "stage": "Qualification"},
+        audit_id="audit-channel",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert record.channel == channel
+    assert record.to_item()["channel"] == channel
+
+
+def test_an_audit_record_built_without_a_channel_stores_no_channel_key() -> None:
+    """A record whose `channel` is `None` (a row predating the field) omits the key entirely."""
+    record = AuditRecord(
+        audit_id="audit-legacy",
+        tenant="demo",
+        target_table="opportunities",
+        target_id="opp-1",
+        before_snapshot={},
+        after_snapshot={"account_id": "acc-1"},
+        actor_rep_id="rep-1",
+        created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert "channel" not in record.to_item()
+
+
+_CHANNEL_CLAIMS: dict[str, Any] = {
+    "custom:rep_id": "rep-1",
+    "custom:book": "acc-1",
+    "custom:tenant": "demo",
+}
+
+
+def _channel_event(channel: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if channel == "apigw":
+        claims = {**_CHANNEL_CLAIMS, "token_use": "id", "aud": TEST_API_CLIENT_ID}
+        context = {"authorizer": {"jwt": {"claims": claims}}, "requestId": "req-1"}
+        return identity_event(REQUEST_CONTEXT_KEY, context, arguments)
+    if channel == "gateway":
+        payload = {
+            "rep_id": "rep-1",
+            "book": ["acc-1"],
+            "full_visibility": False,
+            "principal_type": "user",
+            "session_id": "sess-1",
+            "source": "gateway",
+            "tenant": "demo",
+        }
+        return identity_event(IDENTITY_KEY, payload, arguments)
+    payload = {"claims": dict(_CHANNEL_CLAIMS), "session_id": "sess-1", "principal_type": "user"}
+    return identity_event(AGENT_IDENTITY_KEY, payload, arguments)
+
+
+@pytest.mark.parametrize("channel", ["apigw", "gateway", "agent"])
+def test_a_handler_write_records_the_channel_it_arrived_on(store: Store, channel: str) -> None:
+    """Every audit row a real handler commits names the channel its identity was decoded from."""
+    _seed_opportunity(store)
+    event = _channel_event(
+        channel,
+        {
+            "opportunity_id": "opp-1",
+            "kind": "call",
+            "subject": "Check-in",
+            "transaction_key": f"txn-log-{channel}",
+        },
+    )
+
+    result = log_activity.handler(event, store=store)
+
+    assert result["statusCode"] == 200, result
+    rows, _cursor = store.query_tenant_scan("audit_records", tenant="demo")
+    audit_ids = {str(row["audit_id"]) for row in rows}
+    assert len(audit_ids) == 2
+    for audit_id in audit_ids:
+        stored = store.get_item("audit_records", {"audit_id": audit_id})
+        assert stored is not None and stored["channel"] == channel

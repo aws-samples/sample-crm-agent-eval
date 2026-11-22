@@ -22,10 +22,10 @@ ANTHROPIC_SUPERVISOR = "anthropic.claude-sonnet-5-5"
 ANTHROPIC_SUBAGENT = "anthropic.claude-sonnet-5-5"
 ANTHROPIC_TOOL = "anthropic.claude-haiku-5-5"
 ANTHROPIC_UNASSIGNED = "anthropic.claude-opus-5-5"
-OPENAI_SUPERVISOR = "openai.gpt-6.1-sol"
+OPENAI_SUPERVISOR = "openai.gpt-6.2-sol"
 OPENAI_SUBAGENT = "openai.gpt-6.1-terra"
 OPENAI_TOOL = "openai.gpt-6-luna"
-OPENAI_UNASSIGNED = "openai.gpt-6-astra"
+OPENAI_UNASSIGNED = "openai.gpt-6.2-astra"
 
 #: Every model the capability matrix declares with ``family: openai``, read from the file.
 OPENAI_MODEL_IDS: tuple[str, ...] = tuple(
@@ -101,11 +101,13 @@ def test_opus_stays_a_selectable_unassigned_anthropic_model(
 def test_astra_stays_a_selectable_unassigned_openai_model(
     models: dict[str, Any], tier_config: dict[str, Any]
 ) -> None:
-    """GPT-6 Astra keeps its matrix entry, home tier supervisor, and no tier assigns it."""
+    """GPT-6.2 Astra keeps its matrix entry, home tier supervisor, and no tier assigns it."""
     entry = models[OPENAI_UNASSIGNED]
     assert entry["family"] == "openai"
     assert entry["tier"] == "supervisor"
-    assert entry["inference_profile"] == "global.openai.gpt-6-astra"
+    assert entry["inference_profile"] == "global.openai.gpt-6.2-astra"
+    assert entry["context_window_tokens"] == 1050000
+    assert entry["max_output_tokens"] == 128000
     assigned = {tier["model"] for tier in tier_config["families"]["openai"]["tiers"].values()}
     assert OPENAI_UNASSIGNED not in assigned
 
@@ -234,15 +236,15 @@ def test_the_loaded_haiku_55_cap_equals_the_yaml() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def test_gpt_61_sol_entry_records_every_d02_fact(models: dict[str, Any]) -> None:
-    """Every GPT-6.1 Sol field equals its pinned value, its effort scale marked inferred."""
+def test_gpt_62_sol_entry_records_every_model_card_fact(models: dict[str, Any]) -> None:
+    """Every GPT-6.2 Sol field equals its model-card value, its effort scale marked inferred."""
     entry = models[OPENAI_SUPERVISOR]
     assert entry["family"] == "openai"
     assert entry["tier"] == "supervisor"
-    assert entry["inference_profile"] == "global.openai.gpt-6.1-sol"
+    assert entry["inference_profile"] == "global.openai.gpt-6.2-sol"
     assert entry["api_path"] == "responses"
-    assert entry["context_window_tokens"] == 1000000
-    assert entry["max_output_tokens"] == 131072
+    assert entry["context_window_tokens"] == 1050000
+    assert entry["max_output_tokens"] == 128000
     assert entry["prompt_cache_min_checkpoint_tokens"] == 1024
     effort = entry["effort"]
     assert effort["supported"] is True
@@ -725,7 +727,7 @@ def test_loader_rejects_a_malformed_assignable_tiers(
 
 
 def test_a_config_only_edit_makes_opus_and_astra_the_supervisor_defaults(tmp_path: Path) -> None:
-    """Making Opus 5.5 and GPT-6 Astra the supervisor defaults is three YAML edits, no code change."""
+    """Making Opus 5.5 and GPT-6.2 Astra the supervisor defaults is three YAML edits, no code change."""
     data = yaml.safe_load(MODELS_PATH.read_text(encoding="utf-8"))
     data["families"]["anthropic"]["tiers"]["supervisor"]["model"] = ANTHROPIC_UNASSIGNED
     data["families"]["openai"]["tiers"]["supervisor"]["model"] = OPENAI_UNASSIGNED

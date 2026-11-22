@@ -9,6 +9,12 @@
 # .gitlab-ci.yml's PIP_VERSION (tests/unit/test_dockerfile_pins.py).
 FROM --platform=linux/arm64 public.ecr.aws/docker/library/python:3.14.10-slim AS base
 
+# Upgrades only zlib1g to the Debian security release (CVE-2026-85091); every other package stays as
+# the pinned base ships it.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Fixed UID/GID for the non-root runtime user.
 ARG APP_UID=10001
 ARG APP_GID=10001

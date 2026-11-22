@@ -13,8 +13,10 @@ Usage:
 Names: see `NAMES`. An unknown name, or a base that no longer carries what a mutation edits, raises
 `ValueError`.
 
-`infra_digest(root)` is the content digest of the tracked `infra/**/*.tf` that a capture records as
-`_fixture_provenance.captured_infra_digest` and that `plan_freshness` recomputes.
+`infra_digest(root)` is the content digest of the tracked `infra/**/*.tf` and of the tracked files
+they read (`terraform_read_inputs(root)`: every literal `${path.module}/...` file-function path, in
+any directory). A capture records it as `_fixture_provenance.captured_infra_digest` and
+`plan_freshness` recomputes it. `include_read_inputs=False` gives the `.tf`-only digest.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import functools
 import hashlib
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -63,20 +66,18 @@ Plan = dict[str, Any]
 INFRA_TF_PATHSPECS: Final[tuple[str, ...]] = ("infra/*.tf", "infra/**/*.tf")
 _GIT_TIMEOUT_SECONDS: Final[float] = 20.0
 
+#: A Terraform file function called on a literal `${path.module}/<relative path>` argument.
+FILE_READ_CALL: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:template)?file(?:base64)?(?:sha1|sha256|sha512|md5|base64sha256|base64sha512)?"
+    r"\(\s*\"\$\{path\.module\}/(?P<relative>[^\"$]+)\""
+)
 
-def infra_digest(root: Path) -> str:
-    """Return the sha256 hex digest of every tracked `infra/**/*.tf` under the git work tree `root`.
 
-    The digest is taken over the sorted lines `f"{path}\\0{sha256(bytes)}\\n"`, one per path that
-    `git ls-files` lists (the index, never history; untracked files are excluded), with the bytes
-    read from the working tree. A tracked path missing from the working tree contributes no line.
-
-    Raises:
-        ValueError: `git ls-files` fails or lists no `.tf` file.
-    """
+def _git_ls_files(root: Path, *pathspecs: str) -> list[str]:
+    """Sorted repo-relative paths `git ls-files` lists in the index for `pathspecs`."""
     try:
         completed = proc_run.run(
-            ["git", "--no-pager", "ls-files", "-z", "--", *INFRA_TF_PATHSPECS],
+            ["git", "--no-pager", "ls-files", "-z", "--", *pathspecs],
             cwd=root,
             capture_output=True,
             check=False,
@@ -86,9 +87,59 @@ def infra_digest(root: Path) -> str:
         raise ValueError(f"`git ls-files` could not run in {root}: {exc}") from exc
     if completed.returncode != 0:
         raise ValueError(f"`git ls-files` exited {completed.returncode} in {root}")
-    paths = sorted({p.decode("utf-8") for p in completed.stdout.split(b"\0") if p})
+    return sorted({p.decode("utf-8") for p in completed.stdout.split(b"\0") if p})
+
+
+def _tracked_tf_paths(root: Path) -> list[str]:
+    paths = _git_ls_files(root, *INFRA_TF_PATHSPECS)
     if not paths:
         raise ValueError(f"`git ls-files` lists no tracked infra .tf file in {root}")
+    return paths
+
+
+def terraform_read_inputs(root: Path) -> list[str]:
+    """Tracked files the tracked `infra/**/*.tf` read by a literal `${path.module}/...` path.
+
+    Each match of `FILE_READ_CALL` resolves against its `.tf` file's directory to a repo-relative
+    path, in any directory. A path argument that is not a literal (`file(var.x)`) is not seen.
+
+    Raises:
+        ValueError: `git ls-files` fails, or a literal target escapes `root` or is not tracked.
+    """
+    tracked = set(_git_ls_files(root))
+    inputs: set[str] = set()
+    for tf_path in _tracked_tf_paths(root):
+        try:
+            text = (root / tf_path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            continue
+        for match in FILE_READ_CALL.finditer(text):
+            target = posixpath.normpath(
+                posixpath.join(posixpath.dirname(tf_path), match["relative"])
+            )
+            if target.split("/")[0] == ".." or posixpath.isabs(target):
+                raise ValueError(f"{tf_path} reads {match['relative']!r}, outside {root}")
+            if target not in tracked:
+                raise ValueError(f"{tf_path} reads {target}, which is not a tracked file")
+            inputs.add(target)
+    return sorted(inputs)
+
+
+def infra_digest(root: Path, *, include_read_inputs: bool = True) -> str:
+    """Return the sha256 hex digest of every tracked `infra/**/*.tf` under the git work tree `root`.
+
+    The digest is taken over the sorted lines `f"{path}\\0{sha256(bytes)}\\n"`, one per path that
+    `git ls-files` lists (the index, never history; untracked files are excluded), with the bytes
+    read from the working tree. A tracked path missing from the working tree contributes no line.
+    With `include_read_inputs` (the default), the paths of `terraform_read_inputs(root)` are
+    covered too.
+
+    Raises:
+        ValueError: `git ls-files` fails or lists no `.tf` file, or `terraform_read_inputs` raises.
+    """
+    paths = _tracked_tf_paths(root)
+    if include_read_inputs:
+        paths = sorted(set(paths) | set(terraform_read_inputs(root)))
     digest = hashlib.sha256()
     for path in paths:
         try:

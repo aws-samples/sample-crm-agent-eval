@@ -21,8 +21,8 @@ so its card rows are a `defer` with reason `stub_provider_cannot_request_a_high_
 that answers in prose fails. When the turn raised no card, the proposal is raised through the API's
 `submit_proposal` route, so clauses 2 and 4 still run and their rows say so.
 
-A disposable `eval-smoke-<run_id>` tenant and one MFA-enrolled Cognito user are created and removed;
-the `demo` tenant is proved untouched. Network hops sit behind the `ApiCaller`, `RuntimeCaller` and
+A disposable `eval-smoke-<run_id>` tenant and one MFA-enrolled Cognito user are created and removed,
+the chat turn's history item is deleted, and the `demo` tenant is proved untouched. Network hops sit behind the `ApiCaller`, `RuntimeCaller` and
 `RowReader` seams. Access-token claims are read only after `scripts.smoke.verified_claims` verifies
 the token against the pool's JWKS.
 """
@@ -68,6 +68,12 @@ from scripts.smoke.harness import (  # noqa: E402
     SmokeContext,
     open_https,
     run_main,
+)
+from scripts.smoke.history_cleanup import (  # noqa: E402
+    HISTORY_ITEMS_DELETED_CHECK,
+    HistoryItemsFactory,
+    LiveHistoryItems,
+    delete_session_history,
 )
 from scripts.smoke.integration_proposal_chain import (  # noqa: E402
     HttpCaller,
@@ -156,6 +162,7 @@ _EXPECTED_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     *_PROBE_CHECKS,
     ("proposal_card", "demo_tenant_untouched"),
     ("proposal_card", "writes_only_under_smoke_tenant"),
+    ("proposal_card", HISTORY_ITEMS_DELETED_CHECK),
     ("smoke_principal", "cognito_user_deleted"),
     ("smoke_principal", "reps_row_deleted"),
     ("smoke_tenant", "tenant_left_clean"),
@@ -1593,16 +1600,34 @@ def checks_with_seams(
     return probe.run()
 
 
+def _recording_runtime_caller(call_runtime: RuntimeCaller, sessions: list[str]) -> RuntimeCaller:
+    """Wrap `call_runtime` so every session id a turn is sent with is appended to `sessions`."""
+
+    def _call(payload: Mapping[str, Any]) -> HttpResult:
+        session_id = str(payload.get("session_id") or f"smoke-proposal-card-{uuid.uuid4().hex}")
+        sessions.append(session_id)
+        return call_runtime({**payload, "session_id": session_id})
+
+    return _call
+
+
 def checks(
-    ctx: SmokeContext, *, http_caller: HttpCaller | None = None, jwks_url: str | None = None
+    ctx: SmokeContext,
+    *,
+    http_caller: HttpCaller | None = None,
+    jwks_url: str | None = None,
+    history_items: HistoryItemsFactory = LiveHistoryItems,
 ) -> Iterable[CheckResult]:
     """Provision a disposable principal, run the proposal-card round trip, and clean up.
 
     The `demo` baseline is sampled before anything is provisioned, and both tenant-delta assertions
     run before teardown. Access tokens are verified against `jwks_url`, the pool's JWKS by default.
+    The history item of every session a turn was sent with is deleted before the principal is
+    removed.
     """
     caller = http_caller if http_caller is not None else default_http_caller
     results: list[CheckResult] = []
+    sessions: list[str] = []
     provisioner = LiveProposalCardPrincipal(ctx, jwks_url=jwks_url)
     store = provisioner.store()
     reader = store_row_reader(store)
@@ -1626,7 +1651,9 @@ def checks(
                 call_api=live_api_caller(
                     caller, ctx.outputs.require_str("cloudfront_domain_name"), principal.id_token
                 ),
-                call_runtime=live_runtime_caller(ctx, principal.access_token),
+                call_runtime=_recording_runtime_caller(
+                    live_runtime_caller(ctx, principal.access_token), sessions
+                ),
                 read_row=lambda table, key: store.get_item(table, dict(key)),
                 audit_ids_for=lambda target_id: _audit_ids_for_target(
                     store, tenant=principal.tenant, target_id=target_id
@@ -1653,6 +1680,11 @@ def checks(
                     resource="proposal_card", tenant=provisioner.tenant(), reader=reader
                 )
             )
+        results.extend(
+            delete_session_history(
+                ctx, history_items, [(provisioner.tenant(), sessions)], resource="proposal_card"
+            )
+        )
         results.extend(provisioner.cleanup())
         results.extend(_deferrals_for_unemitted(results, _EXPECTED_CHECKS))
     return results

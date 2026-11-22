@@ -5,7 +5,8 @@ Two turns run concurrently through CloudFront under distinct session ids; each m
 one `completed` frame, and their `text_delta` `event_id`s must be disjoint and carry their own
 session id. Reuses `smoke_agent_stream`'s `LiveStreamPrincipalProvisioner`,
 `cloudfront_source` and `measure_arrivals`; the `text_delta`-before-`completed` ordering of a turn is
-`smoke_agent_stream`'s `text_delta_frames_arrive_before_completed`. A live run issues two turns.
+`smoke_agent_stream`'s `text_delta_frames_arrive_before_completed`. A live run issues two turns;
+both sessions' history items are deleted before the user is removed.
 """
 
 from __future__ import annotations
@@ -17,6 +18,11 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Final
 
 from scripts.smoke.harness import CheckResult, SmokeContext, run_main
+from scripts.smoke.history_cleanup import (
+    HistoryItemsFactory,
+    LiveHistoryItems,
+    delete_session_history,
+)
 from scripts.smoke_agent_stream import (
     ArrivalMeasurement,
     LiveStreamPrincipalProvisioner,
@@ -124,6 +130,7 @@ def checks(
     *,
     provisioner: LiveStreamPrincipalProvisioner | None = None,
     measure: MeasureTurn | None = None,
+    history_items: HistoryItemsFactory = LiveHistoryItems,
 ) -> Iterable[CheckResult]:
     """Provision a disposable user, measure concurrent streaming turns, assert isolation, clean up.
 
@@ -133,10 +140,12 @@ def checks(
             a `LiveStreamPrincipalProvisioner`, the offline test injects a fake.
         measure: Issues and times one turn. Defaults to the live CloudFront path; the offline test
             injects a canned `ArrivalMeasurement` so no socket is opened.
+        history_items: Addresses the `reps` history items; the offline test injects a fake.
     """
     prov = provisioner if provisioner is not None else LiveStreamPrincipalProvisioner(ctx)
     measurer = measure if measure is not None else _live_measure
     session_ids = [f"t3-text-delta-{_run_suffix()}" for _ in range(CONCURRENT_SESSIONS)]
+    sent: list[str] = []
     try:
         try:
             token = prov.provision()
@@ -154,6 +163,7 @@ def checks(
             status="pass",
             detail=f"disposable smoke user provisioned under tenant {prov.tenant()}",
         )
+        sent.extend(session_ids)
         try:
             with ThreadPoolExecutor(max_workers=len(session_ids)) as pool:
                 futures = [pool.submit(measurer, ctx, token, sid) for sid in session_ids]
@@ -168,6 +178,9 @@ def checks(
             return
         yield from evaluate_concurrent_sessions(list(zip(session_ids, measurements, strict=True)))
     finally:
+        yield from delete_session_history(
+            ctx, history_items, [(prov.tenant(), sent)], resource=RESOURCE_CLASS
+        )
         yield from prov.cleanup()
 
 

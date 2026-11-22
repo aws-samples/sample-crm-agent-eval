@@ -5,6 +5,10 @@ A turn spends model calls on up to three tiers — supervisor, subagent, and too
 attributed to the ``(tier, role, model_id)`` that made it. These are frozen value objects with
 construction-time validation and no I/O. :class:`InvocationAttribution` refuses a positive token
 count without a ``model_id``; a zero-token record represents a tier that made no call.
+
+A model call may report a ``provisional`` usage event before its final one. Only a final usage
+event (:func:`is_final_usage`) meters a call; a call that ends without one is attributed from its
+latest provisional event by :func:`provisional_attribution`.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, get_args
 
+from providers.base import ProviderEvent
 from providers.capabilities import Tier
 
 #: The four mutually exclusive outcomes a tool call or subagent delegation resolves to, classified
@@ -90,6 +95,8 @@ class InvocationAttribution:
         cache: Prompt-cache read/write token counts.
         latency_ms: Wall-clock latency of the invocation in milliseconds, or ``None`` when not
             measured (a stub arm makes no model call). Non-negative when present.
+        output_truncated: ``True`` when the call's final usage event reported that it stopped at
+            the output-token cap.
     """
 
     tier: Tier
@@ -98,6 +105,7 @@ class InvocationAttribution:
     tokens: TokenCounts
     cache: CacheCounts
     latency_ms: float | None = None
+    output_truncated: bool = False
 
     def __post_init__(self) -> None:
         if self.tier not in _TIERS:
@@ -153,10 +161,41 @@ class ToolCallAttribution:
             )
 
 
+def is_final_usage(event: ProviderEvent) -> bool:
+    """Return whether ``event`` is a non-provisional ``usage`` event, which meters its call."""
+    return event.type == "usage" and not event.provisional
+
+
+def provisional_attribution(
+    event: ProviderEvent, *, tier: Tier, role: str, model_id: str
+) -> InvocationAttribution:
+    """Attribute a call that ended without final usage from its latest provisional ``usage`` event.
+
+    The record carries the event's input and cache counts, zero output tokens and no latency, so
+    it is a lower bound on the call's real usage.
+
+    Raises:
+        ValueError: When ``event`` is not a provisional ``usage`` event.
+    """
+    if event.type != "usage" or not event.provisional:
+        raise ValueError(f"expected a provisional usage event, got {event.type!r}")
+    return InvocationAttribution(
+        tier=tier,
+        role=role,
+        model_id=model_id,
+        tokens=TokenCounts(input_tokens=event.input_tokens or 0, output_tokens=0),
+        cache=CacheCounts(
+            read_tokens=event.cache_read_tokens or 0, write_tokens=event.cache_write_tokens or 0
+        ),
+    )
+
+
 __all__ = [
     "CacheCounts",
     "InvocationAttribution",
     "OutcomeKind",
     "TokenCounts",
     "ToolCallAttribution",
+    "is_final_usage",
+    "provisional_attribution",
 ]

@@ -38,7 +38,12 @@ from scripts.check_secret_scan import (
     scan_set,
 )
 
-from tests.unit._gitleaks_config import install_local_rule_set, require_local_rule_set
+from tests.unit._gitleaks_config import (
+    TRACKED_RULE_SET,
+    install_local_rule_set,
+    install_tracked_rule_set,
+    require_local_rule_set,
+)
 
 
 @dataclass(frozen=True)
@@ -140,17 +145,20 @@ def _materialise(tmp_path: Path) -> Path:
     root.mkdir()
     with tarfile.open(archive) as tar:
         tar.extractall(root, filter="data")
-    assert not (root / ".gitleaks.toml").exists(), "the rule set is tracked again"
+    assert not (root / ".gitleaks.toml").exists(), "the local rule set is tracked"
     return _git_init(root)
 
 
-@pytest.fixture(params=["built-in", "local"])
+@pytest.fixture(params=["built-in", "tracked", "local"])
 def scan_root(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
-    """A materialised tree scanned with built-in rules, or with the local rule set installed."""
+    """A materialised tree scanned with built-in rules, the tracked rule set, or the local one."""
     _require_gitleaks()
     if request.param == "local":
         require_local_rule_set()
     root = _materialise(tmp_path)
+    (root / "config" / "gitleaks.toml").unlink(missing_ok=True)
+    if request.param == "tracked":
+        install_tracked_rule_set(root)
     if request.param == "local":
         install_local_rule_set(root)
     return root
@@ -240,7 +248,23 @@ class TestThePositiveControl:
 
 
 class TestTheRuleSetIsResolvedFromTheScannedTree:
-    """No `--config` means the tree's own `.gitleaks.toml` if present, else built-in rules."""
+    """No `--config` means the tree's `.gitleaks.toml`, else its `config/gitleaks.toml`, else built-in."""
+
+    def test_the_tracked_rule_set_is_used_when_no_local_one_is_present(
+        self, tmp_path: Path
+    ) -> None:
+        install_tracked_rule_set(tmp_path)
+        assert resolve_config(tmp_path, None) == tmp_path / "config" / "gitleaks.toml"
+
+    def test_the_local_rule_set_wins_over_the_tracked_one(self, tmp_path: Path) -> None:
+        install_tracked_rule_set(tmp_path)
+        (tmp_path / ".gitleaks.toml").write_text("", encoding="utf-8")
+        assert resolve_config(tmp_path, None) == tmp_path / ".gitleaks.toml"
+
+    def test_the_repository_resolves_to_a_rule_set_file(self) -> None:
+        """This repository always has a rule set file, so CI never falls back to built-in rules."""
+        resolved = resolve_config(REPO_ROOT, None)
+        assert resolved in (REPO_ROOT / ".gitleaks.toml", TRACKED_RULE_SET), resolved
 
     def test_an_explicit_config_wins(self, tmp_path: Path) -> None:
         (tmp_path / ".gitleaks.toml").write_text("", encoding="utf-8")
@@ -791,3 +815,63 @@ def test_the_gate_is_registered_in_the_aggregator() -> None:
         "check_secret_scan is not registered in run_gates.py's GATES, so `make verify-gates` never "
         "runs it and the secret scan is a control nothing exercises"
     )
+
+
+def _custom_only_line() -> str:
+    """An assignment the tracked custom generic rule reports and no built-in rule does.
+
+    Low entropy keeps gitleaks' entropy-gated built-in generic rule silent; assembled at runtime so
+    this file carries no matching literal.
+    """
+    return f'db_{"pass" + "word"} = "{"a" * 24}"\n'
+
+
+def _built_in_only_line() -> str:
+    """A GitHub token shape, reported by gitleaks' built-in `github-pat` rule only."""
+    return f'value = "{"gh" + "p_"}{"a1B2c3D4e5F6g7H8i9J0" + "k1L2m3N4o5P6q7R8"}"\n'
+
+
+class TestTheTrackedRuleSetIsEffective:
+    """The tracked rule set adds the custom rules to gitleaks' built-in rules, which it keeps."""
+
+    def test_the_tracked_rule_set_declares_custom_rules_only_and_extends_the_defaults(
+        self,
+    ) -> None:
+        import tomllib
+
+        with TRACKED_RULE_SET.open("rb") as handle:
+            data = tomllib.load(handle)
+        assert data["extend"] == {"useDefault": True}
+        assert "allowlist" not in data and "allowlists" not in data, "no global allowlist"
+        ids = [rule["id"] for rule in data["rules"]]
+        assert ids and all(rule_id.startswith("crm-") for rule_id in ids), ids
+        assert all("path" not in rule for rule in data["rules"]), "a rule is path-scoped"
+
+    def test_a_custom_rule_fires_on_a_planted_fixture(
+        self, repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        install_tracked_rule_set(repo)
+        _plant(repo, "notes/custom.txt", _custom_only_line())
+        assert main(["--source", str(repo), "--json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert report["rule_set"] == str(repo / "config" / "gitleaks.toml")
+        assert any(
+            line.startswith("crm-generic-high-entropy-secret: notes/custom.txt:")
+            for line in report["findings"]
+        ), report
+
+    def test_without_the_tracked_rule_set_the_custom_match_is_not_reported(
+        self, repo: Path
+    ) -> None:
+        """Control: built-in rules miss the plant, so the tracked rule set decided the finding."""
+        _plant(repo, "notes/custom.txt", _custom_only_line())
+        assert main(["--source", str(repo)]) == 0
+
+    def test_the_built_in_rules_still_fire_under_the_tracked_rule_set(
+        self, repo: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        install_tracked_rule_set(repo)
+        _plant(repo, "notes/builtin.txt", _built_in_only_line())
+        assert main(["--source", str(repo), "--json"]) == 1
+        report = json.loads(capsys.readouterr().out)
+        assert any(line.startswith("github-pat: notes/builtin.txt:") for line in report["findings"])

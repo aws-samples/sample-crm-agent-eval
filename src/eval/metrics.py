@@ -1188,6 +1188,9 @@ class TierTaskLatency:
             supervisor's, any other the tool tier's); ``None`` at the subagent tier.
         truncated_task_count: Tasks with at least one truncated tool call at this tier; ``None``
             at the subagent tier.
+        output_truncated_call_count: Model calls at this tier whose output stopped at the
+            output-token cap.
+        output_truncated_task_count: Tasks with at least one such call at this tier.
     """
 
     tier: Tier
@@ -1200,6 +1203,8 @@ class TierTaskLatency:
     budget_exhausted_task_count: int
     truncated_tool_call_count: int | None
     truncated_task_count: int | None
+    output_truncated_call_count: int
+    output_truncated_task_count: int
 
     def to_report_fields(self) -> dict[str, object]:
         """Render as a flat JSON-safe mapping in a fixed key order."""
@@ -1213,6 +1218,8 @@ class TierTaskLatency:
             "budget_exhausted_task_count": self.budget_exhausted_task_count,
             "truncated_tool_call_count": self.truncated_tool_call_count,
             "truncated_task_count": self.truncated_task_count,
+            "output_truncated_call_count": self.output_truncated_call_count,
+            "output_truncated_task_count": self.output_truncated_task_count,
         }
 
 
@@ -1296,6 +1303,21 @@ def _tier_truncation_counts(
     return sum(per_task), sum(1 for count in per_task if count)
 
 
+def _tier_output_truncation_counts(
+    observations: Sequence[TaskTierObservation], tier: Tier
+) -> tuple[int, int]:
+    """Return the tier's output-truncated model-call and task counts."""
+    per_task = [
+        sum(
+            1
+            for invocation in observation.invocations
+            if invocation.output_truncated and invocation.tier == tier
+        )
+        for observation in observations
+    ]
+    return sum(per_task), sum(1 for count in per_task if count)
+
+
 def _sorted_efforts(values: set[str | None]) -> tuple[str | None, ...]:
     named = sorted(value for value in values if value is not None)
     return (*named, None) if None in values else tuple(named)
@@ -1316,7 +1338,9 @@ def aggregate_tier_task_metrics(
     ``False`` every latency figure is ``None`` at a zero count. Efforts, delegation outcomes,
     per-tier retry counts, budget-exhausted task counts and truncation counts are collected over
     every observation regardless of ``measured``. A supervisor-role tool call's truncation counts at
-    the supervisor tier and any other role's at the tool tier; the subagent tier has none.
+    the supervisor tier and any other role's at the tool tier; the subagent tier has none. An
+    output-truncated model call counts at its own tier, so a turn truncated at two tiers counts
+    once in each.
 
     Args:
         observations: One entry per task unit the arm ran.
@@ -1366,6 +1390,9 @@ def aggregate_tier_task_metrics(
             if values:
                 samples.append(sum(values))
         truncated_calls, truncated_tasks = _tier_truncation_counts(observations, tier)
+        output_truncated_calls, output_truncated_tasks = _tier_output_truncation_counts(
+            observations, tier
+        )
         by_tier.append(
             TierTaskLatency(
                 tier=tier,
@@ -1384,6 +1411,8 @@ def aggregate_tier_task_metrics(
                 ),
                 truncated_tool_call_count=truncated_calls,
                 truncated_task_count=truncated_tasks,
+                output_truncated_call_count=output_truncated_calls,
+                output_truncated_task_count=output_truncated_tasks,
             )
         )
     return TierTaskMetrics(family=family, by_tier=tuple(by_tier), delegation_outcomes=outcomes)

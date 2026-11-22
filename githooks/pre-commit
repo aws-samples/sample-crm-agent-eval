@@ -86,9 +86,14 @@ else
   # 1. `protect --staged` scans the staged diff; `--redact` keeps the value out of the output.
   # 2. `check_secret_scan.py` scans the working tree's non-ignored files; any non-zero status,
   #    including 3 (gitleaks absent), fails the hook.
-  # No `-c`: gitleaks loads the untracked `.gitleaks.toml` when present, else its built-in rules.
+  # Rule set: the untracked `.gitleaks.toml` when present (gitleaks loads it itself), else the
+  # tracked `config/gitleaks.toml`, else gitleaks' built-in rules; the same order as the gate.
+  _staged_config=()
+  if [[ ! -f .gitleaks.toml && -f config/gitleaks.toml ]]; then
+    _staged_config=(--config config/gitleaks.toml)
+  fi
   echo "pre-commit: running gitleaks over the staged diff..."
-  if ! "$GITLEAKS_BIN" protect --staged --redact ; then
+  if ! "$GITLEAKS_BIN" protect --staged --redact ${_staged_config[@]+"${_staged_config[@]}"} ; then
     FAILED=1
   fi
 

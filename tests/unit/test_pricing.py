@@ -91,13 +91,14 @@ def test_sourcing_provenance_fields_exist(pricing: dict[str, Any]) -> None:
     assert pricing["sourced_from"], "sourced_from must describe where rates come from"
 
 
-#: The standard global rates of price table 1.2.0, which 1.3.0 must carry unchanged.
-RATES_1_2_0 = {
+#: The standard global rates of price table 1.4.0: the 1.3.0 rates, with GPT-6.2 Sol and GPT-6.2
+#: Astra in place of GPT-6.1 Sol and GPT-6 Astra.
+RATES_1_4_0 = {
     "anthropic.claude-opus-5-5": (4.00, 20.00, 5.00, 0.20),
     "anthropic.claude-sonnet-5-5": (2.00, 10.00, 2.50, 0.10),
     "anthropic.claude-haiku-5-5": (0.10, 0.50, 0.125, 0.01),
-    "openai.gpt-6-astra": (10.00, 50.00, 12.50, 1.00),
-    "openai.gpt-6.1-sol": (2.00, 10.00, 2.50, 0.10),
+    "openai.gpt-6.2-astra": (8.00, 40.00, 10.00, 0.40),
+    "openai.gpt-6.2-sol": (2.00, 10.00, 2.50, 0.10),
     "openai.gpt-6.1-terra": (1.00, 5.00, 1.25, 0.05),
     "openai.gpt-6-luna": (0.10, 0.50, 0.125, 0.01),
 }
@@ -105,24 +106,24 @@ RATES_1_2_0 = {
 #: The long-context blocks: threshold, then input, output, cache-write and cache-read rates.
 LONG_CONTEXT = {
     "anthropic.claude-haiku-5-5": (100_000, 0.50, 2.50, 0.625, 0.05),
-    "openai.gpt-6.1-sol": (272_000, 4.00, 15.00, 5.00, 0.20),
+    "openai.gpt-6.2-sol": (272_000, 4.00, 15.00, 5.00, 0.20),
     "openai.gpt-6.1-terra": (272_000, 2.00, 7.50, 2.50, 0.10),
     "openai.gpt-6-luna": (272_000, 0.20, 0.75, 0.25, 0.02),
-    "openai.gpt-6-astra": (272_000, 20.00, 75.00, 25.00, 2.00),
+    "openai.gpt-6.2-astra": (272_000, 16.00, 60.00, 20.00, 0.80),
 }
 
 
-def test_price_table_is_schema_2_version_1_3_0(pricing: dict[str, Any]) -> None:
-    """The tiered, route-aware table is schema 2 at price table version 1.3.0."""
+def test_price_table_is_schema_2_version_1_4_0(pricing: dict[str, Any]) -> None:
+    """The tiered, route-aware table is schema 2 at price table version 1.4.0."""
     assert pricing["schema_version"] == 2
-    assert pricing["price_table_version"] == "1.3.0"
-    assert pricing["sourced_on"] == "2026-11-08"
+    assert pricing["price_table_version"] == "1.4.0"
+    assert pricing["sourced_on"] == "2026-11-20"
 
 
-def test_every_1_2_0_standard_rate_is_unchanged(pricing: dict[str, Any]) -> None:
-    """Each model's standard global rates equal the 1.2.0 values literally."""
-    assert set(pricing["models"]) == set(RATES_1_2_0)
-    for model_id, expected in RATES_1_2_0.items():
+def test_every_standard_rate_is_the_1_4_0_value(pricing: dict[str, Any]) -> None:
+    """Each model's standard global rates equal the 1.4.0 values literally."""
+    assert set(pricing["models"]) == set(RATES_1_4_0)
+    for model_id, expected in RATES_1_4_0.items():
         rates = pricing["models"][model_id]
         assert tuple(rates[field] for field in RATE_FIELDS) == expected, model_id
 

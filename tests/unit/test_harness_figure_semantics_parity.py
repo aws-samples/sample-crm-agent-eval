@@ -42,6 +42,8 @@ def _arm() -> ArmResult:
             price_table_version="v0-provisional",
             answer_style_sha256="0" * 64,
             prompt_caching="explicit cache points",
+            output_token_cap=16_384,
+            dirty_tree=False,
         ),
         model_metrics_fields={
             "model_id": _MODEL_ID,

@@ -75,7 +75,7 @@ export function estimatePayload(
     estimate_usd: 3.1,
     basis: "static",
     task_count: 20,
-    per_arm_usd: { "anthropic.claude-opus-5-5": 1.75, "openai.gpt-6-astra": 1.35 },
+    per_arm_usd: { "anthropic.claude-opus-5-5": 1.75, "openai.gpt-6.2-astra": 1.35 },
     ...overrides,
   };
 }

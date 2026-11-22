@@ -432,6 +432,85 @@ Until the second apply the ALB admits nothing, so `/api/*` fails at the edge. On
 accepted; do not widen the ingress to the VPC CIDR. The variable's validation rejects a CIDR or prefix
 list because the adopted VPC is shared with other workloads.
 
+## Fresh stack: two-stage SourceVpce bring-up
+
+`runtime_source_vpce_deny_enabled` defaults to `true`: both Runtime resource policies deny
+`InvokeAgentRuntime` to any caller not arriving through this stack's bedrock-agentcore VPC endpoint.
+If the Deny is applied before the invokers' calls are shown to arrive through that endpoint, every
+chat turn and every sweep turn is denied. So a fresh stack takes two stages.
+
+A stack already running with the Deny off counts as a fresh stack here, and it is already at stage 1.
+Run the stage-2 checks below against it; its first apply on this version is then the stage-2 apply,
+which adds the Deny. To hold it at stage 1 instead, declare stage 1 before that apply.
+
+Declare stage 1 in a gitignored variable file, `infra/terraform.tfvars` or an `infra/*.auto.tfvars`.
+Do not use `-var` or `TF_VAR_`. `smoke/runtime_network_posture.py` reads the declared state from the
+variable files only, so a stack held at stage 1 any other way fails its `source_vpce_deny_state` rows
+instead of deferring.
+
+```bash
+# Stage 1: in infra/terraform.tfvars
+#   runtime_source_vpce_deny_enabled = false
+CRM_EXPECTED_ACCOUNT_ID=<account-id> PATH=.venv/bin:$PATH bash scripts/deploy.sh --profile <profile> --region <region>
+
+# Verify (read-only). Expect both source_vpce_deny_state rows `defer` with reason
+# stage_1_declared_by_operator, and every other row `pass`.
+.venv/bin/python3 -m scripts.smoke.runtime_network_posture --profile <profile> --region <region> \
+  --outputs results/tf-outputs.json
+```
+
+Before stage 2, confirm from the account (all read-only) that the invokers reach the Runtime through
+the endpoint:
+
+- every invoker role in the Runtime policy's Allow belongs to a function with a non-empty
+  `VpcConfig` (`aws lambda get-function-configuration`). There are three invokers: the streaming
+  relay, the eval sweep task and the MCP chat target, and the Deny binds all three;
+- the `com.amazonaws.<region>.bedrock-agentcore` interface endpoint is `available`, has private DNS
+  enabled and covers those functions' subnets (`aws ec2 describe-vpc-endpoints`), and it is the
+  endpoint named in the policies' `aws:SourceVpce` Allow;
+- the VPC flow logs show accepted port-443 traffic from those functions' network interfaces to the
+  endpoint's network interfaces. This is consistent with the calls using the endpoint, not proof: the
+  functions share network interfaces, and a flow record cannot attribute `aws:SourceVpce` to a call.
+  `InvokeAgentRuntime` is a CloudTrail data event, so a trail with no bedrock-agentcore data-event
+  selector records no call and cannot show `aws:SourceVpce` either.
+
+Agree the rollback before applying stage 2: set `runtime_source_vpce_deny_enabled = false` in a
+gitignored `infra/*.auto.tfvars` (or `infra/terraform.tfvars`) and apply again.
+
+```bash
+# Stage 2: remove the stage-1 assignment, if any, then apply. The plan should add only the Deny
+# statement to the two Runtime resource policies.
+CRM_EXPECTED_ACCOUNT_ID=<account-id> PATH=.venv/bin:$PATH bash scripts/deploy.sh --profile <profile> --region <region>
+```
+
+Then run `runtime_network_posture` and `runtime_inbound_auth` again: `source_vpce_deny_state` passes,
+and `outside_vpc_invoke_refused_under_declared_deny` passes on an explicit resource-policy refusal.
+Run `eval_sfn` and `mcp_chat_gateway` as well, one per invoker besides the relay, and one chat turn
+through the SPA as a positive control for the relay.
+
+As the negative check, simulate the deployed Runtime policy for one invoker role. The Deny matches
+only when `aws:ViaAWSService` is `false`, so pass that key in every case; without it the simulator
+reports `allowed` even on a correctly applied stack.
+
+```bash
+POLICY=$(aws bedrock-agentcore-control get-resource-policy --resource-arn <runtime-arn> \
+  --profile <profile> --region <region> --query policy --output text)
+sim() { aws iam simulate-custom-policy --profile <profile> --region <region> --no-cli-pager \
+  --policy-input-list '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"bedrock-agentcore:InvokeAgentRuntime","Resource":"*"}]}' \
+  --resource-policy "$POLICY" --caller-arn <invoker-role-arn> \
+  --action-names bedrock-agentcore:InvokeAgentRuntime --resource-arns <runtime-arn> \
+  --query 'EvaluationResults[0].EvalDecision' --output text --context-entries "$@"; }
+VIA='ContextKeyName=aws:ViaAWSService,ContextKeyValues=false,ContextKeyType=boolean'
+sim "$VIA"                                                                              # explicitDeny
+sim "$VIA" 'ContextKeyName=aws:SourceVpce,ContextKeyValues=vpce-other,ContextKeyType=string'  # explicitDeny
+sim "$VIA" 'ContextKeyName=aws:SourceVpce,ContextKeyValues=<endpoint-id>,ContextKeyType=string' # allowed
+```
+
+The first two must be `explicitDeny`: no endpoint, and a different endpoint. The third is the
+positive control, the stack's own endpoint, and must be `allowed`; if it is not, the simulation is
+wrong, not the Deny. If any invoker is denied after stage 2, roll back as agreed: declare
+`runtime_source_vpce_deny_enabled = false` in the variable file and apply.
+
 ## GSI projection changes
 
 DynamoDB cannot change a global secondary index's projection in place, so an apply that changes one
@@ -648,7 +727,7 @@ interrupted earlier run left behind.
 | `smoke/runtime_bedrock_iam.py` | the Runtime role is allowed `bedrock:InvokeModel` and `InvokeModelWithResponseStream` on every `global.` inference profile in `config/model_capabilities.yaml`, and denied `bedrock:InvokeModel` on each retired profile in the module's `RETIRED_INFERENCE_PROFILES` |
 | `smoke/runtime_history_iam.py` | the Runtime role's conversation-history grant, via `iam simulate-principal-policy` and `describe-time-to-live`: allowed `GetItem` and `PutItem` on `reps` for a `history#` key, and the DynamoDB CMK (`kms:Decrypt`, `kms:GenerateDataKey`) only through DynamoDB for `reps`; `explicitDeny` on `usersettings#`, `conversation#`, a bare rep id and `history#canary#` keys, on every other action on `reps` and its indexes, and on every other table; denied without `dynamodb:LeadingKeys` context, for a `PutItem` writing a `tenant` attribute, and for the CMK on another table or without `kms:ViaService`; `reps` TTL `ENABLED` on `expires_at`. Each Get/Put/KMS deny row shares its action with an allow row |
 | `smoke/runtime_inbound_auth.py` | the Runtime carries no custom JWT authorizer (IAM inbound auth), with a non-vacuity guard on the response shape; the runner's own principal, which is not an invoker, is refused `InvokeAgentRuntime` (an outside-VPC refusal, which the `SourceVpce` Deny alone could produce); `outside_vpc_invoke_refused_under_declared_deny` judges that refusal against the `aws:SourceVpce` Deny state the deployment declares (declared enabled: an explicit resource-policy refusal passes and an admission fails; declared disabled or unknown, or another error: `defer` with its reason); the resource policies on the runtime ARN and on its DEFAULT endpoint each allow exactly the invoker roles in `local.runtime_invoker_role_arns`, and every Allow names an `AWS` principal only. The policies are read with botocore, or with `aws bedrock-agentcore-control get-resource-policy` under the resolved profile and region when botocore does not model the call; `defer` only when neither does |
-| `smoke/runtime_network_posture.py` | the Runtime and its `DEFAULT` endpoint are `READY` on the same version (`runtime_ready`, a bounded poll that fails at once on any status other than `READY`, `CREATING` or `UPDATING`, an absent status included); `platformVersion` is `V2` (`platform_version_expected`, read from the raw `GetAgentRuntime` body because the pinned botocore does not model the member); the ARN equals the stack output (`runtime_arn_unchanged`); the Runtime is `networkMode: VPC` in the stack's Runtime subnets (supported AZs) with the dedicated Runtime security group; the interface endpoints exist; no open egress; the `SourceVpce` deny state (`defer` until applied) |
+| `smoke/runtime_network_posture.py` | the Runtime and its `DEFAULT` endpoint are `READY` on the same version (`runtime_ready`, a bounded poll that fails at once on any status other than `READY`, `CREATING` or `UPDATING`, an absent status included); `platformVersion` is `V2` (`platform_version_expected`, read from the raw `GetAgentRuntime` body because the pinned botocore does not model the member); the ARN equals the stack output (`runtime_arn_unchanged`); the Runtime is `networkMode: VPC` in the stack's Runtime subnets (supported AZs) with the dedicated Runtime security group; the interface endpoints exist; no open egress; the `SourceVpce` deny state (`source_vpce_deny_state`: pass when the Deny is present; `defer`, reason `stage_1_declared_by_operator`, when absent and a variable file declares `runtime_source_vpce_deny_enabled = false`; fail when absent and declared enabled or unknown, the default included) |
 | `smoke/chat_timeouts.py` | the deployed relay and `chat_target` Lambda timeouts and the CloudFront relay origin's read timeout equal the configured values; the Runtime's container image tag is the one the local `agent-source.zip` mints, and ECR holds it. The 600 s turn itself is a declared `skip`. A repackage after the deploy makes the image row fail |
 | `smoke/chat_path_iam.py` | the chat path's least-privilege grants, via `iam simulate-principal-policy`: Gateway #2's role may invoke `chat_target` and the chat interceptor only (denied Gateway #1's interceptor, `eval_trigger`, every CRM action Lambda and `InvokeAgentRuntime`); Gateway #1's role is denied `chat_target`; `chat_target`'s role reaches `reps` only under `usersettings#`/`conversation#` keys and no other table. Every DynamoDB row passes a `LeadingKeys` context. Both functions' resource policies grant invoke to Gateway #2 only |
 | `smoke/public_exposure.py` | against the account, not the source: every Function URL reports `AuthType: AWS_IAM`; no resource policy grants a wildcard principal; every Lambda's `VpcConfig` names a subnet and a security group; the REST API is private and reachable only through its VPC endpoint |
@@ -667,7 +746,7 @@ surface (`src/agents/runtime_server.py`). No smoke module sends it:
 
 | Field | Values | Meaning |
 |---|---|---|
-| `mode` | `isolation_probe` | selects the probe. `delegation`, `cancel` and `eval_turn` select the other three non-turn modes; any other value, or none, takes the normal turn path |
+| `mode` | `isolation_probe` | selects the probe. `cancel` and `eval_turn` select the other two non-turn modes; any other value, or none (including the retired `delegation`), takes the normal turn path |
 | `role` | `null`, `research`, `mutation`, `analytics`, `composer` | which agent to report on; `null` is the supervisor; unknown is `400 validation_failed` |
 | `trigger` | `scope_denial`, `empty_result`, `handler_error` (optional) | which canonical handler payload to classify; unknown is `400 validation_failed` |
 
@@ -689,10 +768,11 @@ refuses to run under `demo`, and reports a teardown failure as its own failing c
 | `smoke/integration_proposal_chain.py` | proposal → approval → audit → revert, plus both outcomes of the delete-proposal cascade, the `after_payload` allowlist, a note-create revert in scope (`note_revert:*`: the note is deleted and its audit marked reversed), and an approved delete reverted in scope (`delete_revert:*`: the contact is restored from the before-snapshot and its audit marked reversed); and two out-of-book reverts (`out_of_book_revert:*`): a note-create audit and a contact-delete audit, seeded under the disposable tenant for an account outside the book, are each refused with 403 `scope_denied`, and the note, the absent contact and both audit records read back unchanged | its own MFA-enrolled user, ID token; with `--token`, `--account-id` is optional: when absent, the account is the lowest entry of the token's `custom:book` claim (an absent or empty claim fails) |
 | `smoke/integration_teardown_privilege.py` | `dynamodb:DeleteItem` simulates as denied for `sweep_control`'s role (the state machine's `Teardown` step) on every tenant-scoped table, each deny resting on positive controls (the action is expressible, the ARN matches teardown's own `Query` grant, and any matrix holder of `DeleteItem` is allowed it); the role holds `BatchWriteItem` and teardown's `Query` on each table (`worker_holds_*`); `teardown_was_not_vacuous`: the fixture corpus the seeder writes is non-empty. No sweep and no tenant write; the teardown itself is `eval_sfn`'s `tenant_emptied_by_the_workers_own_role` | the runner's own credentials (simulation only) |
 | `smoke/three_tier_chat.py` | one delegation-forcing turn invokes all three model tiers, attributed to the Runtime role in CloudTrail. The supervisor-tier invocation is the positive control for the role, the window and the supervisor family's CloudTrail event name only; it does not cover a lower tier on the other family. CloudTrail tells tiers apart only by inference profile, so the turn runs under the first `{tier: family}` mapping whose `config/models.yaml` models have three distinct profiles: all-anthropic, then an openai supervisor with anthropic subagent and tool, then the mixed-family mapping. The row detail names the mapping. When none has distinct profiles, the turn is not sent and `attribution_mapping_profiles_distinct` fails, naming each mapping's profiles. The delegation turn gets the mixed-family turn's cost and resolved-tier rows for its mapping, suffixed `:attribution`; a mixed-family turn (schema-3 tuning) completes with non-empty `cost_lines`, a positive `cost_usd` and `resolved_tiers` naming each tier's `config/models.yaml` model and effort, with a priced cost line per tier model; a schema-2 tuning carrying `temperature` is refused as one SSE `error` frame (`invalid_request`, naming `tuning.tiers.<tier>.temperature`) with no `usage`, `completed` or `text_delta` frame; a second principal reusing another user's session id is refused (HTTP 400 through the relay), while the owner's own reuse succeeds; a delegation-forcing turn with every tier on openai gets the mixed-family turn's rows suffixed `:openai_supervisor`, including `supervisor_resolved_effort_is_<effort>:openai_supervisor` (the effort from `config/models.yaml`); for each family, the second of two supervisor turns sharing the stable prefix reports `cache_read_tokens > 0` on its supervisor cost line (`supervisor_prompt_cache_read_on_second_turn:<family>`; the anthropic pair is the mixed-family seed and owner-reuse turns, the openai pair is the openai turn and a short probe turn), `defer` with `platform_reported_no_cache_tokens` when neither turn reports any cache token and `fail` when a write is reported but nothing is read; a `page_context` route planted with a run-unique marker, once longer than the route bound and once outside its character set, is refused with HTTP 400 and the relay's generic validation message with the marker absent from the response, against the probe turn's conforming `page_context` as the control (`page_context_over_bound_route_refused`, `page_context_off_charset_route_refused`; no model call); three tool-free all-anthropic turns with one prompt, C in a fresh session then A and B in one shared session, pass `supervisor_prompt_cache_reads_latest_message:anthropic` when B's supervisor `cache_read_tokens` exceeds C's (a cache point on the latest message is read back by a later turn; this does not show that history reached the model), `defer` with `cache_history_turn_called_a_tool` when any of the three emitted a `tool_call` frame and with `platform_reported_no_cache_tokens` when C read nothing and no turn reported a cache write, and `fail` otherwise; the three are sent only when the share still has room for all of them. Cross-turn history, four tool-free all-anthropic turns: A in a fresh session S states a run-unique code word, B in S asks for it, a control in another fresh session asks the same, and a fourth turn in S sends no `resume_from` (the Gateway chat tool's payload shape) and asks again in other words. `followup_turn_carries_history:anthropic` passes when B's answer contains the code word, B's supervisor `cache_write_tokens` is above 0 with `cache_read_tokens` at least A's, and the control completed without it. `followup_without_resume_from_carries_history:anthropic` passes when the fourth turn's answer contains the code word and its supervisor read exceeds B's, which a replay of B cannot. `history_store_failures_absent_from_runtime_logs` fails on any `history_read_failed`, `history_write_failed` or `history_write_conflict` line in the Runtime log stream of any session the module used; its positive control is that every check-9 turn's `invocation_started` line sits in a stream naming its session. `history_item_owned_and_expiring` reads S's `reps` item (`history#<user A's smoke tenant>#<S>`) as the operator: exactly the store's attributes, owned by user A's tenant, `expires_at` within the store's TTL. `history_items_deleted`: every history item the module's sessions could have written is deleted and re-read as absent before the smoke users are removed. Every turn sends its session's recorded-frame count as `resume_from`, so a follow-up runs rather than replaying. Twelve model-backed turns (`MODEL_TURN_ALLOTMENTS`); a turn past that share is not issued | provisioned users |
-| `smoke/eval_sfn.py` | the `eval_sweep` state machine through `POST /api/eval_trigger`: a stub rehearsal at `REHEARSAL_REPEATS` repeats (single-flight 409; `unit_tenants_recorded`: the run's `eval_runs` row lists every (arm, repeat) unit tenant; `unit_tenants_seeded`: each holds rows while the run is running; `run_records_repeats`; `completed` with arms x repeats x tasks done, `SUCCEEDED` execution, `eval_results` rows reached the Runtime with one distinct `result_id` per item and an equal share at each `repeat_index`, artifacts pass `assert_artifacts` at tasks x repeats, each arm's `provenance.effort` is `DEFAULT_ARM_EFFORT` (one `arm_effort_is_default:<family>` row per default-sweep family, in sweep order), each arm's models are `config/models.yaml`'s (one `arm_models_are_configured:<family>` row per default-sweep family: `provenance.model_id` is the family's supervisor model and every tier's configured model id is that tier's model; an absent provenance or tier entry fails), `prompt_bundle_matches_repo` (every arm's `provenance.prompt_bundle_sha256` equals `agents.prompt_bundle.prompt_bundle_sha256()` of the checkout running the smoke; an absent digest fails), `matrix_is_record_shape_3` (the matrix and every arm carry `record_shape_version` 3, every arm a non-empty `provenance.prompt_caching`, every tier's `tier_summary` integer `total_prompt_tokens`, `cache_read_tokens` and `cache_write_tokens`, and every tier's `tier_task_metrics.by_tier` entry `budget_exhausted_task_count`, `truncated_tool_call_count` and `truncated_task_count`, both truncation counts `null` at the subagent tier; the live sweep asserts it too), `artefact_url` presigns a recorded artefact that an https GET fetches (200) while plain http gets 403 `AccessDenied` and a tampered key 403 `SignatureDoesNotMatch` (the S3 error code is asserted, not only the status), the sweep tenant, `canary` and lock left clean, `demo` unchanged; `tenant_emptied_by_the_workers_own_role`: the run's `eval_runs` row is `torn_down` and the run tenant and every unit tenant read back empty, so the `Teardown` step emptied them under `sweep_control`'s own role) and a cancel proof on a second stub sweep at one repeat (`accepted`, then `cancelled` with a partial matrix and clean teardown, then `already_terminal`); least-privilege role simulations for `sweep_control`, `sweep_task`, the state machine role and `eval_trigger`, derived from the `infra/eval_sfn.tf` grant locals: every DynamoDB simulation of `sweep_control`'s role, allows and denies alike, sends `dynamodb:Select = COUNT` (the value its `demo` Query grants admit, so a deny is not the Select condition's doing), and a row answered with a context key missing never passes; an allow per conditioned grant value, denies for out-of-scope keys (a `demo` twin, a foreign key, and a minted-id twin such as `act-<uuid>` for `act-eval-*`) and for `demo`/`canary` where a `gsi_tenant` grant does not admit them, and an explicit-Deny `*_denies_removed_*` row for each asserted action a role no longer holds on a table, such as the seed `PutItem` (incl. `trigger_allows_artifact_get` on the artefact prefix, and `trigger_denies_{get_outside_prefix,artifact_put,list_bucket}`); `machine_tracing_enabled` (the deployed state machine's `tracingConfiguration.enabled` is true); `machine_allows_{GetSamplingRules,GetSamplingTargets,PutTelemetryRecords,PutTraceSegments}` for the four SFN-XRAY-1 X-Ray actions on `*`, and `machine_denies_{BatchGetTraces,PutEncryptionConfig}` for X-Ray actions outside it. `--live-once --i-understand-this-is-billable` is the single live sweep, gated on a matching `--retention-verdict` | its own MFA-enrolled admin user with `full_visibility`, ID token. The completed stub run's `status` carries `tier_comparison_table` with one column per arm and no `Delegation outcome` row in its Subagent section (`subagent_table_has_no_delegation_outcome_rows`), and `artefact_url` with `download: true` serves `matrix_md` as an attachment with the same bytes |
+| `smoke/chat_resume.py` | one disposable user, three requests back to back in one fresh session: a tool-free seed turn (`seed_turn_completed`); `resume: true` at half the seed's recorded frames, which must replay exactly the recorded frames after that cursor, payload for payload, so every `event_id` matches and no new `usage` frame appears (`resume_replays_recorded_tail`; a response opening with `replay_unavailable` means the session reached a microVM holding nothing for it, and the row is `defer`, reason `runtime_session_store_recycled`); `resume: true` at or past the last recorded frame, which must open with `replay_unavailable` and then run fresh to `completed` (`resume_past_last_frame_signals_replay_unavailable`). The session's history item is deleted and re-read as absent (`history_items_deleted`). Two model-backed turns, three when the microVM was recycled (`MODEL_TURN_ALLOTMENTS`), billable | provisioned user |
+| `smoke/eval_sfn.py` | the `eval_sweep` state machine through `POST /api/eval_trigger`: a stub rehearsal at `REHEARSAL_REPEATS` repeats (single-flight 409; `unit_tenants_recorded`: the run's `eval_runs` row lists every (arm, repeat) unit tenant; `unit_tenants_seeded`: each holds rows while the run is running; `run_records_repeats`; `completed` with arms x repeats x tasks done, `SUCCEEDED` execution, `eval_results` rows reached the Runtime with one distinct `result_id` per item and an equal share at each `repeat_index`, artifacts pass `assert_artifacts` at tasks x repeats, each arm's `provenance.effort` is `DEFAULT_ARM_EFFORT` (one `arm_effort_is_default:<family>` row per default-sweep family, in sweep order), each arm's models are `config/models.yaml`'s (one `arm_models_are_configured:<family>` row per default-sweep family: `provenance.model_id` is the family's supervisor model and every tier's configured model id is that tier's model; an absent provenance or tier entry fails), `prompt_bundle_matches_repo` (every arm's `provenance.prompt_bundle_sha256` equals `agents.prompt_bundle.prompt_bundle_sha256()` of the checkout running the smoke; an absent digest fails), `matrix_is_record_shape_4` (the matrix and every arm carry `record_shape_version` 4; every arm a non-empty `provenance.prompt_caching`, a positive integer `provenance.output_token_cap`, and a `provenance.dirty_tree` that is a bool, or `null` exactly when `provenance.git_revision` is `"unknown"`, as on the deployed stack; every tier's `tier_summary` integer `total_prompt_tokens`, `cache_read_tokens` and `cache_write_tokens`; and every tier's `tier_task_metrics.by_tier` entry `budget_exhausted_task_count`, `truncated_tool_call_count`, `truncated_task_count`, `output_truncated_call_count` and `output_truncated_task_count`, the two tool-call truncation counts `null` at the subagent tier; the live sweep asserts it too), `rehearsal_errors_are_coded`, `cancel_proof_errors_are_coded` and `live_errors_are_coded` (no `errorMessage`, `errorType`, `stackTrace` or traceback text or key anywhere in the run's `status` payload or its `eval_results` rows; a failed run and every failed row carry a lowercase taxonomy `error_code`; any `error_detail` is at most 200 characters of `[A-Za-z0-9._:-]` with no run of 12 or more digits; a failing row names the path, never the text), `artefact_url` presigns a recorded artefact that an https GET fetches (200) while plain http gets 403 `AccessDenied` and a tampered key 403 `SignatureDoesNotMatch` (the S3 error code is asserted, not only the status), the sweep tenant, `canary` and lock left clean, `demo` unchanged; `tenant_emptied_by_the_workers_own_role`: the run's `eval_runs` row is `torn_down` and the run tenant and every unit tenant read back empty, so the `Teardown` step emptied them under `sweep_control`'s own role) and a cancel proof on a second stub sweep at one repeat (`accepted`, then `cancelled` with a partial matrix and clean teardown, then `already_terminal`); least-privilege role simulations for `sweep_control`, `sweep_task`, the state machine role and `eval_trigger`, derived from the `infra/eval_sfn.tf` grant locals: every DynamoDB simulation of `sweep_control`'s role, allows and denies alike, sends `dynamodb:Select = COUNT` (the value its `demo` Query grants admit, so a deny is not the Select condition's doing), and a row answered with a context key missing never passes; an allow per conditioned grant value, denies for out-of-scope keys (a `demo` twin, a foreign key, and a minted-id twin such as `act-<uuid>` for `act-eval-*`) and for `demo`/`canary` where a `gsi_tenant` grant does not admit them, and an explicit-Deny `*_denies_removed_*` row for each asserted action a role no longer holds on a table, such as the seed `PutItem` (incl. `trigger_allows_artifact_get` on the artefact prefix, and `trigger_denies_{get_outside_prefix,artifact_put,list_bucket}`); `machine_tracing_enabled` (the deployed state machine's `tracingConfiguration.enabled` is true); `machine_allows_{GetSamplingRules,GetSamplingTargets,PutTelemetryRecords,PutTraceSegments}` for the four SFN-XRAY-1 X-Ray actions on `*`, and `machine_denies_{BatchGetTraces,PutEncryptionConfig}` for X-Ray actions outside it. `--live-once --i-understand-this-is-billable` is the single live sweep, gated on a matching `--retention-verdict` | its own MFA-enrolled admin user with `full_visibility`, ID token. The completed stub run's `status` carries `tier_comparison_table` with one column per arm and no `Delegation outcome` row in its Subagent section (`subagent_table_has_no_delegation_outcome_rows`), and `artefact_url` with `download: true` serves `matrix_md` as an attachment with the same bytes |
 | `smoke/admin_authz.py` | the eval run API's admin-only operations: no token refused; the admin group exists and the admin token carries it; a non-admin's `submit {mode: live, confirmed: false}`, `cancel` and `unlock` each return 403 `eval:admin`; an admin `cancel` of a terminal run returns `already_terminal` and changes nothing | two MFA-enrolled users it provisions, an admin and a non-admin with `full_visibility` |
 | `smoke/user_settings_api.py` | `POST /api/user_settings` keeps each user's tuning their own: defaults on `config/models.yaml`'s `default_family` before a save; a valid schema-3 `put` reads back; a `put` carrying `temperature` or naming a model no longer configured is 400 with the row unchanged; `GET /api/capabilities` names every `config/models.yaml` model and carries no `temperature`, and its `tiers.<family>.supervisor.tuning.effort` equals `config/models.yaml`'s (one `capabilities_supervisor_effort:<family>` row per configured family); the served defaults match the config: `capabilities_default_family`, `capabilities_tier_model:<family>:<tier>` and `capabilities_tier_effort:<family>:<tier>` per configured cell, and `capabilities_assignable_tiers:<model>` and `capabilities_selectable:<model>` per `config/model_capabilities.yaml` model (Opus and Astra included); another user in the same tenant still sees defaults; a `put` naming another `rep_id` and an unsupported effort are 400 `validation_failed` with nothing changed; `reset` restores the defaults on the default family; least-privilege simulations for the `user-settings` role | two MFA-enrolled users under one tenant it provisions, each with a distinct run-scoped username |
-| `smoke/mcp_chat_gateway.py` | Gateway #2 exposes only `chat_with_supervisor` behind its JWT: no token is 401; a token whose signature is replaced is refused (401 or 403, with no `tools/list` result) while the same claims unaltered are answered; the chat-scoped user token is refused on Gateway #1 and a `gateway/invoke`-only token on Gateway #2; a user call and a `client_credentials` call are answered; a call carrying a `temperature` argument returns `isError` `invalid_request` with no answer or conversation id; another user's `conversation_id`, with or without a forged `_agent_identity`, is refused (`isError`, `error_kind` read from the MCP `result`). Two model-backed turns. Each smoke principal's `conversation#` items are found by owner, deleted and re-read | two users and the service principal it provisions |
+| `smoke/mcp_chat_gateway.py` | Gateway #2 exposes only `chat_with_supervisor` behind its JWT: no token is 401; a token whose signature is replaced is refused (401 or 403, with no `tools/list` result) while the same claims unaltered are answered; the chat-scoped user token is refused on Gateway #1 and a `gateway/invoke`-only token on Gateway #2; a user call and a `client_credentials` call are answered; a call carrying a `temperature` argument returns `isError` `invalid_request` with no answer or conversation id; another user's `conversation_id`, with or without a forged `_agent_identity`, is refused (`isError`, `error_kind` read from the MCP `result`). Two model-backed turns. Each smoke principal's `conversation#` items are found by owner, deleted and re-read, and each answered call's history item, under that caller's tenant (user A's and the service principal's), is deleted and re-read as absent (`history_items_deleted`) | two users and the service principal it provisions |
 | `smoke/mcp_client_compat.py` | Both Gateways work from the real `mcp` Python SDK client (`streamable_http_client` + `ClientSession`): Gateway #1 with a machine token completes `initialize` → `notifications/initialized` → `tools/list`, its names (target prefix stripped) equal the toolspec, and one read-only `get_account` answers; Gateway #2 with a user token lists exactly `chat_with_supervisor` (no `tools/call`, which is model-backed and owned by `mcp_chat_gateway`); an unauthenticated SDK connect is 401 on each; Gateway #2's OAuth discovery chain holds (401 `WWW-Authenticate` `resource_metadata` → RFC 9728 document naming the pool issuer and exactly `supervisor/chat` → issuer OpenID configuration → an S256 authorization-code request for `cognito_mcp_oauth_client_id` redirects to the login page, not to the callback with an `error`); the same request for `gateway/invoke` is refused `invalid_scope`; the Gateway #2 user token is refused 401/403 by Gateway #1. No model call | the service principal and the user it provisions |
 
 `integration_ui_api_ddb`, `integration_gateway_scope` and `integration_proposal_chain` also publish `demo_tenant_untouched` (row counts
@@ -709,9 +789,9 @@ Modules in `LAYER_6_MODULES`, each with the flag `verify_deployment.sh` passes:
 
 | Script | Asserts |
 |---|---|
-| `scripts/smoke_agent_stream.py --assert-incremental` | a chat turn through CloudFront `/agent/*` is delivered incrementally (the arrival spread clears `_MIN_SPREAD_SECONDS` and the lead-in fraction stays at or below `_MAX_LEAD_IN_FRACTION`); the largest arrival gap follows a `tool_call` or `tool_result` event (`arrival_gap_aligns_with_tool_dispatch`; this does not establish where any coalescing of later frames happens); every `text_delta` frame arrives before the turn's single `completed` frame (`text_delta_frames_arrive_before_completed`); a `START RequestId` for the dispatched Lambda in CloudWatch (`lambda_dispatch_observed`, `defer` while logs are not yet indexed); the Runtime does not answer from the stub provider |
-| `scripts/smoke_proposal_card.py` | a model-driven chat turn's high-risk write reaches the user as a structured `proposal` event (a prose rendition fails the same discriminator); nothing mutates and no audit record exists while pending; the card's `before` matches the live row and every `after` field is inside the payload allowlist; approving its proposal commits the change and writes exactly one audit record. A stub-shaped turn defers the card rows (`stub_provider_cannot_request_a_high_risk_write`) and the proposal is then raised through the API's `submit_proposal`, so the pending and approval rows still run |
-| `scripts/smoke_text_delta_stream.py` | two turns run concurrently under distinct session ids; each carries exactly one `completed` frame, and their `text_delta` `event_id`s are disjoint and each carries its own session id (`concurrent_sessions_completed`, `concurrent_sessions_distinct_event_ids`) |
+| `scripts/smoke_agent_stream.py --assert-incremental` | a chat turn through CloudFront `/agent/*` is delivered incrementally (the arrival spread clears `_MIN_SPREAD_SECONDS` and the lead-in fraction stays at or below `_MAX_LEAD_IN_FRACTION`); the largest arrival gap follows a `tool_call` or `tool_result` event (`arrival_gap_aligns_with_tool_dispatch`; this does not establish where any coalescing of later frames happens); every `text_delta` frame arrives before the turn's single `completed` frame (`text_delta_frames_arrive_before_completed`); a `START RequestId` for the dispatched Lambda in CloudWatch (`lambda_dispatch_observed`, `defer` while logs are not yet indexed); the Runtime does not answer from the stub provider; `history_items_deleted`: every session the module's turns used has its history item (`history#<tenant>#<session_id>`) deleted in its `finally` and re-read as absent |
+| `scripts/smoke_proposal_card.py` | a model-driven chat turn's high-risk write reaches the user as a structured `proposal` event (a prose rendition fails the same discriminator); nothing mutates and no audit record exists while pending; the card's `before` matches the live row and every `after` field is inside the payload allowlist; approving its proposal commits the change and writes exactly one audit record. A stub-shaped turn defers the card rows (`stub_provider_cannot_request_a_high_risk_write`) and the proposal is then raised through the API's `submit_proposal`, so the pending and approval rows still run; `history_items_deleted`: every session the module's turns used has its history item (`history#<tenant>#<session_id>`) deleted in its `finally` and re-read as absent (always emitted; `defer` when no turn was sent) |
+| `scripts/smoke_text_delta_stream.py` | two turns run concurrently under distinct session ids; each carries exactly one `completed` frame, and their `text_delta` `event_id`s are disjoint and each carries its own session id (`concurrent_sessions_completed`, `concurrent_sessions_distinct_event_ids`); `history_items_deleted`: every session the module's turns used has its history item (`history#<tenant>#<session_id>`) deleted in its `finally` and re-read as absent |
 
 These scripts provision their own disposable tenant and Cognito user, prove `demo` untouched, and
 delete what they create. Their turns reach the deployed Runtime's live model provider, so they are
@@ -725,6 +805,28 @@ PATH=.venv/bin:$PATH python3 scripts/smoke_agent_stream.py --assert-incremental 
   --profile default --region <region> --json > results/verification-inventory/agent_stream.json
 ```
 
+### Whole-run check: smoke conversation history
+
+After the last layer that ran, also on a failing or PARTIAL run, `verify_deployment.sh` runs
+`python3 -m scripts.smoke.history_cleanup` with the same arguments as a module. It makes a strongly
+consistent scan of `reps` for keys beginning `history#eval-smoke-`, deletes and re-reads every item
+it finds, and reports one row, `no_smoke_history_left_after_run` (resource `reps`), from the
+`smoke_history_residue` module at layer 0 of the run inventory. Any item found fails the row and the run,
+after it has been deleted, so the next run starts clean. The check is not a layer module: it is not
+selectable with `--only` and is absent from a PARTIAL run's ran and did-not-run lists. A dry run
+shows it on a `would run after the layers:` line. Run it alone with:
+
+```bash
+.venv/bin/python3 -m scripts.smoke.history_cleanup --profile <profile> --region <region> --json
+```
+
+It deletes every `history#eval-smoke-*` item, not only the current run's, so two verify runs against
+one stack at the same time interfere; run them one after another.
+
+A failing provision, teardown or table-prefix step, or a failing `smoke_token` subcommand, prints
+one `<step>: <ExceptionType>: <detail>` line on stderr, with an AWS error named by its code only,
+never a Python traceback.
+
 A deployed eval sweep runs in the `eval_sweep` Step Functions state machine, started through
 `POST /api/eval_trigger` (the Evals page, or `smoke/eval_sfn.py`). A sweep runs `repeats` from 1 to
 `MAX_SWEEP_REPEATS` (`src/eval/runs.py`), default 1, and each (arm, repeat) unit runs in its own
@@ -735,7 +837,7 @@ unit tenant. Layer 5's `eval_sfn`
 rehearses it in stub mode. One live sweep is `eval_sfn --live-once --i-understand-this-is-billable
 --retention-verdict=<mode>` (see "Data retention").
 
-Stored results carry `record_shape_version` 3. A run recorded before that format still appears in
+Stored results carry `record_shape_version` 4. A run recorded in an earlier shape, 3 included, still appears in
 the Evals page history with its status, times and spend, and shows "Recorded in an earlier format;
 its results are not shown." in place of its tables and artifacts. Its status payload carries
 `record_format: "earlier"` and no `matrix`, `tier_comparison_table` or `artifacts`. Offline,
@@ -766,9 +868,23 @@ in-scope key (allowed) and a `demo` key and a uuid (denied), and each removed ac
 
 `src.eval.harness` still runs a sweep in-process, for local and stub use; see
 [`docs/eval-methodology.md`](eval-methodology.md). `--live` without `EVAL_SUBSTRATE=live-aws` (or `--substrate live-aws`)
-exits 2, and a live-AWS sweep needs `ACTION_LAMBDA_PREFIX=crm-agent-eval` and
-`CRM_TABLE_PREFIX=crm-agent-eval`. Without the Lambda prefix the model call succeeds and every tool
-dispatch fails with `ResourceNotFoundException`.
+exits 2, a live sweep requires a positive `--max-cost-usd`, and a live-AWS sweep needs
+`ACTION_LAMBDA_PREFIX=crm-agent-eval` and `CRM_TABLE_PREFIX=crm-agent-eval`:
+
+```bash
+EVAL_SUBSTRATE=live-aws CRM_TABLE_PREFIX=crm-agent-eval ACTION_LAMBDA_PREFIX=crm-agent-eval \
+  .venv/bin/python3 -m src.eval.harness --live --assert-artifacts --max-cost-usd <usd>
+```
+
+Without the Lambda prefix the model call succeeds and every tool dispatch fails with
+`ResourceNotFoundException`.
+
+The cost cap is checked before each task; when the next task could take spend past it, the sweep
+stops, tears every tenant down and exits 4. A sweep that ends early (cost cap, unrecoverable error
+or signal) writes no `matrix.md`; it leaves the finished units' task snapshots and
+`partial/partial-run.json` under the output directory. `--help` prints the full exit-code table;
+[`docs/eval-methodology.md`](eval-methodology.md) ("Cost cap", "Partial results", "Exit codes")
+describes each.
 
 ### T4 browser journeys in the Playwright container
 
@@ -807,6 +923,11 @@ The script sets no `channel`, `headless` or `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` o
 On success it prints `check-executed: OK — <n> executed, <m> declared skip(s)`. Because the report is
 removed before each run, `--list` passed through this script writes no report and fails; run
 `./node_modules/.bin/playwright test --list` directly in `tests/e2e/browser/` for collection only.
+
+Copy `results/e2e-browser.json` somewhere else as soon as a run ends. The JSON reporter writes that
+path on every `playwright test` invocation, `--list` included, and `make verify` runs
+`playwright test --list` (`test-journeys-static`), so the next host `make verify` or listing replaces
+the run's report with a test listing.
 
 Set `CRM_E2E_ADMIN_EMAIL`/`CRM_E2E_ADMIN_PASSWORD` (the `--admin` user from "Bringing up the UI") for
 the admin journeys. Journeys 15 and 16 each hold one test that starts (and in 16 cancels) a real,
@@ -1302,8 +1423,14 @@ the model with them. Eval turns do not use it.
 **Resume and replay.** A chat turn's request carries `session_id` and `resume_from`, the number of
 frames the client has already applied. The Runtime replays a session's recorded frames only when the
 request also carries `"resume": true` and `resume_from` is below the session's last frame; otherwise
-it runs a fresh turn, whatever `resume_from` says. The SPA sends `resume` only from its automatic
-reconnect and from the retry button; a follow-up never sends it. The relay forwards `resume` only
+it runs a fresh turn, whatever `resume_from` says. A `resume: true` it cannot replay (nothing
+recorded for the session, a `resume_from` at or past the last frame, or a negative one) first streams
+one unrecorded `replay_unavailable` frame, logs `resume_replay_unavailable` with its `reason`
+(`nothing_recorded`, `caught_up` or `invalid_cursor`), then runs the turn fresh; it never refuses.
+The session store is in the microVM's memory, so a resume that reaches a recycled microVM gets this
+frame too. The SPA then restarts the answer from that frame and shows a status note
+(`assistant-replay-unavailable`) until the next message is sent. The SPA sends `resume` only from its
+automatic reconnect and from the retry button; a follow-up never sends it. The relay forwards `resume` only
 when it is exactly the JSON boolean `true`. A Gateway `chat_with_supervisor` follow-up sends no
 `resume_from` and runs as a fresh turn with the session's history.
 

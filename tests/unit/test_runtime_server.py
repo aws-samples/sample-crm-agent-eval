@@ -2,8 +2,8 @@
 """Tests for the AgentCore Runtime HTTP adapter, `agents.runtime_server.app`.
 
 Covers `GET /ping`, `POST /invocations` SSE streaming and its typed error mapping, identity
-channels, the isolation-probe, delegation and cancel modes, and proposal rendering. Uses
-:class:`starlette.testclient.TestClient` with fake providers and no AWS call.
+channels, the isolation-probe and cancel modes, and the retired `delegation` mode taking the turn
+path. Uses :class:`starlette.testclient.TestClient` with fake providers and no AWS call.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Final
 
@@ -22,11 +22,13 @@ import agents.runtime_server as runtime_server
 import crm.dispatch as crm_dispatch
 from agents.cancellation import InMemoryCancellationStore, SessionOwner
 from agents.conversation_history import InMemoryConversationHistory
-from agents.registry import RegisteredTool
+from agents.registry import RegisteredTool, tool_registry_for
 from agents.runtime_entrypoint import (
     InMemorySessionStore,
     resolve_identity,
 )
+from agents.supervisor import SUPERVISOR_ROLE
+from agents.tool_dispatch import dispatch_tool_call
 from crm.authz import DEMO_TENANT
 from crm.envelope import (
     AGENT_IDENTITY_KEY,
@@ -940,7 +942,7 @@ def test_a_payload_without_the_probe_mode_still_takes_the_turn_path(
 class _StubAccountStore:
     """A minimal `crm.store.store.Store` stand-in for `get_account`'s two reads.
 
-    Returns one account under `tenant` and no contacts, so `_dispatch_tool_call` reaches
+    Returns one account under `tenant` and no contacts, so `dispatch_tool_call` reaches
     `require_scope`.
     """
 
@@ -961,7 +963,7 @@ class _StubAccountStore:
 
 def _get_account_tool() -> RegisteredTool:
     """Return the real registered `get_account` tool, from the registry rather than a literal."""
-    for tool in runtime_server._all_tools():
+    for tool in tool_registry_for(SUPERVISOR_ROLE):
         if tool.name == "get_account":
             return tool
     raise AssertionError("get_account is not a registered tool")
@@ -1003,7 +1005,7 @@ class _FakeLambdaClient:
 
 
 def _install_fake_lambda(monkeypatch: pytest.MonkeyPatch, store: object) -> _FakeLambdaClient:
-    """Point `_dispatch_tool_call` at a `_FakeLambdaClient` and set the function-name prefix."""
+    """Point `dispatch_tool_call` at a `_FakeLambdaClient` and set the function-name prefix."""
     client = _FakeLambdaClient(store)
     monkeypatch.setattr(crm_dispatch, "lambda_client", lambda: client)
     monkeypatch.setenv("ACTION_LAMBDA_PREFIX", "crm-agent-eval")
@@ -1021,9 +1023,7 @@ def test_dispatch_tool_call_authorises_an_in_app_agent_tool_call(
     store = _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
     _install_fake_lambda(monkeypatch, store)
 
-    result = runtime_server._dispatch_tool_call(
-        _get_account_tool(), {"account_id": "acc-1"}, identity=identity
-    )
+    result = dispatch_tool_call(_get_account_tool(), {"account_id": "acc-1"}, identity=identity)
 
     assert result.get("error", {}).get("code") != "authentication_failed"
     assert result["statusCode"] == 200
@@ -1038,9 +1038,7 @@ def test_dispatch_tool_call_forwards_the_book_without_widening_it(
     store = _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-9")
     _install_fake_lambda(monkeypatch, store)
 
-    result = runtime_server._dispatch_tool_call(
-        _get_account_tool(), {"account_id": "acc-9"}, identity=identity
-    )
+    result = dispatch_tool_call(_get_account_tool(), {"account_id": "acc-9"}, identity=identity)
 
     assert result["error"]["code"] == "scope_denied"
 
@@ -1052,7 +1050,7 @@ def test_dispatch_tool_call_uses_the_agent_channel_and_never_the_gateway_channel
     store = _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
     client = _install_fake_lambda(monkeypatch, store)
 
-    runtime_server._dispatch_tool_call(
+    dispatch_tool_call(
         _get_account_tool(),
         {"account_id": "acc-1"},
         identity=_agent_identity(tenant="eval-smoke-unit", book=frozenset({"acc-1"})),
@@ -1087,7 +1085,7 @@ def test_dispatch_tool_call_reports_an_unhandled_function_error_as_a_typed_paylo
     monkeypatch.setattr(crm_dispatch, "lambda_client", lambda: _ErroringClient())
     monkeypatch.setenv("ACTION_LAMBDA_PREFIX", "crm-agent-eval")
 
-    result = runtime_server._dispatch_tool_call(
+    result = dispatch_tool_call(
         _get_account_tool(),
         {"account_id": "acc-1"},
         identity=_agent_identity(tenant="eval-smoke-unit", book=frozenset({"acc-1"})),
@@ -1195,36 +1193,6 @@ def test_the_turn_path_refuses_a_body_supplied_identity_channel(
     assert response.json()["error"]["code"] == "authentication_failed"
 
 
-@pytest.mark.parametrize(
-    "channel", [IDENTITY_KEY, REQUEST_CONTEXT_KEY], ids=["gateway_channel", "apigw_channel"]
-)
-def test_delegation_mode_refuses_a_body_supplied_identity_channel(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, channel: str
-) -> None:
-    """Delegation mode refuses a forged identity with a `401` and invokes no action Lambda."""
-    store = _StubContactStore(
-        tenant=DEMO_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    fake = _install_fake_lambda(monkeypatch, store)
-    forged = (
-        dict(_FORGED_GATEWAY_IDENTITY) if channel == IDENTITY_KEY else dict(_FORGED_APIGW_CONTEXT)
-    )
-
-    response = client.post(
-        "/invocations",
-        json={
-            "mode": "delegation",
-            "tool_name": "draft_message",
-            "tool_input": {"contact_id": "cont-1", "intent": "follow up"},
-            channel: forged,
-        },
-    )
-
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "authentication_failed"
-    assert fake.invocations == []
-
-
 def test_the_isolation_probe_refuses_a_body_supplied_identity_channel(client: TestClient) -> None:
     """The isolation probe refuses a body-supplied identity with a `401`."""
     response = client.post(
@@ -1237,39 +1205,6 @@ def test_the_isolation_probe_refuses_a_body_supplied_identity_channel(client: Te
     )
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "authentication_failed"
-
-
-def test_a_body_supplied_identity_cannot_widen_an_authenticated_callers_scope(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A legitimate caller adding a forged identity block cannot widen the dispatched claims."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    fake = _install_fake_lambda(monkeypatch, store)
-
-    response = client.post(
-        "/invocations",
-        json=_authed(
-            {
-                "mode": "delegation",
-                "tool_name": "draft_message",
-                "tool_input": {"contact_id": "cont-1", "intent": "follow up"},
-                IDENTITY_KEY: dict(_FORGED_GATEWAY_IDENTITY),
-                "requestContext": dict(_FORGED_APIGW_CONTEXT),
-            },
-            _delegation_claims(book="acc-1"),
-        ),
-    )
-
-    assert response.status_code == 200
-    assert len(fake.invocations) == 1
-    dispatched = fake.invocations[0]["event"]
-    assert IDENTITY_KEY not in dispatched
-    claims = dispatched[AGENT_IDENTITY_KEY]["claims"]
-    assert claims[CLAIM_REP_ID] == "rep-1"
-    assert claims[CLAIM_TENANT] == _DELEGATION_TENANT
-    assert claims["custom:full_visibility"] is False
 
 
 def test_the_offline_identity_seam_is_unreachable_over_http(client: TestClient) -> None:
@@ -1434,432 +1369,173 @@ def test_configure_logging_honours_log_level_and_ignores_a_bogus_value(
         root.setLevel(saved_level)
 
 
-# --------------------------------------------------------------------------------------
-# The delegation mode: real routing, real dispatch, real classification
-# --------------------------------------------------------------------------------------
+# ================================================================================================
+# A retired `mode` value has no handler of its own
+# ================================================================================================
 
-_DELEGATION_TENANT = "eval-smoke-unit"
+_RETIRED_MODE: Final[str] = "delegation"
+_UNRECOGNISED_MODE: Final[str] = "no_such_mode"
+
+#: The fields a retired-mode caller sent: a tool to call and its arguments, with no prompt.
+_RETIRED_MODE_FIELDS: dict[str, Any] = {
+    "tool_name": "get_account",
+    "tool_input": {"account_id": "acc-1"},
+}
 
 
-class _StubContactStore:
-    """A `crm.store.store.Store` stand-in for `draft_message`'s single contact read.
+def _never_a_provider(*_a: object) -> ModelProvider:
+    raise AssertionError("a body with no prompt must be refused before a provider is built")
 
-    `draft_message` is a composer-only tool, so it is genuinely delegated. Returns one contact under
-    `tenant` whose `account_id` decides the `require_scope` outcome.
+
+def _outcome(response: Any) -> tuple[int, str, object]:
+    """Reduce a response to its status, media type and payload: SSE event kinds or the JSON body."""
+    media_type = response.headers["content-type"].split(";")[0]
+    if media_type == "text/event-stream":
+        events = _parse_sse_events(response.text)
+        return response.status_code, media_type, [(e["kind"], e.get("error_kind")) for e in events]
+    return response.status_code, media_type, response.json()
+
+
+def _post_mode(client: TestClient, mode: str, payload: dict[str, Any]) -> tuple[int, str, object]:
+    return _outcome(client.post("/invocations", json={runtime_server._MODE_KEY: mode, **payload}))
+
+
+def test_a_retired_delegation_body_is_refused_exactly_like_an_unrecognised_mode(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `delegation` body naming a tool and no prompt gets the turn path's one-`error` stream.
+
+    No action Lambda is invoked and no provider is built, as for any unrecognised mode.
     """
-
-    def __init__(self, *, tenant: str, contact_id: str, account_id: str, name: str) -> None:
-        self._tenant = tenant
-        self._contact_id = contact_id
-        self._account_id = account_id
-        self._name = name
-
-    def get_item(self, table: str, key: dict[str, str]) -> dict[str, object] | None:
-        del table
-        if key.get("contact_id") != self._contact_id:
-            return None
-        return {
-            "contact_id": self._contact_id,
-            "tenant": self._tenant,
-            "account_id": self._account_id,
-            "name": self._name,
-        }
-
-
-def _delegation_claims(*, book: str, tenant: str = _DELEGATION_TENANT) -> dict[str, Any]:
-    """The claims a live delegation caller's identity block carries."""
-    return {
-        CLAIM_REP_ID: "rep-1",
-        "custom:book": book,
-        CLAIM_TENANT: tenant,
-        "custom:full_visibility": "false",
-    }
-
-
-def _delegate(
-    client: TestClient,
-    *,
-    tool_name: str,
-    tool_input: dict[str, Any],
-    book: str,
-) -> Any:
-    """POST one authenticated delegation request and return the response."""
-    return client.post(
-        "/invocations",
-        json=_authed(
-            {"mode": "delegation", "tool_name": tool_name, "tool_input": tool_input},
-            _delegation_claims(book=book),
-        ),
+    monkeypatch.setattr(runtime_server, "_model_provider", _never_a_provider)
+    fake = _install_fake_lambda(
+        monkeypatch, _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
     )
 
+    retired = _post_mode(client, _RETIRED_MODE, _authed(_RETIRED_MODE_FIELDS))
+    unrecognised = _post_mode(client, _UNRECOGNISED_MODE, _authed(_RETIRED_MODE_FIELDS))
 
-def test_resolve_delegation_role_routes_a_subagent_tool_and_leaves_a_direct_tool_undelegated() -> (
-    None
-):
-    """A supervisor-direct tool resolves to `None`; any other resolves to its first owning subagent.
-
-    The order is `ALL_SUBAGENT_SPECS`'s.
-    """
-    from agents.subagents import ALL_SUBAGENT_SPECS
-    from agents.supervisor import DIRECT_TOOL_NAMES
-
-    for direct in sorted(DIRECT_TOOL_NAMES):
-        assert runtime_server.resolve_delegation_role(direct) is None
-
-    assert "draft_message" not in DIRECT_TOOL_NAMES
-    assert runtime_server.resolve_delegation_role("draft_message") == "composer"
-    assert runtime_server.resolve_delegation_role("update_opportunity") == "mutation"
-    assert runtime_server.resolve_delegation_role("log_activity") == "mutation"
-
-    # Every research read tool is also granted to `supervisor` by the toolspec, so it is answered
-    # directly and never delegated.
-    for research_read in ("get_account", "get_contact", "list_activities", "search_opportunities"):
-        assert research_read in DIRECT_TOOL_NAMES
-        assert runtime_server.resolve_delegation_role(research_read) is None
-
-    # Every resolved role is a real subagent role, never an invented name.
-    roles = {spec.role for spec in ALL_SUBAGENT_SPECS}
-    for tool in runtime_server._all_tools():
-        resolved = runtime_server.resolve_delegation_role(tool.name)
-        assert resolved is None or resolved in roles
+    assert retired == unrecognised
+    status, media_type, kinds = retired
+    assert (status, media_type) == (200, "text/event-stream")
+    assert isinstance(kinds, list) and [kind for kind, _ in kinds] == ["error"]
+    assert fake.invocations == []
 
 
-def test_delegation_mode_refuses_an_unauthenticated_caller(client: TestClient) -> None:
-    """There is no unauthenticated delegation route: identity resolves before any dispatch."""
-    response = client.post(
-        "/invocations", json={"mode": "delegation", "tool_name": "get_account", "tool_input": {}}
-    )
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "authentication_failed"
-
-
-def test_delegation_mode_rejects_an_unknown_tool(client: TestClient) -> None:
-    """An unrecognised tool is a typed 400, never a dispatch against a guessed function name."""
-    response = _delegate(client, tool_name="not_a_real_tool", tool_input={}, book="acc-1")
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "validation_failed"
-
-
-def test_delegation_mode_routes_to_the_owning_subagent_and_dispatches_for_real(
+def test_a_retired_delegation_body_with_a_prompt_runs_an_ordinary_turn(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The caller names only a tool; the server decides the role and really invokes the Lambda."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    fake = _install_fake_lambda(monkeypatch, store)
-
-    response = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-1", "intent": "follow up"},
-        book="acc-1",
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["delegated"] is True
-    assert body["delegation"]["role"] == "composer"
-    assert body["delegation"]["tool_name"] == "draft_message"
-    assert body["direct_tool"] is None
-    assert body["outcome"]["kind"] == "data"
-    assert body["tool_result"]["statusCode"] == 200
-    assert body["reported_result"]["contact_id"] == "cont-1"
-    # The dispatch was a real invoke of the physical action function, not an in-process import.
-    assert [i["function_name"] for i in fake.invocations] == ["crm-agent-eval-draft_message"]
-
-
-def test_delegation_mode_surfaces_a_real_scope_denial_as_denied_naming_the_missing_scope(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An out-of-book target on an existing record is `denied`, naming the missing scope."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-9", account_id="acc-9", name="Grace"
-    )
-    _install_fake_lambda(monkeypatch, store)
-
-    response = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-9", "intent": "follow up"},
-        book="acc-1",
-    )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["tool_result"]["statusCode"] == 403
-    assert body["tool_result"]["error"]["code"] == "scope_denied"
-    assert body["outcome"]["kind"] == "denied"
-    assert body["outcome"]["missing_scope"] == "account:acc-9"
-    assert body["outcome"]["missing_scope"] in body["reply_text"]
-
-
-def test_delegation_mode_never_reports_a_denial_as_data_or_as_an_empty_result(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No fabrication: a denial carries no `reported_result` at all, and is never `no_match`."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-9", account_id="acc-9", name="Grace"
-    )
-    _install_fake_lambda(monkeypatch, store)
-
-    body = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-9", "intent": "follow up"},
-        book="acc-1",
-    ).json()
-
-    assert body["reported_result"] is None
-    assert body["outcome"]["kind"] not in {"data", "no_match"}
-    assert body["outcome"]["error_message"] is None
-
-
-def test_delegation_mode_distinguishes_a_denial_from_a_not_found(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A nonexistent target is `no_match`/404, never reported as a scope denial."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    _install_fake_lambda(monkeypatch, store)
-
-    body = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-absent", "intent": "follow up"},
-        book="acc-1",
-    ).json()
-
-    assert body["tool_result"]["statusCode"] == 404
-    assert body["tool_result"]["error"]["code"] == "not_found"
-    assert body["outcome"]["kind"] == "no_match"
-    assert body["outcome"]["missing_scope"] is None
-
-
-def test_delegation_mode_dispatches_on_the_agent_channel_and_never_the_gateway_channel(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Delegation dispatches on `_agent_identity` and never writes `_identity`."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    fake = _install_fake_lambda(monkeypatch, store)
-
-    _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-1", "intent": "follow up"},
-        book="acc-1",
-    )
-
-    event = fake.invocations[0]["event"]
-    assert AGENT_IDENTITY_KEY in event
-    assert IDENTITY_KEY not in event
-    assert decode_identity(event).source == "agent"
-
-
-def test_delegation_mode_forwards_the_book_without_widening_it(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The forwarded book is the caller's own: a two-account book still denies a third account."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-9", account_id="acc-9", name="Grace"
-    )
-    fake = _install_fake_lambda(monkeypatch, store)
-
-    body = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-9", "intent": "follow up"},
-        book="acc-1,acc-2",
-    ).json()
-
-    assert body["outcome"]["kind"] == "denied"
-    forwarded = fake.invocations[0]["event"][AGENT_IDENTITY_KEY]["claims"]["custom:book"]
-    assert sorted(forwarded) == ["acc-1", "acc-2"]
-
-
-def test_delegation_mode_reports_a_dispatch_failure_as_a_typed_error_without_leaking_detail(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A transport failure reaching the Lambda is a typed taxonomy response, not a traceback."""
-
-    def _raising_client() -> Any:
-        raise RuntimeError("boom: arn:aws:lambda:us-east-1:123456789012:function:secret-name")
-
-    monkeypatch.setattr(crm_dispatch, "lambda_client", _raising_client)
-    monkeypatch.setenv("ACTION_LAMBDA_PREFIX", "crm-agent-eval")
-
-    response = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-1", "intent": "follow up"},
-        book="acc-1",
-    )
-
-    assert response.status_code == 500
-    payload = response.json()
-    assert "detail" not in payload["error"]
-    assert "boom" not in json.dumps(payload)
-
-
-def test_delegation_mode_invokes_no_model_provider_and_builds_no_runtime_store(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Delegation calls no model provider and constructs no `Store` inside the Runtime."""
-
-    def _fail_provider(*_a: object) -> Any:
-        raise AssertionError("the delegation path must never resolve a model provider")
-
-    def _fail_store() -> Any:
-        raise AssertionError("the delegation path must never construct a Store")
-
-    monkeypatch.setattr(runtime_server, "_model_provider", _fail_provider)
-    monkeypatch.setattr(runtime_server, "_record_store", _fail_store)
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    _install_fake_lambda(monkeypatch, store)
-
-    response = _delegate(
-        client,
-        tool_name="draft_message",
-        tool_input={"contact_id": "cont-1", "intent": "follow up"},
-        book="acc-1",
-    )
-    assert response.status_code == 200
-
-
-def test_a_payload_without_the_delegation_mode_still_takes_the_turn_path(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The delegation mode is strictly additive: a normal payload is unaffected by it."""
+    """With a prompt, a `delegation` body streams the same turn as an unrecognised mode."""
     monkeypatch.setattr(runtime_server, "_model_provider", lambda *_a: _TextOnlyProvider())
-    response = client.post("/invocations", json=_TURN_REQUEST)
-    assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
+    fake = _install_fake_lambda(
+        monkeypatch, _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
+    )
+    fields = {**_RETIRED_MODE_FIELDS, **_TURN_PAYLOAD}
 
+    retired = _post_mode(client, _RETIRED_MODE, _authed(fields))
+    runtime_server._session_store = InMemorySessionStore()
+    runtime_server._history_store = InMemoryConversationHistory()
+    unrecognised = _post_mode(client, _UNRECOGNISED_MODE, _authed(fields))
 
-# ================================================================================================
-# A high-risk write reaches the caller as a structured `proposal` event, never as prose
-# ================================================================================================
-
-
-def _submit_proposal_result(
-    *, proposal_id: str = "prop-1", before: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Build the wire response the deployed `submit_proposal` action Lambda returns on success."""
-    return {
-        "statusCode": 200,
-        "body": {
-            "proposal": {
-                "proposal_id": proposal_id,
-                "before_snapshot": before if before is not None else {"stage": "Discovery"},
-                "after_payload": {"stage": "Negotiation"},
-                "reason": "advance the stage",
-                "target_table": "opportunities",
-                "target_id": "opp-1",
-            }
-        },
-    }
-
-
-def _fixed_dispatch(result: dict[str, Any]) -> Callable[..., dict[str, Any]]:
-    """Return a `_dispatch_tool_call` stand-in answering `result` for whatever tool is called."""
-
-    def _dispatch(
-        tool: RegisteredTool, tool_input: dict[str, object], *, identity: Identity
-    ) -> dict[str, Any]:
-        del tool, tool_input, identity
-        return result
-
-    return _dispatch
-
-
-def test_proposal_event_or_none_renders_a_submit_proposal_result_as_a_structured_event() -> None:
-    """The card payload comes from the handler's own before/after, not from prose about it."""
-    event = runtime_server.proposal_event_or_none(_submit_proposal_result())
-    assert event is not None
-    assert event.kind == "proposal"
-    assert event.proposal_id == "prop-1"
-    assert event.proposal_summary is not None
-    assert event.proposal_summary["before"] == {"stage": "Discovery"}
-    assert event.proposal_summary["after"] == {"stage": "Negotiation"}
+    assert retired == unrecognised
+    status, media_type, kinds = retired
+    assert (status, media_type) == (200, "text/event-stream")
+    assert isinstance(kinds, list) and kinds[-1][0] == "completed"
+    assert fake.invocations == []
 
 
 @pytest.mark.parametrize(
-    "tool_output",
+    "identity_fields",
     [
-        {"statusCode": 200, "body": {"opportunity": {"opportunity_id": "opp-1"}}},
-        {"error": {"code": "validation_failed", "message": "no"}},
-        {"statusCode": 200, "body": {}},
+        {},
+        {IDENTITY_KEY: dict(_FORGED_GATEWAY_IDENTITY)},
+        {REQUEST_CONTEXT_KEY: dict(_FORGED_APIGW_CONTEXT)},
     ],
+    ids=["no_identity", "gateway_channel", "apigw_channel"],
 )
-def test_proposal_event_or_none_returns_none_when_no_proposal_was_raised(
-    tool_output: dict[str, Any],
+def test_a_retired_delegation_body_without_a_valid_identity_is_refused_like_any_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, identity_fields: dict[str, Any]
 ) -> None:
-    """Every other tool result is untouched: the rendering is additive, never speculative."""
-    assert runtime_server.proposal_event_or_none(tool_output) is None
+    """An unauthenticated or forged-identity `delegation` body gets the turn path's `401`."""
+    monkeypatch.setattr(runtime_server, "_model_provider", _never_a_provider)
+    fake = _install_fake_lambda(
+        monkeypatch, _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
+    )
+    payload = {**_RETIRED_MODE_FIELDS, **identity_fields}
+
+    retired = _post_mode(client, _RETIRED_MODE, payload)
+
+    assert retired == _post_mode(client, _UNRECOGNISED_MODE, payload)
+    status, _media_type, body = retired
+    assert status == 401
+    assert isinstance(body, dict) and body["error"]["code"] == "authentication_failed"
+    assert fake.invocations == []
 
 
-def test_proposal_event_or_none_raises_on_a_proposal_it_cannot_render() -> None:
-    """A malformed proposal is reported, never papered over with a placeholder id or summary."""
-    with pytest.raises(ValueError, match="proposal_id"):
-        runtime_server.proposal_event_or_none({"statusCode": 200, "body": {"proposal": {}}})
+class _GetAccountThenAnswer(ModelProvider):
+    """Calls `get_account` for `acc-1` directly, then answers with fixed text."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def stream(
+        self,
+        invocation: ResolvedInvocation,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ProviderEvent]:
+        self.calls += 1
+        return self._emit(first=self.calls == 1)
+
+    async def _emit(self, *, first: bool) -> AsyncIterator[ProviderEvent]:
+        if first:
+            yield ProviderEvent(
+                type="tool_call",
+                tool_name="get_account",
+                tool_input={"account_id": "acc-1"},
+                tool_id="t1",
+            )
+            yield ProviderEvent(type="usage", input_tokens=1, output_tokens=1)
+            yield ProviderEvent(type="completed", awaiting_tools=True)
+            return
+        yield ProviderEvent(type="text_delta", text="Here is Acme.")
+        yield ProviderEvent(type="usage", input_tokens=1, output_tokens=1)
+        yield ProviderEvent(type="completed", awaiting_tools=False)
 
 
-def test_delegation_mode_publishes_the_structured_proposal_event(
+def test_a_body_supplied_identity_cannot_widen_an_authenticated_turns_dispatched_claims(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same rendering on the non-streaming path, so both paths agree on the card's shape."""
-    monkeypatch.setattr(
-        runtime_server,
-        "_dispatch_tool_call",
-        _fixed_dispatch(_submit_proposal_result(proposal_id="prop-9")),
+    """A legitimate turn adding forged identity blocks dispatches with the token holder's claims."""
+    fake = _install_fake_lambda(
+        monkeypatch, _StubAccountStore(tenant="eval-smoke-unit", account_id="acc-1")
     )
+    monkeypatch.setattr(runtime_server, "_model_provider", lambda *_a: _GetAccountThenAnswer())
+    claims = {**_TURN_CLAIMS, "custom:book": "acc-1", "custom:full_visibility": "false"}
 
-    response = _delegate(
-        client,
-        tool_name="submit_proposal",
-        tool_input={
-            "target_table": "opportunities",
-            "target_id": "opp-1",
-            "operation": "update",
-            "after_payload": {"stage": "Negotiation"},
-            "reason": "advance the stage",
-            "transaction_key": "unit-2",
-        },
-        book="acc-1",
-    )
+    with client.stream(
+        "POST",
+        "/invocations",
+        json=_authed(
+            {
+                **_TURN_PAYLOAD,
+                IDENTITY_KEY: dict(_FORGED_GATEWAY_IDENTITY),
+                REQUEST_CONTEXT_KEY: dict(_FORGED_APIGW_CONTEXT),
+            },
+            claims,
+        ),
+    ) as response:
+        assert response.status_code == 200
+        "".join(response.iter_text())
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["delegated"] is True
-    event = body["proposal_event"]
-    assert event["kind"] == "proposal"
-    assert event["proposal_id"] == "prop-9"
-    assert event["proposal_summary"]["after"] == {"stage": "Negotiation"}
-
-
-def test_delegation_mode_carries_no_proposal_event_for_an_ordinary_tool(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`proposal_event` is present and `None` rather than absent, so a consumer can rely on it."""
-    store = _StubContactStore(
-        tenant=_DELEGATION_TENANT, contact_id="cont-1", account_id="acc-1", name="Ada"
-    )
-    _install_fake_lambda(monkeypatch, store)
-
-    response = _delegate(
-        client,
-        tool_name="get_contact",
-        tool_input={"contact_id": "cont-1"},
-        book="acc-1",
-    )
-
-    assert response.status_code == 200
-    assert response.json()["proposal_event"] is None
+    assert len(fake.invocations) == 1
+    dispatched = fake.invocations[0]["event"]
+    assert IDENTITY_KEY not in dispatched
+    assert REQUEST_CONTEXT_KEY not in dispatched
+    forwarded = dispatched[AGENT_IDENTITY_KEY]["claims"]
+    assert forwarded[CLAIM_REP_ID] == "rep-1"
+    assert forwarded[CLAIM_TENANT] == "eval-smoke-unit"
+    assert forwarded["custom:full_visibility"] is False
 
 
 # ================================================================================================

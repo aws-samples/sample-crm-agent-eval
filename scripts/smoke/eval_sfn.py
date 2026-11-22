@@ -13,11 +13,16 @@ calls `POST /api/eval_trigger` with its ID token.
     holds rows;
   - the record reaches `completed` with `tasks_done == tasks_total` = arms x repeats x tasks,
     `repeats` recorded, both arms in the matrix and `tier_summary` for every tier;
-  - `matrix_is_record_shape_3`: the matrix and every arm carry `record_shape_version` 3, every arm a
-    non-empty `provenance.prompt_caching`, every tier's `tier_summary` integer
-    `total_prompt_tokens`/`cache_read_tokens`/`cache_write_tokens`, and every tier's
-    `tier_task_metrics.by_tier` entry `budget_exhausted_task_count`, `truncated_tool_call_count` and
-    `truncated_task_count` (integers; both truncation counts `null` at the subagent tier);
+  - `matrix_is_record_shape_4`: the matrix and every arm carry `record_shape_version` 4; every arm a
+    non-empty `provenance.prompt_caching`, a positive integer `provenance.output_token_cap`, and a
+    `provenance.dirty_tree` that is a bool, or `null` exactly when `provenance.git_revision` is
+    `"unknown"`; every tier's `tier_summary` integer
+    `total_prompt_tokens`/`cache_read_tokens`/`cache_write_tokens`; and every tier's
+    `tier_task_metrics.by_tier` entry `budget_exhausted_task_count`, `truncated_tool_call_count`,
+    `truncated_task_count`, `output_truncated_call_count` and `output_truncated_task_count`
+    (integers; the two tool-truncation counts `null` at the subagent tier);
+  - `rehearsal_errors_are_coded` (and `cancel_proof_errors_are_coded`, `live_errors_are_coded`):
+    see :func:`error_coding_problems`;
   - each arm's `provenance.effort` is `DEFAULT_ARM_EFFORT`, one `arm_effort_is_default:<family>`
     row per default-sweep family (arms in sweep order);
   - each arm's models are `config/models.yaml`'s, one `arm_models_are_configured:<family>` row per
@@ -66,8 +71,8 @@ calls `POST /api/eval_trigger` with its ID token.
   mode, judge it, then re-run with it;
 - exactly one `submit {mode: live, confirmed: true}`, never retried;
 - poll to terminal, then assert `completed` 40/40, both arms, `tier_summary` per tier, record
-  shape 3, cost spent, tenant torn down, `canary` empty, and `assert_artifacts` on the downloaded
-  S3 artifacts.
+  shape 4, errors coded, cost spent, tenant torn down, `canary` empty, and `assert_artifacts` on
+  the downloaded S3 artifacts.
 A `failed` run is reported with its status and the classification of its `error` field
 (:func:`error_classification`), never the error text.
 
@@ -133,8 +138,14 @@ from crm.authz import ADMIN_GROUP, DEMO_TENANT
 from crm.store.keys import SWEEP_LOCK_ROW_ID
 from crm.store.schema import TABLES, TENANT_SCOPED_TABLES
 from eval.harness import ArtifactAssertionError, assert_artifacts
-from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY, TIER_TASK_METRICS_KEY
+from eval.matrix import (
+    RECORD_SHAPE_VERSION,
+    RECORD_SHAPE_VERSION_KEY,
+    TIER_TASK_METRICS_KEY,
+    UNKNOWN_GIT_REVISION,
+)
 from eval.runs import EVAL_RESULTS_TABLE, EVAL_RUNS_TABLE, MAX_SWEEP_REPEATS, execution_arn_for
+from eval.sfn_handlers import STEP_ERROR_DETAIL_LIMIT
 from eval.sweep_units import DEFAULT_ARM_EFFORT
 from eval.tenancy import (
     CANARY_TENANT,
@@ -225,6 +236,7 @@ _STEP_FAILED_PREFIX: Final[str] = "step failed: "
 _ERROR_CLASS_TOKEN: Final[re.Pattern[str]] = re.compile(
     r"([A-Za-z_][A-Za-z0-9_.]{0,127})(?=: |;|$)"
 )
+_LONG_DIGIT_RUN: Final[re.Pattern[str]] = re.compile(r"\d{12,}")
 
 
 def error_classification(error: object) -> str | None:
@@ -232,14 +244,17 @@ def error_classification(error: object) -> str | None:
 
     Returns `None` when the field is absent or empty, `"present (<Class>)"` when the text (after an
     optional `step failed: ` prefix) starts with an identifier-shaped token followed by `": "`,
-    `";"` or the end of the text, and `"present"` otherwise. No other part of the text is returned.
+    `";"` or the end of the text, and `"present"` otherwise, including when that token holds 12 or
+    more consecutive digits. No other part of the text is returned.
     """
     if error is None or error == "":
         return None
     if not isinstance(error, str):
         return "present"
     match = _ERROR_CLASS_TOKEN.match(error.removeprefix(_STEP_FAILED_PREFIX))
-    return f"present ({match.group(1)})" if match else "present"
+    if match is None or _LONG_DIGIT_RUN.search(match.group(1)):
+        return "present"
+    return f"present ({match.group(1)})"
 
 
 def _run_for_detail(run: Mapping[str, Any]) -> dict[str, Any]:
@@ -338,7 +353,9 @@ def check_submit(
     run_id = str(payload.get("run_id") or "")
     ok = status == 200 and bool(run_id) and payload.get("mode") == mode
     return (
-        _row(check, ok, f"submit {mode} -> HTTP {status} {summarise(payload, 200)}"),
+        _row(
+            check, ok, f"submit {mode} -> HTTP {status} {summarise(_run_for_detail(payload), 200)}"
+        ),
         run_id if status == 200 else "",
     )
 
@@ -356,7 +373,8 @@ def check_single_flight(api: RunApi) -> tuple[CheckResult, str]:
         _row(
             "second_submit_refused_409",
             ok,
-            f"second submit while running -> HTTP {status} {summarise(payload, 200)}",
+            f"second submit while running -> HTTP {status} "
+            f"{summarise(_run_for_detail(payload), 200)}",
         ),
         stray,
     )
@@ -407,6 +425,8 @@ RECORD_SHAPE_TIER_TASK_FIELDS: Final[Mapping[str, frozenset[str]]] = {
     "budget_exhausted_task_count": frozenset(),
     "truncated_tool_call_count": frozenset({"subagent"}),
     "truncated_task_count": frozenset({"subagent"}),
+    "output_truncated_call_count": frozenset(),
+    "output_truncated_task_count": frozenset(),
 }
 
 
@@ -414,12 +434,30 @@ def _is_count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _dirty_tree_problems(where: str, provenance: Mapping[str, Any]) -> list[str]:
+    revision = provenance.get("git_revision")
+    if not (isinstance(revision, str) and revision):
+        return [f"{where}.provenance.git_revision={revision!r}"]
+    dirty = provenance.get("dirty_tree", ...)
+    unknown = revision == UNKNOWN_GIT_REVISION
+    if (dirty is None) if unknown else isinstance(dirty, bool):
+        return []
+    shown = "absent" if dirty is ... else repr(dirty)
+    expected = "null" if unknown else "a bool"
+    return [
+        f"{where}.provenance.dirty_tree={shown} (expected {expected} with "
+        f"git_revision {'unknown' if unknown else 'known'})"
+    ]
+
+
 def record_shape_problems(run: Mapping[str, Any]) -> list[str]:
     """Every way the run's `matrix` falls short of the current record shape; empty when it holds.
 
-    Requires `record_shape_version` on the matrix and on each arm, a non-empty
-    `provenance.prompt_caching` string per arm, the integer token totals of
-    :data:`RECORD_SHAPE_TIER_SUMMARY_FIELDS` per tier, and the per-tier counts of
+    Requires `record_shape_version` on the matrix and on each arm; per arm a non-empty
+    `provenance.prompt_caching` string, a positive integer `provenance.output_token_cap`, and a
+    `provenance.dirty_tree` bool, or `null` exactly when `provenance.git_revision` is
+    :data:`eval.matrix.UNKNOWN_GIT_REVISION`; the integer token totals of
+    :data:`RECORD_SHAPE_TIER_SUMMARY_FIELDS` per tier; and the per-tier counts of
     :data:`RECORD_SHAPE_TIER_TASK_FIELDS`, `null` exactly where that map says so.
     """
     matrix = run.get("matrix")
@@ -442,9 +480,16 @@ def record_shape_problems(run: Mapping[str, Any]) -> list[str]:
             problems.append(
                 f"{where}.{RECORD_SHAPE_VERSION_KEY}={arm.get(RECORD_SHAPE_VERSION_KEY)!r}"
             )
-        caching = (_mapping(arm, "provenance") or {}).get("prompt_caching")
+        provenance = _mapping(arm, "provenance") or {}
+        caching = provenance.get("prompt_caching")
         if not (isinstance(caching, str) and caching):
             problems.append(f"{where}.provenance.prompt_caching={caching!r}")
+        cap = provenance.get("output_token_cap")
+        if not (isinstance(cap, int) and not isinstance(cap, bool) and cap > 0):
+            problems.append(
+                f"{where}.provenance.output_token_cap={cap!r} (expected a positive integer)"
+            )
+        problems.extend(_dirty_tree_problems(where, provenance))
         summary = _mapping(arm, "tier_summary")
         by_tier = _mapping(_mapping(arm, TIER_TASK_METRICS_KEY), "by_tier")
         for tier in TIERS:
@@ -482,6 +527,86 @@ def check_record_shape(run: Mapping[str, Any]) -> CheckResult:
         if problems
         else f"matrix and every arm carry {RECORD_SHAPE_VERSION_KEY}={RECORD_SHAPE_VERSION} "
         "and every required field",
+    )
+
+
+#: Text a raw Lambda or Python error carries; none of it may reach a run payload or result row.
+_ERROR_MESSAGE_SHAPE: Final[re.Pattern[str]] = re.compile(
+    r"\berror(?:Message|Type)\b|\bstackTrace\b|Traceback \(most recent call last\)"
+)
+_ERROR_CODE_SHAPE: Final[re.Pattern[str]] = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_ERROR_DETAIL_SHAPE: Final[re.Pattern[str]] = re.compile(
+    rf"[A-Za-z0-9._:-]{{1,{STEP_ERROR_DETAIL_LIMIT}}}"
+)
+
+
+def _error_message_paths(value: object, path: str) -> Iterator[str]:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            where = f"{path}.{key}"
+            if isinstance(key, str) and _ERROR_MESSAGE_SHAPE.search(key):
+                yield where
+            yield from _error_message_paths(item, where)
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            yield from _error_message_paths(item, f"{path}[{index}]")
+    elif isinstance(value, str) and _ERROR_MESSAGE_SHAPE.search(value):
+        yield path
+
+
+def _coded_field_problems(record: Mapping[str, Any], where: str, *, failed: bool) -> list[str]:
+    problems: list[str] = []
+    code = record.get("error_code")
+    if code is None:
+        if failed:
+            problems.append(f"{where}.error_code absent")
+    elif not (isinstance(code, str) and _ERROR_CODE_SHAPE.fullmatch(code)):
+        problems.append(f"{where}.error_code is not a taxonomy-shaped code")
+    detail = record.get("error_detail")
+    if detail is not None and not (
+        isinstance(detail, str)
+        and _ERROR_DETAIL_SHAPE.fullmatch(detail)
+        and not _LONG_DIGIT_RUN.search(detail)
+    ):
+        problems.append(f"{where}.error_detail is outside the detail charset")
+    return problems
+
+
+def error_coding_problems(run: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Every way the run payload and its `eval_results` rows fall short of coded errors.
+
+    No string or key anywhere in either matches a raw-error shape (`errorMessage`, `errorType`,
+    `stackTrace`, a Python traceback header). A `failed` run and every `failed` row carry an
+    `error_code` of lowercase taxonomy shape; any `error_detail` is at most
+    `STEP_ERROR_DETAIL_LIMIT` characters of `[A-Za-z0-9._:-]` with no run of 12 or more digits.
+    Problems name the offending path, never its text.
+    """
+    problems = [f"{path} carries raw error text" for path in _error_message_paths(run, "run")]
+    problems.extend(_coded_field_problems(run, "run", failed=run.get("status") == "failed"))
+    for index, row in enumerate(rows):
+        where = f"results[{row.get('result_id', index)}]"
+        problems.extend(
+            f"{path} carries raw error text" for path in _error_message_paths(row, where)
+        )
+        problems.extend(
+            _coded_field_problems(row, where, failed=row.get("item_status") == "failed")
+        )
+    return problems
+
+
+def check_errors_are_coded(
+    run: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], *, check: str
+) -> CheckResult:
+    """The run payload and its result rows carry errors as codes only (:func:`error_coding_problems`)."""
+    problems = error_coding_problems(run, rows)
+    failed_rows = sum(1 for row in rows if row.get("item_status") == "failed")
+    return _row(
+        check,
+        not problems,
+        "; ".join(problems[:10]) + (f" (+{len(problems) - 10} more)" if len(problems) > 10 else "")
+        if problems
+        else f"run and {len(rows)} result row(s) ({failed_rows} failed) carry no raw error text; "
+        f"error_code={run.get('error_code')!r}",
     )
 
 
@@ -1873,6 +1998,11 @@ def _rehearsal(
         expected_done=expected_total,
         repeats=repeats,
     )
+    yield check_errors_are_coded(
+        run,
+        result_rows(ctx.client("dynamodb"), store.physical_name(EVAL_RESULTS_TABLE), run_id),
+        check="rehearsal_errors_are_coded",
+    )
     yield check_artifacts(
         ctx.client("s3"),
         run,
@@ -1946,6 +2076,11 @@ def _cancel_proof(
         )
         return
     yield check_cancelled_record(run, expected_total=expected_total)
+    yield check_errors_are_coded(
+        run,
+        result_rows(ctx.client("dynamodb"), store.physical_name(EVAL_RESULTS_TABLE), run_id),
+        check="cancel_proof_errors_are_coded",
+    )
     yield check_tenant_empty(store, tenant, check="cancel_proof_tenant_empty")
     yield check_lock_absent(store, check="lock_released_after_cancel")
     again_status, again_payload = api.cancel(run_id)
@@ -2197,6 +2332,13 @@ def live_once_checks(
             return
         yield check_completed_record(run, expected_total=expected_total, arm_count=len(families))
         yield check_record_shape(run)
+        yield check_errors_are_coded(
+            run,
+            result_rows(
+                ctx.client("dynamodb"), resolved_store.physical_name(EVAL_RESULTS_TABLE), run_id
+            ),
+            check="live_errors_are_coded",
+        )
         cost = run.get("cost_spent_usd")
         yield _row(
             "live_cost_recorded",

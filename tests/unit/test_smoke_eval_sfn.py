@@ -77,6 +77,8 @@ def _tier_task_entry(family: str, tier: str) -> dict[str, Any]:
         "budget_exhausted_task_count": 0,
         "truncated_tool_call_count": truncation,
         "truncated_task_count": truncation,
+        "output_truncated_call_count": 0,
+        "output_truncated_task_count": 0,
     }
 
 
@@ -92,6 +94,9 @@ def _matrix() -> dict[str, Any]:
                     "effort": DEFAULT_ARM_EFFORT,
                     "prompt_bundle_sha256": prompt_bundle_sha256(),
                     "prompt_caching": f"{family}: recorded caching method",
+                    "git_revision": "unknown",
+                    "dirty_tree": None,
+                    "output_token_cap": 16_384,
                 },
                 "tier_summary": {
                     tier: {
@@ -305,11 +310,17 @@ class FakeDynamoDb:
     """The rehearsal's `eval_results` rows: one per (arm, repeat, task) at `repeats` repeats."""
 
     def __init__(
-        self, *, stream_calls: int = 3, repeats: int = _REPEATS, duplicate_ids: bool = False
+        self,
+        *,
+        stream_calls: int = 3,
+        repeats: int = _REPEATS,
+        duplicate_ids: bool = False,
+        first_row_fields: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         self.stream_calls = stream_calls
         self.repeats = repeats
         self.duplicate_ids = duplicate_ids
+        self.first_row_fields = dict(first_row_fields or {})
 
     def query(self, **request: Any) -> dict[str, Any]:
         return {
@@ -322,6 +333,7 @@ class FakeDynamoDb:
                     "repeat_index": {"N": str(repeat)},
                     "item_status": {"S": "done"},
                     "stream_calls": {"N": str(self.stream_calls)},
+                    **(self.first_row_fields if (arm, repeat, task) == (0, 0, 0) else {}),
                 }
                 for arm in range(len(_FAMILIES))
                 for repeat in range(self.repeats)
@@ -493,13 +505,14 @@ _STUB_FLOW_CHECKS = (
     "unit_tenants_recorded",
     "unit_tenants_seeded",
     "run_completed_all_tasks",
-    "matrix_is_record_shape_3",
+    "matrix_is_record_shape_4",
     "run_records_repeats",
     *(f"arm_effort_is_default:{family}" for family in _FAMILIES),
     *(f"arm_models_are_configured:{family}" for family in _FAMILIES),
     "prompt_bundle_matches_repo",
     "rehearsal_execution_succeeded",
     "results_done_with_runtime_streams",
+    "rehearsal_errors_are_coded",
     "artifacts_pass_assert_artifacts",
     "artefact_url_issued",
     "artefact_url_https_get_succeeds",
@@ -518,6 +531,7 @@ _STUB_FLOW_CHECKS = (
     "cancel_proof_submitted",
     "cancel_accepted",
     "cancelled_run_partial_and_torn_down",
+    "cancel_proof_errors_are_coded",
     "cancel_proof_tenant_empty",
     "lock_released_after_cancel",
     "second_cancel_already_terminal",
@@ -2617,6 +2631,10 @@ def _assert_run_error_withheld(detail: str) -> None:
         ("2 task(s) failed (openai=2)", "present"),
         ("An administrator (rep r-1) released the sweep lock.", "present"),
         ({"Error": "ClientError", "Cause": _PLANTED_ARN}, "present"),
+        ("step failed: Acct123456789012: denied", "present"),
+        ("step failed: 123456789012", "present"),
+        ("Role_123456789012_x; 1 task(s) failed", "present"),
+        ("step failed: Err12345678901: denied", "present (Err12345678901)"),
     ],
 )
 def test_error_classification_keeps_only_an_identifier_shaped_leading_token(
@@ -2710,7 +2728,28 @@ def test_a_live_sweep_that_never_finishes_withholds_the_run_error_text() -> None
     _assert_run_error_withheld(row.detail)
 
 
-# --- record shape 3 on the completed rehearsal ---
+# --- the submit-response summaries ---
+
+
+def test_a_submit_response_summary_withholds_the_run_error_text() -> None:
+    row, _ = mod.check_submit(
+        500, {"run_id": "", "error": _PLANTED_RUN_ERROR}, mode="stub", check="rehearsal_submitted"
+    )
+    assert row.status == "fail"
+    _assert_run_error_withheld(row.detail)
+
+
+def test_an_admitted_second_submit_summary_withholds_the_run_error_text() -> None:
+    class _AdmittingApi:
+        def submit(self, _mode: str) -> tuple[int, dict[str, Any]]:
+            return 200, {"run_id": "run0002", "mode": "stub", "error": _PLANTED_RUN_ERROR}
+
+    row, stray = mod.check_single_flight(cast(mod.RunApi, _AdmittingApi()))
+    assert (row.status, stray) == ("fail", "run0002")
+    _assert_run_error_withheld(row.detail)
+
+
+# --- record shape 4 on the completed rehearsal ---
 
 
 def _shape_row(matrix: Any) -> CheckResult:
@@ -2782,6 +2821,25 @@ _SHAPE_MUTATIONS: dict[str, Callable[[dict[str, Any]], None]] = {
     "by_tier_subagent_truncated_tasks_int": _set(
         ("arms", 1, *_BY_TIER, "subagent", "truncated_task_count"), 0
     ),
+    "by_tier_subagent_output_truncated_calls_null": _set(
+        ("arms", 0, *_BY_TIER, "subagent", "output_truncated_call_count"), None
+    ),
+    "by_tier_subagent_output_truncated_tasks_null": _set(
+        ("arms", 1, *_BY_TIER, "subagent", "output_truncated_task_count"), None
+    ),
+    "by_tier_tool_output_truncated_calls_bool": _set(
+        ("arms", 0, *_BY_TIER, "tool", "output_truncated_call_count"), False
+    ),
+    "output_token_cap_absent": _drop(("arms", 0, "provenance", "output_token_cap")),
+    "output_token_cap_zero": _set(("arms", 1, "provenance", "output_token_cap"), 0),
+    "output_token_cap_bool": _set(("arms", 0, "provenance", "output_token_cap"), True),
+    "output_token_cap_str": _set(("arms", 1, "provenance", "output_token_cap"), "16384"),
+    "git_revision_absent": _drop(("arms", 0, "provenance", "git_revision")),
+    "dirty_tree_absent_with_unknown_revision": _drop(("arms", 1, "provenance", "dirty_tree")),
+    "dirty_tree_bool_with_unknown_revision": _set(("arms", 0, "provenance", "dirty_tree"), False),
+    "dirty_tree_null_with_known_revision": _set(
+        ("arms", 1, "provenance", "git_revision"), "a" * 40
+    ),
     "by_tier_tool_entry_absent": _drop(("arms", 0, *_BY_TIER, "tool")),
     "arms_empty": _set(("arms",), []),
 }
@@ -2794,6 +2852,38 @@ def test_each_missing_or_wrong_shape_field_fails_the_row_and_is_named(name: str)
     row = _shape_row(matrix)
     assert row.status == "fail"
     assert row.detail
+
+
+@pytest.mark.parametrize("dirty", [True, False])
+def test_a_known_revision_with_a_dirty_tree_bool_passes_the_record_shape_row(dirty: bool) -> None:
+    matrix = _matrix()
+    for arm in matrix["arms"]:
+        arm["provenance"].update(git_revision="a" * 40, dirty_tree=dirty)
+    assert _shape_row(matrix).status == "pass"
+
+
+def test_the_record_shape_row_names_the_dirty_tree_expectation() -> None:
+    matrix = _matrix()
+    matrix["arms"][0]["provenance"]["git_revision"] = "a" * 40
+    assert _shape_row(matrix).detail == (
+        "arms[0].provenance.dirty_tree=None (expected a bool with git_revision known)"
+    )
+
+
+def test_a_shape_3_record_fails_the_shape_4_row() -> None:
+    matrix = _matrix()
+    matrix[RECORD_SHAPE_VERSION_KEY] = 3
+    for arm in matrix["arms"]:
+        arm[RECORD_SHAPE_VERSION_KEY] = 3
+        del arm["provenance"]["output_token_cap"]
+        del arm["provenance"]["dirty_tree"]
+        for entry in arm[TIER_TASK_METRICS_KEY]["by_tier"].values():
+            del entry["output_truncated_call_count"]
+            del entry["output_truncated_task_count"]
+    row = _shape_row(matrix)
+    assert (row.check, row.status) == ("matrix_is_record_shape_4", "fail")
+    assert "output_truncated_call_count=absent" in row.detail
+    assert "output_token_cap=None" in row.detail
 
 
 def test_the_record_shape_row_names_the_failing_field() -> None:
@@ -2862,3 +2952,128 @@ def _with_subagent_rows(rows: list[Any]) -> dict[str, Any]:
 )
 def test_a_delegation_row_or_missing_subagent_section_fails(run: Mapping[str, Any]) -> None:
     assert mod.check_subagent_table_has_no_delegation_rows(run).status == "fail"
+
+
+# --- run errors reach the payload and result rows as codes only ---
+
+_RAW_LAMBDA_ERROR = json.dumps(
+    {"errorMessage": f"User: {_PLANTED_ARN} is not authorized", "errorType": "ClientError"}
+)
+
+
+def _failed_run(**fields: Any) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "error": "step failed: step_lambda_error",
+        "matrix": _matrix(),
+        **fields,
+    }
+
+
+def test_a_coded_failed_run_with_coded_failed_rows_has_no_problems() -> None:
+    run = _failed_run(error_code="step_lambda_error", error_detail="Lambda.Unknown")
+    rows = [
+        {"result_id": "r1", "item_status": "failed", "error_code": "step_timeout"},
+        {
+            "result_id": "r2",
+            "item_status": "failed",
+            "error_code": "unclassified",
+            "error_detail": "prompt_bundle_mismatch",
+        },
+        {"result_id": "r3", "item_status": "done"},
+    ]
+    assert mod.error_coding_problems(run, rows) == []
+    row = mod.check_errors_are_coded(run, rows, check="x")
+    assert row.status == "pass" and "2 failed" in row.detail
+
+
+@pytest.mark.parametrize(
+    ("run", "rows", "named"),
+    [
+        (_failed_run(error_code="step_lambda_error", error=_RAW_LAMBDA_ERROR), [], "run.error"),
+        (
+            {"status": "completed", "matrix": {"note": "Traceback (most recent call last):"}},
+            [],
+            "run.matrix.note",
+        ),
+        ({"status": "completed", "errorMessage": "x"}, [], "run.errorMessage"),
+        (
+            {"status": "completed", "matrix": {"arms": [{"stackTrace": []}]}},
+            [],
+            "run.matrix.arms[0].stackTrace",
+        ),
+        (_failed_run(), [], "run.error_code absent"),
+        (_failed_run(error_code="Step Failed"), [], "run.error_code"),
+        (
+            _failed_run(error_code="step_lambda_error", error_detail="Acct123456789012"),
+            [],
+            "run.error_detail",
+        ),
+        (
+            _failed_run(error_code="step_lambda_error", error_detail="has space"),
+            [],
+            "run.error_detail",
+        ),
+        (
+            _failed_run(error_code="step_lambda_error", error_detail="x" * 201),
+            [],
+            "run.error_detail",
+        ),
+        (
+            {"status": "completed"},
+            [{"result_id": "r1", "item_status": "failed"}],
+            "results[r1].error_code absent",
+        ),
+        (
+            {"status": "completed"},
+            [
+                {
+                    "result_id": "r1",
+                    "item_status": "failed",
+                    "error_code": "unclassified",
+                    "error": _RAW_LAMBDA_ERROR,
+                }
+            ],
+            "results[r1].error",
+        ),
+    ],
+    ids=[
+        "raw_lambda_error_in_error",
+        "traceback_in_matrix",
+        "error_message_key",
+        "stack_trace_key_nested",
+        "failed_run_uncoded",
+        "code_not_taxonomy_shaped",
+        "detail_with_12_digits",
+        "detail_outside_charset",
+        "detail_too_long",
+        "failed_row_uncoded",
+        "raw_error_in_failed_row",
+    ],
+)
+def test_each_uncoded_or_raw_error_fails_and_names_only_its_path(
+    run: dict[str, Any], rows: list[dict[str, Any]], named: str
+) -> None:
+    row = mod.check_errors_are_coded(run, rows, check="rehearsal_errors_are_coded")
+    assert row.status == "fail"
+    assert named in row.detail, row.detail
+    assert _PLANTED_ARN not in row.detail and "not authorized" not in row.detail
+    assert "123456789012" not in row.detail
+
+
+def test_a_raw_error_in_a_result_row_reds_only_the_errors_rows_end_to_end() -> None:
+    dynamodb = FakeDynamoDb(first_row_fields={"note": {"S": _RAW_LAMBDA_ERROR}})
+    by_check = _run(FakeEvalApi(), ctx=_ctx(dynamodb=dynamodb))
+    failing = {c for c, r in by_check.items() if r.status != "pass"}
+    assert failing == {"rehearsal_errors_are_coded", "cancel_proof_errors_are_coded"}
+
+
+def test_a_raw_error_in_the_run_payload_reds_the_live_errors_row() -> None:
+    class _RawErrorApi(FakeEvalApi):
+        def _finish(self, run: dict[str, Any], status: str) -> None:
+            super()._finish(run, status)
+            run["error"] = _RAW_LAMBDA_ERROR
+
+    by_check = _live(_RawErrorApi(step=_TOTAL), _retention_ok)
+    assert by_check["live_errors_are_coded"].status == "fail"
+    assert by_check["live_cost_recorded"].status == "pass"

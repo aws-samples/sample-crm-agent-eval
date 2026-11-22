@@ -5,14 +5,17 @@ Writes a fixture root module to a tmp dir, runs `terraform init -backend=false` 
 provider plugins with mock credentials, and returns the `terraform show -json` resource changes.
 `config/model_capabilities.yaml` is placed beside the root's parent, where the root's
 `${path.module}/../config` resolves, unless a caller already wrote one there.
-`terraform_unavailable_reason()` says why the harness cannot run; `require_terraform()` says whether
+`terraform_unavailable_reason()` says why the harness cannot run (no `terraform` on PATH, one older
+than `MINIMUM_TERRAFORM_VERSION`, or no cached provider plugins); `require_terraform()` says whether
 callers must fail instead of skip (`CRM_REQUIRE_TERRAFORM=1`).
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -28,13 +31,16 @@ MODULES_DIR = REPO_ROOT / "infra" / "modules"
 CAPABILITIES_YAML = REPO_ROOT / "config" / "model_capabilities.yaml"
 
 #: The aws provider version the fixture root pins.
-AWS_PROVIDER_VERSION = "6.72.0"
+AWS_PROVIDER_VERSION = "6.73.0"
 
 REQUIRE_TERRAFORM_ENV_VAR = "CRM_REQUIRE_TERRAFORM"
 
+#: The oldest `terraform` the fixture root's `required_version` admits.
+MINIMUM_TERRAFORM_VERSION: tuple[int, int, int] = (1, 17, 0)
+
 _PROVIDER_BLOCK = f"""
 terraform {{
-  required_version = ">= 1.17.0"
+  required_version = ">= {".".join(map(str, MINIMUM_TERRAFORM_VERSION))}"
 
   required_providers {{
     aws = {{
@@ -56,10 +62,47 @@ provider "aws" {{
 """
 
 
+def parse_terraform_version(version_json: str) -> tuple[int, int, int] | None:
+    """The `(major, minor, patch)` in `terraform version -json` output, or `None` if unreadable."""
+    try:
+        document = json.loads(version_json)
+    except ValueError:
+        return None
+    raw = document.get("terraform_version") if isinstance(document, dict) else None
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:[-+].*)?", raw) if isinstance(raw, str) else None
+    if match is None:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    return major, minor, patch
+
+
+@functools.cache
+def _path_terraform_version_reason(executable: str) -> str | None:
+    """Why the `terraform` at `executable` is unusable for the fixture root, or `None`."""
+    minimum = ".".join(map(str, MINIMUM_TERRAFORM_VERSION))
+    try:
+        completed = _run([executable, "version", "-json"], Path.cwd())
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"`{executable} version -json` could not run ({type(exc).__name__})"
+    version = parse_terraform_version(completed.stdout) if completed.returncode == 0 else None
+    if version is None:
+        return f"`{executable} version -json` reported no readable version (exit {completed.returncode})"
+    if version < MINIMUM_TERRAFORM_VERSION:
+        found = ".".join(map(str, version))
+        return (
+            f"terraform on PATH ({executable}) is {found}; the fixture root requires >= {minimum}"
+        )
+    return None
+
+
 def terraform_unavailable_reason() -> str | None:
     """``None`` when the harness can run; else why it cannot, phrased for a skip message."""
-    if shutil.which("terraform") is None:
+    executable = shutil.which("terraform")
+    if executable is None:
         return "terraform is not on PATH"
+    version_reason = _path_terraform_version_reason(executable)
+    if version_reason is not None:
+        return version_reason
     if not PLUGIN_DIR.is_dir():
         return f"no cached provider plugins at {PLUGIN_DIR} (run `cd infra && terraform init`)"
     return None

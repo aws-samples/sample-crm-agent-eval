@@ -15,7 +15,8 @@ each finding's `File` is reported relative to SOURCE. Gitignored files are not r
 `check_no_vendor_keys.sh`.
 
 Rule set: an explicit `--config`; else `SOURCE/.gitleaks.toml` when it is a file on disk (untracked
-and optional); else gitleaks' built-in rules.
+and optional); else the tracked `SOURCE/config/gitleaks.toml` (built-in rules plus the custom rules);
+else gitleaks' built-in rules.
 
 Exit codes: `0` no findings; `1` at least one finding (rule id, file and line reported, match always
 **redacted**); `2` usage or environment error, including an explicit `--config` that does not exist
@@ -81,6 +82,9 @@ SKIPPED_FILE_MARKER: Final[str] = "skipping file"
 #: The optional rule-set file gitleaks itself looks for at the root of the scanned tree.
 LOCAL_RULE_SET_NAME: Final[str] = ".gitleaks.toml"
 
+#: The tracked rule set, relative to the scanned tree, used when no local rule set is present.
+TRACKED_RULE_SET: Final[Path] = Path("config") / "gitleaks.toml"
+
 
 class SecretScanError(RuntimeError):
     """The scan could not be performed for a reason that is not a finding."""
@@ -98,14 +102,16 @@ def binary_unavailable_reason(binary: str = BINARY) -> str | None:
 
 
 def resolve_config(source: Path, config: Path | None) -> Path | None:
-    """The rule set to pass: `config` if given, else `source`'s local rule set, else `None`.
+    """The rule set to pass: `config` if given, else `source`'s local, else its tracked rule set.
 
-    `None` means gitleaks' built-in rules.
+    `None`, when `source` has neither file, means gitleaks' built-in rules.
     """
     if config is not None:
         return config
-    local = source / LOCAL_RULE_SET_NAME
-    return local if local.is_file() else None
+    for candidate in (source / LOCAL_RULE_SET_NAME, source / TRACKED_RULE_SET):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def scan_set(source: Path) -> list[str]:
@@ -336,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
         "--config",
         type=Path,
         default=None,
-        help="Rule set (default: SOURCE/.gitleaks.toml if present, else gitleaks' built-in rules).",
+        help=(
+            "Rule set (default: SOURCE/.gitleaks.toml if present, else SOURCE/config/gitleaks.toml "
+            "if present, else gitleaks' built-in rules)."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     args = parser.parse_args(argv)
@@ -390,7 +399,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {describe(finding)}", file=sys.stderr)
         return 1
     if not args.json:
-        rule_set = config.name if config is not None else "gitleaks' built-in rules"
+        rule_set = str(config) if config is not None else "gitleaks' built-in rules"
         print(f"check_secret_scan: OK — no findings under {args.source} using {rule_set}")
     return 0
 

@@ -207,7 +207,7 @@ def test_the_payload_names_no_temperature_and_no_retired_model() -> None:
     for retired in _RETIRED_MODEL_IDS:
         assert not [item for item in served if retired in item], retired
     assert "anthropic.claude-haiku-5-5" in body["models"]
-    assert "openai.gpt-6.1-sol" in body["models"]
+    assert "openai.gpt-6.2-sol" in body["models"]
 
 
 def test_a_successful_read_reports_200() -> None:

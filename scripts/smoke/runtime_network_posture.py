@@ -15,12 +15,13 @@ Read-only, against the live account:
   admits 443 from the Runtime SG. An unresolvable VPC id, or more than one endpoint for a service in
   that VPC, fails the service's rows.
 * **Egress** — the Runtime SG's egress carries no `0.0.0.0/0`.
-* **Deny state** — both runtime resource policies are read for the `aws:SourceVpce` Deny. When it is
-  absent this is reported `defer` with a reason, never `pass`.
+* **Deny state** — both runtime resource policies are read for the `aws:SourceVpce` Deny. Present
+  passes. Absent fails unless the deployment declares the Deny disabled (an operator's stage-one
+  apply), which defers with reason `stage_1_declared_by_operator`, never `pass`.
 
 `declared_source_vpce_deny` reads whether the deployment declares that Deny enabled, from the
-gitignored tfvars; `scripts/smoke/runtime_inbound_auth.py` fails an accepted outside-VPC invoke
-against it (`outside_vpc_invoke_refused_under_declared_deny`).
+gitignored tfvars and the `variables.tf` default; `scripts/smoke/runtime_inbound_auth.py` also fails
+an accepted outside-VPC invoke against it (`outside_vpc_invoke_refused_under_declared_deny`).
 
 `get-agent-runtime` must carry the members the resource always carries before an absent field is
 read as the resource's property.
@@ -504,8 +505,9 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one line
     # The three interface endpoints are available with private DNS on.
     yield from _endpoint_checks(ctx, expected_sg)
 
-    # Deny state: aws:SourceVpce Deny on both resource policies (defer when absent).
+    # Deny state: aws:SourceVpce Deny on both resource policies.
     endpoint_arn = f"{runtime_arn}/runtime-endpoint/DEFAULT"
+    declared = declared_source_vpce_deny()
     for arn in (runtime_arn, endpoint_arn):
         deny_state = _resource_policy_has_source_vpce_deny(ctx, arn)
         if deny_state is DenyReadResult.OP_UNMODELED:
@@ -538,15 +540,33 @@ def checks(ctx: SmokeContext) -> Iterator[CheckResult]:  # noqa: C901 - one line
                 "boundary authored)",
             )
         else:
-            yield CheckResult(
-                resource=arn,
-                check="source_vpce_deny_state",
-                status="defer",
-                defer_reason="stage_2_source_vpce_deny_not_applied",
-                detail="stage-2 aws:SourceVpce Deny NOT yet applied (default). The inbound boundary is "
-                "not enforced yet — never a pass. Apply runtime_source_vpce_deny_enabled=true after "
-                "the report-only stage is verified, then re-run",
-            )
+            yield _absent_deny_row(arn, declared)
+
+
+def _absent_deny_row(arn: str, declared: DeclaredDenyState) -> CheckResult:
+    """The row for a cleanly read policy with no `aws:SourceVpce` Deny, judged by the declared state.
+
+    Declared disabled defers (`stage_1_declared_by_operator`); declared enabled or unknown fails.
+    """
+    declared_text = f"the declared Deny state is {declared.state.value} ({declared.source})"
+    if declared.state is DeclaredDeny.DISABLED:
+        return CheckResult(
+            resource=arn,
+            check="source_vpce_deny_state",
+            status="defer",
+            defer_reason="stage_1_declared_by_operator",
+            detail=f"stage-2 aws:SourceVpce Deny NOT applied and {declared_text}. The inbound "
+            f"boundary is not enforced — never a pass. Apply with {DENY_VARIABLE} = true once the "
+            "report-only stage is verified, then re-run",
+        )
+    return CheckResult(
+        resource=arn,
+        check="source_vpce_deny_state",
+        status="fail",
+        detail=f"stage-2 aws:SourceVpce Deny ABSENT from the resource policy, yet {declared_text}: "
+        "the inbound boundary is not enforced. Only a deployment declaring "
+        f"{DENY_VARIABLE} = false may run without it",
+    )
 
 
 def _runtime_sg_egress_checks(ctx: SmokeContext, sg_id: str) -> Iterator[CheckResult]:

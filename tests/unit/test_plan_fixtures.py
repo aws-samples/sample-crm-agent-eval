@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""Tests for `scripts.plan_fixtures`: `build`, `materialize` and the CLI; each plan is sha256-pinned."""
+"""Tests for `scripts.plan_fixtures`: `build`, `materialize` and the CLI; each plan is sha256-pinned.
+
+Also covers `tests/unit/_terraform_fixture.terraform_unavailable_reason`, the skip declaration the
+plan-time harness gives when the `terraform` on PATH cannot plan its fixture root.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,8 @@ from typing import Any
 import pytest
 from scripts import plan_fixtures, proc_run
 
+from tests.unit import _terraform_fixture
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Plan keys no reader in the repository reads; absent from every built document.
@@ -24,15 +30,15 @@ UNREAD_KEYS = frozenset(
 
 #: sha256 of `json.dumps(build(name), sort_keys=True)` per name.
 EXPECTED_SHA256 = {
-    "compliant": "f6dec943e81e652ef2ee27ead8b8d32f6ef3a3d44ffb61aacb36c5fde4ddfc98",
+    "compliant": "40f3d457e0935ac05656f13c1ec5a133d9e95397e24ee83b22040825acf429df",
     "compliant_gateway_role_known_arn": (
-        "200bb43354db8bc6cb228620336941290d62649d673f2ce5124704b06fb6d20d"
+        "cc00ee686e5b28c72eb66597dfdc70c7afe4be545bbc28cacf2ddc391ef9f7ff"
     ),
     "violation_log_group_no_kms": (
-        "b04e891dbb41c075133c3c462e5d7fb400d4417d1e7f3337245f237651538859"
+        "ad04c61a58b5bcd642d2251e7ed5eee462ede7a4c59fa4edbf5414509c55b7d8"
     ),
     "violation_relay_function_url_buffered": (
-        "104d63ef5e93b2af2672411a9a88dc68e0cab308ba97e32ce005ec73597beb45"
+        "83c6f753e53ec9a2324b2f103137830022db9a40c827f08cdd918c270d0b7698"
     ),
 }
 
@@ -302,3 +308,77 @@ def test_neither_the_base_nor_a_built_plan_has_a_failed_checkov_check(tmp_path: 
     assert _checkov_failed(checkov, control, tmp_path) > 0
     assert _checkov_failed(checkov, built, tmp_path) == 0
     assert _checkov_failed(checkov, renamed, tmp_path) == 0
+
+
+# ---------------------------------------------------------------------------
+# The plan-time harness declares an unusable terraform as a skip reason.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("version_json", "expected"),
+    [
+        ('{"terraform_version": "1.17.0"}', (1, 17, 0)),
+        ('{"terraform_version": "1.5.7", "terraform_outdated": true}', (1, 5, 7)),
+        ('{"terraform_version": "1.18.0-beta1"}', (1, 18, 0)),
+        ('{"terraform_version": "1.17"}', None),
+        ('{"version": "1.17.0"}', None),
+        ("Terraform v1.17.0", None),
+        ("[]", None),
+    ],
+)
+def test_the_version_parser_reads_only_a_full_semver(
+    version_json: str, expected: tuple[int, int, int] | None
+) -> None:
+    assert _terraform_fixture.parse_terraform_version(version_json) == expected
+
+
+def _fake_terraform(tmp_path: Path, stdout: str, exit_code: int = 0) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "terraform"
+    script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{stdout}'\nexit {exit_code}\n", encoding="utf-8")
+    script.chmod(0o755)
+    return bin_dir
+
+
+@pytest.fixture
+def _fresh_version_cache() -> Iterator[None]:
+    _terraform_fixture._path_terraform_version_reason.cache_clear()
+    yield
+    _terraform_fixture._path_terraform_version_reason.cache_clear()
+
+
+@pytest.mark.usefixtures("_fresh_version_cache")
+@pytest.mark.parametrize(
+    ("stdout", "exit_code", "fragment"),
+    [
+        ('{"terraform_version": "1.5.7"}', 0, "is 1.5.7; the fixture root requires >= 1.17.0"),
+        ("not json", 0, "reported no readable version (exit 0)"),
+        ('{"terraform_version": "1.17.0"}', 1, "reported no readable version (exit 1)"),
+    ],
+    ids=["too_old", "unreadable", "nonzero_exit"],
+)
+def test_an_unusable_path_terraform_is_a_declared_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: str, exit_code: int, fragment: str
+) -> None:
+    monkeypatch.setenv("PATH", str(_fake_terraform(tmp_path, stdout, exit_code)))
+    reason = _terraform_fixture.terraform_unavailable_reason()
+    assert reason is not None
+    assert fragment in reason
+
+
+@pytest.mark.usefixtures("_fresh_version_cache")
+def test_a_new_enough_path_terraform_falls_through_to_the_plugin_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", str(_fake_terraform(tmp_path, '{"terraform_version": "1.17.0"}')))
+    monkeypatch.setattr(_terraform_fixture, "PLUGIN_DIR", tmp_path / "no-providers")
+    reason = _terraform_fixture.terraform_unavailable_reason()
+    assert reason is not None
+    assert "no cached provider plugins" in reason
+
+
+def test_the_fixture_root_pins_the_minimum_the_reason_names() -> None:
+    minimum = ".".join(map(str, _terraform_fixture.MINIMUM_TERRAFORM_VERSION))
+    assert f'required_version = ">= {minimum}"' in _terraform_fixture._PROVIDER_BLOCK

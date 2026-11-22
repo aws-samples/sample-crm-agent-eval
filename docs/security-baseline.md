@@ -31,6 +31,7 @@ assertion nor a recorded reason it cannot be one, and by `tests/unit/test_verify
 | Secrets | Secrets Manager / Parameter Store only; **no vendor API key anywhere, ever** | `gitleaks` + `scripts/check_no_vendor_keys.sh` | blocks completion |
 | Bedrock | assumed role + inference profile only | IAM policy review; no key material in any env | blocks completion |
 | Transport | TLS 1.2+ everywhere | CloudFront viewer policy, bucket policy `aws:SecureTransport` | **DEFER (unmet)**: the CloudFront minimum TLS version needs a custom ACM certificate |
+| WAF | web ACL on every public entry point (the CloudFront distribution and the REST API stage) | `check_plan_security_baseline.py --only cloudfront` over the plan (`waf_deferral_current`, reported deferred while no web ACL is planned) | **DEFER (unmet)**: no web ACL is authored; the gate fails once one is planned, until this row becomes an assertion |
 | Tags | `service`, `environment`, `owner`, `cost-center`, `data-classification`, `AppName` (`crm-agent-eval`) on all resources | `resourcegroupstaggingapi get-resources` | review-PASS |
 | CloudTrail | enabled for API activity | `describe-trails` | review-PASS |
 | Logs | explicit retention; no secrets, tokens, or full payloads | log-group config + `scripts/check_log_redaction.py` | review-PASS |

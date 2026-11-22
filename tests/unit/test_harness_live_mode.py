@@ -89,6 +89,10 @@ class _ScriptedProvider(ModelProvider):
             yield event
 
 
+async def _no_sleep(*_: object, **__: object) -> None:
+    return None
+
+
 def _drain(provider: ModelProvider, invocation: ResolvedInvocation) -> list[ProviderEvent]:
     async def _go() -> list[ProviderEvent]:
         return [event async for event in provider.stream(invocation, [], [])]
@@ -195,7 +199,7 @@ def test_cli_refuses_live_without_the_live_substrate_and_exits_two(
 
 def test_a_clean_turn_is_passed_through_with_no_exclusion_recorded() -> None:
     wrapped = _ScriptedProvider([_SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _seconds: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     events = _drain(provider, _invocation())
 
@@ -208,7 +212,11 @@ def test_a_throttled_turn_is_retried_and_tallied_once_as_a_throttle() -> None:
     """One retried attempt is exactly one exclusion, categorised by its cause."""
     wrapped = _ScriptedProvider([_THROTTLED_TURN, _SUCCESS_TURN])
     slept: list[float] = []
-    provider = ThrottleRetryingProvider(wrapped, sleep=slept.append)
+
+    async def record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    provider = ThrottleRetryingProvider(wrapped, sleep=record_sleep)
 
     events = _drain(provider, _invocation())
 
@@ -223,7 +231,7 @@ def test_a_throttle_that_exhausts_every_attempt_stops_the_sweep_rather_than_shri
     """A throttle exhausting every attempt raises; only the retried attempt is an exclusion, the
     final non-retried one is not."""
     wrapped = _ScriptedProvider([_THROTTLED_TURN])
-    provider = ThrottleRetryingProvider(wrapped, max_attempts=2, sleep=lambda _seconds: None)
+    provider = ThrottleRetryingProvider(wrapped, max_attempts=2, sleep=_no_sleep)
 
     with pytest.raises(LiveInvocationError, match="failed on attempt 2 of 2"):
         _drain(provider, _invocation())
@@ -238,7 +246,7 @@ def test_a_non_transient_failure_raises_immediately_and_is_not_miscategorised() 
     """A ``ValidationException`` raises immediately and is not tallied as a cold start, a retry,
     or a throttle."""
     wrapped = _ScriptedProvider([_VALIDATION_FAILED_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _seconds: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     with pytest.raises(LiveInvocationError, match="not a categorisable exclusion"):
         _drain(provider, _invocation())
@@ -276,10 +284,6 @@ class _EmptySession:
 
     def get_credentials(self) -> None:
         return None
-
-
-async def _no_sleep(*_: object, **__: object) -> None:
-    return None
 
 
 @pytest.fixture(autouse=True)
@@ -344,7 +348,7 @@ def _live(
     family: str, wire: _Wire, **kwargs: Any
 ) -> tuple[ThrottleRetryingProvider, _CountingProvider]:
     counted = _CountingProvider(_real_adapter(family, wire, **kwargs))
-    return ThrottleRetryingProvider(counted, sleep=lambda _s: None), counted
+    return ThrottleRetryingProvider(counted, sleep=_no_sleep), counted
 
 
 def _run_live(family: str, provider: ModelProvider) -> list[ProviderEvent]:
@@ -376,7 +380,7 @@ def test_a_503_is_retried_by_the_sdk_only_never_by_the_wrapper(family: str) -> N
 
     assert events[-1].type == "completed"
     assert (counted.streams, wire.hits) == (1, 2)
-    usage = next(event for event in events if event.type == "usage")
+    usage = next(event for event in events if event.type == "usage" and not event.provisional)
     assert usage.retried_attempts == (RetriedAttempt(503, None),)
     assert [e.category for e in provider.drain_exclusions()] == [ExclusionCategory.RETRY]
 
@@ -460,7 +464,7 @@ def test_an_expired_deadline_aborts_on_attempt_one_with_its_recorded_attempts() 
         retried_attempts=(RetriedAttempt(503, None), RetriedAttempt(None, None)),
     )
     wrapped = _ScriptedProvider([[expired], _SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     with pytest.raises(LiveInvocationError, match="wall-clock deadline"):
         _drain(provider, _invocation())
@@ -478,7 +482,7 @@ def test_an_in_band_failure_after_an_sdk_retry_tallies_both_layers() -> None:
         retried_attempts=(RetriedAttempt(429, None),),
     )
     wrapped = _ScriptedProvider([[in_band], _SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     _drain(provider, _invocation("openai"))
 
@@ -498,7 +502,7 @@ def test_the_wrapper_passes_the_adapters_latency_and_attempts_through_unchanged(
         retried_attempts=(RetriedAttempt(503, None),),
     )
     wrapped = _ScriptedProvider([[usage, _SUCCESS_TURN[-1]]])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     events = _drain(provider, _invocation())
 
@@ -570,7 +574,7 @@ def test_every_retryable_prefix_is_tallied_in_its_category(prefix: str) -> None:
     wrapped = _ScriptedProvider(
         [[ProviderEvent(type="error", error_message=f"{prefix}: detail")], _SUCCESS_TURN]
     )
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     _drain(provider, _invocation())
 
@@ -590,7 +594,7 @@ _OPENAI_SERVICE_UNAVAILABLE = [
 def test_an_openai_service_unavailable_is_retried_and_tallied_as_a_throttle() -> None:
     """The in-band Responses ``service_unavailable`` is retried, then succeeds, as one throttle."""
     wrapped = _ScriptedProvider([_OPENAI_SERVICE_UNAVAILABLE, _SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     events = _drain(provider, _invocation())
 
@@ -601,7 +605,7 @@ def test_an_openai_service_unavailable_is_retried_and_tallied_as_a_throttle() ->
 
 def test_an_openai_service_unavailable_on_every_attempt_still_stops_the_sweep() -> None:
     wrapped = _ScriptedProvider([_OPENAI_SERVICE_UNAVAILABLE])
-    provider = ThrottleRetryingProvider(wrapped, max_attempts=3, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, max_attempts=3, sleep=_no_sleep)
 
     with pytest.raises(LiveInvocationError, match="failed on attempt 3 of 3"):
         _drain(provider, _invocation())
@@ -613,7 +617,7 @@ def test_an_openai_service_unavailable_on_every_attempt_still_stops_the_sweep() 
 def test_a_non_retryable_code_mentioning_internal_server_in_its_text_is_not_retried() -> None:
     message = "invalid_request_error: upstream InternalServerException while validating"
     wrapped = _ScriptedProvider([[ProviderEvent(type="error", error_message=message)]])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
 
     with pytest.raises(LiveInvocationError, match="not a categorisable exclusion"):
         _drain(provider, _invocation())
@@ -645,7 +649,7 @@ def test_non_transient_failures_are_not_recognised_as_retryable(message: str) ->
 
 def test_draining_exclusions_empties_the_buffer_so_one_arm_never_inherits_anothers() -> None:
     wrapped = _ScriptedProvider([_THROTTLED_TURN, _SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _seconds: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
     _drain(provider, _invocation())
 
     assert len(provider.drain_exclusions()) == 1
@@ -655,7 +659,7 @@ def test_draining_exclusions_empties_the_buffer_so_one_arm_never_inherits_anothe
 def test_the_harness_reads_a_providers_exclusions_into_the_arms_published_tally() -> None:
     """An arm's metrics report the provider's own recorded exclusions, by category."""
     wrapped = _ScriptedProvider([_THROTTLED_TURN, _SUCCESS_TURN])
-    provider = ThrottleRetryingProvider(wrapped, sleep=lambda _seconds: None)
+    provider = ThrottleRetryingProvider(wrapped, sleep=_no_sleep)
     _drain(provider, _invocation())
 
     drained = harness._drain_provider_exclusions(provider)

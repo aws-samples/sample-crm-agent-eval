@@ -3,8 +3,9 @@
 
 An event built as ``{channel: trusted, **caller_arguments}`` lets a channel key inside the
 arguments overwrite the trusted block. These tests nest a forged channel inside ``tool_input`` on
-all three Runtime entry paths and in the eval harness, and assert on the identity the action
-Lambda's own ``decode_identity`` resolves from the dispatched event. The last tests walk every
+both Runtime entry paths and in the eval harness, and assert on the identity the action Lambda's
+own ``decode_identity`` resolves from the dispatched event; a retired ``delegation`` body carrying
+one dispatches nothing. The last tests walk every
 first-party Python file's AST and fail on any dict literal writing an identity channel key before a
 ``**`` splat.
 """
@@ -242,19 +243,15 @@ def test_agent_identity_event_strips_a_nested_channel_from_the_tool_input() -> N
 
 
 # --------------------------------------------------------------------------------------------
-# Entry path 1 of 3 — delegation mode (caller-supplied `tool_input`, verbatim, no model)
+# A retired `delegation` body — caller-supplied `tool_input` no longer reaches any Lambda
 # --------------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("channel", _SHADOWING_CHANNELS, ids=_SHADOWING_IDS)
-def test_delegation_mode_refuses_an_identity_channel_nested_in_the_tool_input(
+def test_a_retired_delegation_body_with_a_nested_identity_channel_dispatches_nothing(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, channel: str
 ) -> None:
-    """A legitimate token plus a forgery nested in `tool_input` dispatches as the token holder.
-
-    The response carries the refusal the token holder's own scope produces, not the forged
-    identity's `demo`-tenant contact.
-    """
+    """A `delegation` body naming `draft_message` with a forged nested channel invokes no Lambda."""
     fake = _install(monkeypatch)
 
     response = client.post(
@@ -269,17 +266,14 @@ def test_delegation_mode_refuses_an_identity_channel_nested_in_the_tool_input(
     )
 
     assert response.status_code == 200
-    assert len(fake.events) == 1
-    _assert_dispatched_identity_is_the_token_holders(fake.events[0])
-
-    body = response.json()
-    assert body["tool_result"].get("statusCode") != 200, body["tool_result"]
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert fake.events == []
     assert "CONFIDENTIAL DEMO CONTACT" not in response.text
-    assert body["reported_result"] is None
+    assert "rep-attacker" not in response.text
 
 
 # --------------------------------------------------------------------------------------------
-# Entry path 2 of 3 — the normal turn path (`tool_input` supplied by the *model*)
+# Entry path 1 of 2 — the normal turn path (`tool_input` supplied by the *model*)
 # --------------------------------------------------------------------------------------------
 
 
@@ -344,7 +338,7 @@ def test_the_turn_path_strips_an_identity_channel_the_model_nested_in_its_tool_i
 
 
 # --------------------------------------------------------------------------------------------
-# Entry path 3 of 3 — the read-only isolation probe
+# Entry path 2 of 2 — the read-only isolation probe
 # --------------------------------------------------------------------------------------------
 
 

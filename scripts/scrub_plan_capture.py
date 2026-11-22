@@ -261,7 +261,8 @@ def _provenance(plan: Mapping[str, Any], infra_digest: str) -> dict[str, str]:
         "captured_at": _capture_date(plan),
         "captured_infra_digest": infra_digest,
         "currency": (
-            "Captured from a tree whose tracked infra/**/*.tf digest is captured_infra_digest. "
+            "Captured from a tree whose infra digest (the tracked infra/**/*.tf and the tracked "
+            "files they read) is captured_infra_digest. "
             "plan_freshness passes while plan_fixtures.infra_digest of the working tree equals it. "
             "The adopted network (VPC, subnets, route tables, the CloudFront VPC-origin security "
             "group) is created outside Terraform and adopted by the gitignored tfvars, so its ids "

@@ -40,7 +40,7 @@ _PROVISIONAL_ALL_ZERO_TABLE: dict[str, object] = {
             "cache_write": 0.0,
             "cache_read": 0.0,
         },
-        "openai.gpt-6-astra": {
+        "openai.gpt-6.2-astra": {
             "input": 0.0,
             "output": 0.0,
             "cache_write": 0.0,
@@ -174,6 +174,8 @@ def _fixture_arm(model_id: str, family: str, *, index: int) -> Any:
             price_table_version="provisional-copy",
             answer_style_sha256="0" * 64,
             prompt_caching="explicit cache points",
+            output_token_cap=16_384,
+            dirty_tree=False,
         ),
         model_metrics_fields=metrics.to_report_fields(),
         aggregate_score_fields={
@@ -230,7 +232,7 @@ def _rendered_results(tmp_path: Path) -> Path:
 
     arms = [
         _fixture_arm("anthropic.claude-opus-5-5", "anthropic", index=0),
-        _fixture_arm("openai.gpt-6-astra", "openai", index=1),
+        _fixture_arm("openai.gpt-6.2-astra", "openai", index=1),
     ]
     results = tmp_path / "results"
     write_matrix_artifacts(build_matrix_result(arms), results)
@@ -697,7 +699,7 @@ class TestRunGateEndToEnd:
         results_dir = tmp_path / "results"
         results_dir.mkdir()
         (results_dir / "matrix.json").write_text(
-            json.dumps({"arms": [_forced_unwithheld_arm(), _withheld_arm("openai.gpt-6-astra")]}),
+            json.dumps({"arms": [_forced_unwithheld_arm(), _withheld_arm("openai.gpt-6.2-astra")]}),
             encoding="utf-8",
         )
 
@@ -706,7 +708,7 @@ class TestRunGateEndToEnd:
         assert violations
         joined = "\n".join(violations)
         assert "anthropic.claude-opus-5-5" in joined
-        assert "openai.gpt-6-astra" not in joined
+        assert "openai.gpt-6.2-astra" not in joined
 
     def test_honestly_withheld_artifacts_pass(self, tmp_path: Path) -> None:
         pricing_path = tmp_path / "pricing.yaml"

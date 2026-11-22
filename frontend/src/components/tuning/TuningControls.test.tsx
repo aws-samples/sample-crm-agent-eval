@@ -58,8 +58,8 @@ function rawMatrix() {
         tier: "tool",
         effort: { supported: false, values: [], default: null, capped_at_when_thinking_disabled: null },
       },
-      "openai.gpt-6-astra": {
-        model_id: "openai.gpt-6-astra",
+      "openai.gpt-6.2-astra": {
+        model_id: "openai.gpt-6.2-astra",
         family: "openai",
         tier: "supervisor",
         effort: {
@@ -69,8 +69,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: null,
         },
       },
-      "openai.gpt-6.1-sol": {
-        model_id: "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-sol": {
+        model_id: "openai.gpt-6.2-sol",
         family: "openai",
         tier: "subagent",
         effort: {
@@ -99,8 +99,8 @@ function rawMatrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: { effort: "low" } },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: { effort: "low" } },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: { effort: "medium" } },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: { effort: "low" } },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: { effort: "medium" } },
         tool: { model_id: "openai.gpt-6-luna", tuning: { effort: "low" } },
       },
     },
@@ -146,7 +146,7 @@ describe("TuningControls", () => {
   it("shows the other family's configured tier effort after a family change", () => {
     // The selection after a family change: model and effort cleared.
     renderControls("supervisor", select({ family: "openai" }));
-    expect(screen.getByLabelText("Model")).toHaveValue("openai.gpt-6-astra");
+    expect(screen.getByLabelText("Model")).toHaveValue("openai.gpt-6.2-astra");
     expect(screen.getByLabelText("Effort")).toHaveValue("low");
   });
 
@@ -154,8 +154,8 @@ describe("TuningControls", () => {
     renderControls("tool", select({ family: "openai" }));
     const model = screen.getByLabelText("Model") as HTMLSelectElement;
     expect(Array.from(model.options).map((o) => o.value)).toEqual([
-      "openai.gpt-6-astra",
-      "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-astra",
+      "openai.gpt-6.2-sol",
       "openai.gpt-6-luna",
     ]);
     expect(model).toHaveValue("openai.gpt-6-luna");
@@ -278,7 +278,7 @@ describe("TuningControls over the served capability payload", () => {
   }
 
   it.each([
-    ["supervisor", "openai.gpt-6.1-sol", "medium"],
+    ["supervisor", "openai.gpt-6.2-sol", "medium"],
     ["subagent", "openai.gpt-6.1-terra", "low"],
     ["tool", "openai.gpt-6-luna", "low"],
   ] as const)(
@@ -297,12 +297,12 @@ describe("TuningControls over the served capability payload", () => {
   it("lists Astra, Sol, Terra and Luna as the OpenAI models", () => {
     const options = Array.from(renderServed("supervisor").options).map((o) => o.value);
     expect([...options].sort()).toEqual(
-      ["openai.gpt-6-astra", "openai.gpt-6.1-sol", "openai.gpt-6.1-terra", "openai.gpt-6-luna"].sort(),
+      ["openai.gpt-6.2-astra", "openai.gpt-6.2-sol", "openai.gpt-6.1-terra", "openai.gpt-6-luna"].sort(),
     );
   });
 
   it("defaults the supervisor tier to Sol", () => {
-    expect(renderServed("supervisor")).toHaveValue("openai.gpt-6.1-sol");
+    expect(renderServed("supervisor")).toHaveValue("openai.gpt-6.2-sol");
   });
 
   it("defaults the subagent tier to Terra, shown by its model id", () => {
@@ -330,9 +330,9 @@ describe("TuningControls over the served capability payload", () => {
     ["anthropic", "supervisor", "anthropic.claude-opus-5-5"],
     ["anthropic", "subagent", "anthropic.claude-opus-5-5"],
     ["anthropic", "tool", "anthropic.claude-opus-5-5"],
-    ["openai", "supervisor", "openai.gpt-6-astra"],
-    ["openai", "subagent", "openai.gpt-6-astra"],
-    ["openai", "tool", "openai.gpt-6-astra"],
+    ["openai", "supervisor", "openai.gpt-6.2-astra"],
+    ["openai", "subagent", "openai.gpt-6.2-astra"],
+    ["openai", "tool", "openai.gpt-6.2-astra"],
   ] as const)("offers the %s non-default model at the %s tier: %s", (family, tier, model) => {
     const options = Array.from(renderServed(tier, family).options).map((o) => o.value);
     expect(options).toContain(model);

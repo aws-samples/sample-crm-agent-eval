@@ -102,6 +102,7 @@ def _assemble(units: list[TaskUnitResult]) -> Any:
         price_table_version="1.0.0",
         cost_withheld=True,
         timestamp="2026-01-01T00:00:00+00:00",
+        dirty_tree=False,
     )
 
 
@@ -209,10 +210,12 @@ def _arm_fields(store: Store, digest: str | None) -> dict[str, object]:
 def test_the_digest_is_emitted_right_after_the_answer_style_digest(store: Store) -> None:
     provenance = list(cast(dict[str, object], _arm_fields(store, DIGEST_A)["provenance"]))
     assert provenance.index("prompt_bundle_sha256") == provenance.index("answer_style_sha256") + 1
-    assert list(matrix._PROVENANCE_FIELDS)[-3:] == [
+    assert list(matrix._PROVENANCE_FIELDS)[-5:] == [
         "answer_style_sha256",
         "prompt_bundle_sha256",
         "prompt_caching",
+        "output_token_cap",
+        "dirty_tree",
     ]
 
 

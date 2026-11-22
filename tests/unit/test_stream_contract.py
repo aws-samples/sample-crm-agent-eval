@@ -30,7 +30,7 @@ from crm.toolspec.definitions import ALL_TOOLS, tools_for_agent
 
 def test_event_kinds_is_exactly_the_closed_set() -> None:
     """The closed set is tool call, tool result, proposal, usage, completion, error, text_delta,
-    heartbeat."""
+    heartbeat, replay_unavailable."""
     assert set(EVENT_KINDS) == {
         "tool_call",
         "tool_result",
@@ -40,6 +40,7 @@ def test_event_kinds_is_exactly_the_closed_set() -> None:
         "error",
         "text_delta",
         "heartbeat",
+        "replay_unavailable",
     }
     assert len(EVENT_KINDS) == len(set(EVENT_KINDS))
 

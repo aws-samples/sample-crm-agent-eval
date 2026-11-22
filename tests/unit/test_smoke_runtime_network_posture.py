@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
 """Tests for `scripts.smoke.runtime_network_posture`, against fake control-plane and EC2 clients.
 
-Each test flips one input and asserts the matching row's disposition; the SourceVpce Deny rows
-`defer` (never `pass`) while the Deny is absent.
+Each test flips one input and asserts the matching row's disposition. An absent SourceVpce Deny
+`defer`s (never `pass`) only while the deployment declares it disabled, and fails otherwise; the
+declared state is pinned to disabled unless a test sets it.
 """
 
 from __future__ import annotations
@@ -15,12 +16,14 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 from scripts import region_map
+from scripts.smoke import runtime_network_posture as module
 from scripts.smoke.harness import CheckResult, context_for_test
 from scripts.smoke.runtime_network_posture import (
     DEFAULT_ENDPOINT_NAME,
     DENY_VARIABLE,
     EXPECTED_PLATFORM_VERSION,
     DeclaredDeny,
+    DeclaredDenyState,
     checks,
     copy_platform_version,
     declared_source_vpce_deny,
@@ -197,6 +200,15 @@ class _FakeEc2:
         return {"VpcEndpoints": endpoints}
 
 
+_STAGE_ONE = DeclaredDenyState(DeclaredDeny.DISABLED, "test: terraform.tfvars")
+
+
+@pytest.fixture(autouse=True)
+def _declared_stage_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the declared Deny state so no test reads this host's tfvars."""
+    monkeypatch.setattr(module, "declared_source_vpce_deny", lambda: _STAGE_ONE)
+
+
 def _run(
     *,
     runtime: dict[str, Any] | None = None,
@@ -237,8 +249,54 @@ def test_compliant_stage_one_posture() -> None:
     assert _statuses(r, "runtime_sg_egress_no_open_cidr") == ["pass"]
     assert _statuses(r, "d2_interface_endpoint_available") == ["pass", "pass", "pass"]
     assert _statuses(r, "d2_endpoint_reachable_from_runtime_sg") == ["pass", "pass", "pass"]
-    # Two policies (runtime + endpoint), both defer while the Deny is absent.
+    # Two policies (runtime + endpoint), both defer while the Deny is absent and declared disabled.
     assert _statuses(r, "source_vpce_deny_state") == ["defer", "defer"]
+    rows = [row for row in r.values() if row.check == "source_vpce_deny_state"]
+    assert {row.defer_reason for row in rows} == {"stage_1_declared_by_operator"}
+    assert all("test: terraform.tfvars" in row.detail for row in rows)
+
+
+@pytest.mark.parametrize(
+    "state", [DeclaredDeny.ENABLED, DeclaredDeny.UNKNOWN], ids=["declared_enabled", "unknown"]
+)
+def test_an_absent_deny_fails_unless_declared_disabled(
+    monkeypatch: pytest.MonkeyPatch, state: DeclaredDeny
+) -> None:
+    """Absent with the Deny declared enabled, or with no readable declaration, fails both rows."""
+    declared = DeclaredDenyState(state, "test: declared source")
+    monkeypatch.setattr(module, "declared_source_vpce_deny", lambda: declared)
+    r = _run()
+    assert _statuses(r, "source_vpce_deny_state") == ["fail", "fail"]
+    rows = [row for row in r.values() if row.check == "source_vpce_deny_state"]
+    assert all(not row.defer_reason for row in rows)
+    assert all("ABSENT" in row.detail and "test: declared source" in row.detail for row in rows)
+
+
+@pytest.mark.parametrize("state", list(DeclaredDeny))
+def test_a_present_deny_passes_whatever_is_declared(
+    monkeypatch: pytest.MonkeyPatch, state: DeclaredDeny
+) -> None:
+    declared = DeclaredDenyState(state, "test: declared source")
+    monkeypatch.setattr(module, "declared_source_vpce_deny", lambda: declared)
+    assert _statuses(_run(policy=_DENY_POLICY), "source_vpce_deny_state") == ["pass", "pass"]
+
+
+@pytest.mark.parametrize("state", list(DeclaredDeny))
+def test_a_failed_policy_read_fails_whatever_is_declared(
+    monkeypatch: pytest.MonkeyPatch, state: DeclaredDeny
+) -> None:
+    declared = DeclaredDenyState(state, "test: declared source")
+    monkeypatch.setattr(module, "declared_source_vpce_deny", lambda: declared)
+    ctx = context_for_test(
+        outputs=_OUTPUTS,
+        clients={
+            "bedrock-agentcore-control": _ControlPlaneResourcePolicyRaises(_COMPLIANT_RUNTIME),
+            "ec2": _FakeEc2(),
+        },
+    )
+    rows = [row for row in checks(ctx) if row.check == "source_vpce_deny_state"]
+    assert [row.status for row in rows] == ["fail", "fail"]
+    assert all("could not be read" in row.detail for row in rows)
 
 
 def test_public_network_mode_fails() -> None:
@@ -530,6 +588,11 @@ _VARIABLES_DEFAULT_FALSE = (
 )
 
 
+_VARIABLES_DEFAULT_TRUE = _VARIABLES_DEFAULT_FALSE.replace(
+    "default     = false", "default     = true"
+)
+
+
 def _infra(tmp_path: Path, files: dict[str, str]) -> Path:
     for name, text in files.items():
         (tmp_path / name).write_text(text, encoding="utf-8")
@@ -572,13 +635,45 @@ def test_no_variable_file_on_this_host_is_unknown(tmp_path: Path) -> None:
     assert declared_source_vpce_deny(infra).state is DeclaredDeny.UNKNOWN
 
 
+def _real_default_by_line_scan(variables_tf: str) -> str:
+    """The real default, read by a line scan independent of the module's regex."""
+    lines = variables_tf.splitlines()
+    start = lines.index(f'variable "{DENY_VARIABLE}" {{')
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    defaults = [
+        ln.split("=", 1)[1].strip() for ln in lines[start:end] if ln.strip().startswith("default")
+    ]
+    assert len(defaults) == 1, defaults
+    return defaults[0]
+
+
 def test_an_unassigned_variable_takes_the_real_variables_tf_default(tmp_path: Path) -> None:
     """Contract with `infra/variables.tf`: its default is what an unassigned deployment declares."""
-    real = (Path(__file__).resolve().parents[2] / "infra" / "variables.tf").read_text("utf-8")
+    real = (_REPO_ROOT / "infra" / "variables.tf").read_text("utf-8")
     infra = _infra(tmp_path, {"terraform.tfvars": 'vpc_id = "x"\n', "variables.tf": real})
     declared = declared_source_vpce_deny(infra)
-    assert declared.state is DeclaredDeny.DISABLED
+    expected = {"true": DeclaredDeny.ENABLED, "false": DeclaredDeny.DISABLED}
+    assert declared.state is expected[_real_default_by_line_scan(real)]
     assert "variables.tf default" in declared.source
+
+
+def test_an_unassigned_variable_with_a_true_default_is_declared_enabled(tmp_path: Path) -> None:
+    infra = _infra(
+        tmp_path, {"terraform.tfvars": 'vpc_id = "x"\n', "variables.tf": _VARIABLES_DEFAULT_TRUE}
+    )
+    declared = declared_source_vpce_deny(infra)
+    assert declared.state is DeclaredDeny.ENABLED
+    assert declared.source == f"variables.tf default: {DENY_VARIABLE} = true"
+
+
+def test_a_tfvars_false_overrides_a_true_default(tmp_path: Path) -> None:
+    infra = _infra(
+        tmp_path,
+        {"terraform.tfvars": f"{DENY_VARIABLE} = false\n", "variables.tf": _VARIABLES_DEFAULT_TRUE},
+    )
+    declared = declared_source_vpce_deny(infra)
+    assert declared.state is DeclaredDeny.DISABLED
+    assert declared.source == f"terraform.tfvars: {DENY_VARIABLE} = false"
 
 
 def test_an_unreadable_default_is_unknown(tmp_path: Path) -> None:

@@ -8,7 +8,9 @@ continues to, is the next run of most recent records. Scope is enforced by
 ``account_id`` is withheld. Both ``audit_records`` indexes this handler
 queries project ``target_id``, ``target_table`` and ``status``. A caller with an empty book and no
 full visibility is denied before any read; ``next_cursor`` is bound to the caller and the
-``target_id`` it was issued for (:mod:`crm.cursor`).
+``target_id`` it was issued for (:mod:`crm.cursor`). A page over
+:data:`crm.paging.HANDLER_PAGE_BYTE_BUDGET` is cut in query order, marked ``truncated: True``, and
+its ``next_cursor`` resumes after the last record returned.
 """
 
 from __future__ import annotations
@@ -19,11 +21,13 @@ from crm.authz import Identity, filter_to_scope, require_listing_scope
 from crm.cursor import bound_operation, decode_cursor, encode_cursor
 from crm.errors import ValidationFailed
 from crm.handlers._common import build_handler
+from crm.paging import bound_page, resume_key
 from crm.store.keys import tenant_prefixed
 from crm.store.store import Store
 
 _DEFAULT_LIMIT = 50
 _OPERATION = "list_audit_records"
+_TABLE = "audit_records"
 
 
 def _list_audit_records(
@@ -59,12 +63,17 @@ def _list_audit_records(
             scan_forward=False,
         )
 
-    visible = filter_to_scope(identity, items)
+    visible, cut = bound_page(filter_to_scope(identity, items))
+    if cut:
+        next_key = resume_key(_TABLE, index_name, visible[-1])
 
-    return {
+    result: dict[str, Any] = {
         "audit_records": visible,
         "next_cursor": encode_cursor(next_key, identity=identity, operation=binding),
     }
+    if cut:
+        result["truncated"] = True
+    return result
 
 
 handler = build_handler(_list_audit_records)

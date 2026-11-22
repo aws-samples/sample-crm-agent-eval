@@ -706,7 +706,7 @@ def test_a_runtime_turn_timeout_is_recorded_as_a_turn_timeout_item(
     deployment: Deployment, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The real app's 504 crosses AgentCore as a fixed-message 424 and is still recorded
-    `TurnTimeout`, not a generic failure. Its cost is recorded as unmeasured."""
+    `turn_timeout`, not a generic failure. Its cost is recorded as unmeasured."""
 
     def _timed_out(**_: Any) -> dict[str, Any]:
         raise TimeoutError
@@ -716,9 +716,8 @@ def test_a_runtime_turn_timeout_is_recorded_as_a_turn_timeout_item(
     record = require_run(deployment.store, deployment.run_id)
     assert record.tasks_failed == 4
     rows = _result_rows(deployment)
-    errors = [str(row["error"]) for row in rows]
-    assert len(errors) == 4
-    assert all(error.startswith("TurnTimeout:") for error in errors), errors
+    assert [row["error_code"] for row in rows] == ["turn_timeout"] * 4
+    assert all("error" not in row for row in rows)
     assert [row["cost_measured"] for row in rows] == [False] * 4
 
 

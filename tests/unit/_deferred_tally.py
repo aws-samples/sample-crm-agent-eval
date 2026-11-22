@@ -18,5 +18,7 @@ EXPECTED_DEFERRED_BY_CONTROL: Final[Mapping[str, int]] = MappingProxyType(
         # `modules/eval_artifacts`' logging destination is a module input, so the link to its
         # destination bucket is deferred while the destination's grant is asserted.
         "s3_access_log_delivery_grant": 1,
+        # No web ACL is authored; the WAF row is DEFER (unmet).
+        "waf_deferral_current": 1,
     }
 )

@@ -27,7 +27,7 @@ from eval.matrix import (
     write_matrix_artifacts,
 )
 
-_MODEL_IDS = ("anthropic.claude-opus-5-5", "openai.gpt-6-astra")
+_MODEL_IDS = ("anthropic.claude-opus-5-5", "openai.gpt-6.2-astra")
 
 
 def _arm(model_id: str, family: str) -> ArmResult:
@@ -43,6 +43,8 @@ def _arm(model_id: str, family: str) -> ArmResult:
             price_table_version="v0-provisional",
             answer_style_sha256="0" * 64,
             prompt_caching="explicit cache points",
+            output_token_cap=16_384,
+            dirty_tree=False,
         ),
         model_metrics_fields={
             "model_id": model_id,
@@ -191,7 +193,7 @@ def test_artifacts_rendered_together_carry_a_complete_summary(tmp_path: Path) ->
         (_drop_column, "carries 1 column(s), expected 2 (one per arm)"),
         (
             _swap_column_models,
-            "expected the arms' ['anthropic.claude-opus-5-5', 'openai.gpt-6-astra']",
+            "expected the arms' ['anthropic.claude-opus-5-5', 'openai.gpt-6.2-astra']",
         ),
         (_drop_tier, "tier_comparison tiers are ['subagent', 'supervisor'], expected"),
         (_drop_tier_entry, "tier_comparison 'subagent' carries 1 entr(ies), expected 2"),

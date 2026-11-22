@@ -490,25 +490,38 @@ def residue_checks(
     )
 
 
+#: ``run_id`` prefix of the ``eval_runs`` daily live-sweep cap counter rows (one per UTC day, no
+#: ``status``); they are not catalogue rows.
+LIVE_QUOTA_ROW_PREFIX: Final[str] = "livequota#"
+
+
 def catalogue_terminal_check(resource: str, catalogue: list[dict[str, Any]]) -> CheckResult:
     """``eval_runs_catalogue_all_terminal`` over raw ``eval_runs`` items: every run row reads
-    ``torn_down``. A ``job#<run_id>`` row (status :data:`eval.runs.JOB_ROW_STATUS`) is not a
-    catalogue row and is not counted."""
+    ``torn_down``. A ``job#<run_id>`` row (status :data:`eval.runs.JOB_ROW_STATUS`) and a
+    :data:`LIVE_QUOTA_ROW_PREFIX` counter row are not catalogue rows and are not counted; any other
+    row without a ``status`` counts as non-terminal."""
     from eval.runs import JOB_ROW_STATUS
 
-    runs = [item for item in catalogue if item.get("status", {}).get("S") != JOB_ROW_STATUS]
+    jobs = [item for item in catalogue if item.get("status", {}).get("S") == JOB_ROW_STATUS]
+    quotas = [
+        item
+        for item in catalogue
+        if str(item.get("run_id", {}).get("S", "")).startswith(LIVE_QUOTA_ROW_PREFIX)
+        and item.get("status", {}).get("S") != JOB_ROW_STATUS
+    ]
+    counted_out = {id(item) for item in (*jobs, *quotas)}
+    runs = [item for item in catalogue if id(item) not in counted_out]
     statuses = Counter(item.get("status", {}).get("S", "<none>") for item in runs)
     non_terminal = {s: n for s, n in statuses.items() if s != "torn_down"}
-    excluded = len(catalogue) - len(runs)
+    not_counted = f"{len(jobs)} job rows not counted, {len(quotas)} live-quota rows not counted"
     return CheckResult(
         resource=resource,
         check="eval_runs_catalogue_all_terminal",
         status=PASS if not non_terminal else FAIL,
         detail=(
-            f"{len(runs)} run rows, all 'torn_down' ({excluded} job rows not counted)"
+            f"{len(runs)} run rows, all 'torn_down' ({not_counted})"
             if not non_terminal
-            else f"{len(runs)} run rows; non-terminal: {non_terminal} ({excluded} job rows not "
-            "counted)"
+            else f"{len(runs)} run rows; non-terminal: {non_terminal} ({not_counted})"
         ),
     )
 

@@ -61,8 +61,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: "high",
         },
       },
-      "openai.gpt-6-astra": {
-        model_id: "openai.gpt-6-astra",
+      "openai.gpt-6.2-astra": {
+        model_id: "openai.gpt-6.2-astra",
         family: "openai",
         tier: "supervisor",
         effort: {
@@ -72,8 +72,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: null,
         },
       },
-      "openai.gpt-6.1-sol": {
-        model_id: "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-sol": {
+        model_id: "openai.gpt-6.2-sol",
         family: "openai",
         tier: "subagent",
         effort: {
@@ -102,8 +102,8 @@ function rawMatrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: { effort: "low" } },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: { effort: "low" } },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: { effort: "medium" } },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: { effort: "low" } },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: { effort: "medium" } },
         tool: { model_id: "openai.gpt-6-luna", tuning: { effort: "low" } },
       },
     },

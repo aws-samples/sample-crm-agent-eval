@@ -3,8 +3,9 @@
 
 * No module under `src/` imports `scripts`, which is not in any Lambda archive.
 * `_read_demo_baseline` runs before the first write (`record_run_started`), nothing that can raise
-  sits between that write and the `try`, the unit tenants are seeded as the `try` body's first
-  statement, and the `finally` computes the delta checks before `teardown_unit_tenants`.
+  sits between that write and the teardown `try` (the one top-level `try` whose `finally` calls
+  `teardown_unit_tenants`), the unit tenants are seeded as that `try` body's first statement, and
+  the `finally` computes the delta checks before `teardown_unit_tenants`, in source order.
 """
 
 from __future__ import annotations
@@ -39,9 +40,32 @@ def _index_of_call(body: list[ast.stmt], name: str) -> int:
     return found[0]
 
 
+def _finally_calls(block: ast.Try) -> list[str]:
+    """Names of the functions `block`'s `finally` calls, in source order."""
+    calls = [
+        call
+        for stmt in block.finalbody
+        for call in ast.walk(stmt)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+    ]
+    return [
+        call.func.id
+        for call in sorted(calls, key=lambda c: (c.lineno, c.col_offset))
+        if isinstance(call.func, ast.Name)
+    ]
+
+
 def _try_index(body: list[ast.stmt]) -> int:
-    found = [i for i, stmt in enumerate(body) if isinstance(stmt, ast.Try)]
-    assert len(found) == 1, f"expected exactly one top-level try in run_sweep, found {len(found)}"
+    """Index of the one top-level `try` whose `finally` tears the unit tenants down."""
+    found = [
+        i
+        for i, stmt in enumerate(body)
+        if isinstance(stmt, ast.Try) and "teardown_unit_tenants" in _finally_calls(stmt)
+    ]
+    assert len(found) == 1, (
+        f"expected exactly one top-level try in run_sweep whose finally calls "
+        f"teardown_unit_tenants, found {len(found)}"
+    )
     return found[0]
 
 
@@ -85,25 +109,14 @@ class TestSeedAndTeardownOrdering:
         block = body[_try_index(body)]
         assert isinstance(block, ast.Try)
         assert block.finalbody, "run_sweep's try has no finally, so teardown is not guaranteed"
-        calls = [
-            call.func.id
-            for stmt in block.finalbody
-            for call in ast.walk(stmt)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-        ]
-        assert "teardown_unit_tenants" in calls
+        assert "teardown_unit_tenants" in _finally_calls(block)
 
     def test_the_fr93_checks_are_computed_before_teardown_inside_the_finally(self) -> None:
         """Inside the `finally`, `_fr93_delta_checks` is called before `teardown_unit_tenants`."""
         body = _run_sweep().body
         block = body[_try_index(body)]
         assert isinstance(block, ast.Try)
-        order = [
-            call.func.id
-            for stmt in block.finalbody
-            for call in ast.walk(stmt)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-        ]
+        order = _finally_calls(block)
         assert "_fr93_delta_checks" in order and "teardown_unit_tenants" in order
         assert order.index("_fr93_delta_checks") < order.index("teardown_unit_tenants")
 

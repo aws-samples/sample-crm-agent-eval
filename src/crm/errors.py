@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Closed error taxonomy for the CRM API surface.
 
-Every failure crossing the API boundary is one of six named members or the generic
+Every failure crossing the API boundary is one of seven named members or the generic
 ``internal_error`` base. Each carries a user-safe ``message``, a ``detail`` that is only logged, and a
 class-level :data:`NextStep` rendered as ``error.next_step``.
 :func:`wrap_aws_error` converts an AWS SDK exception into one of them, or into :class:`ServiceBusy`
@@ -226,6 +226,29 @@ class ContactDeparted(CrmError):
         }
 
 
+#: The user-safe message :class:`ProposalStale` carries by default.
+PROPOSAL_STALE_MESSAGE: Final[str] = (
+    "This proposal has waited too long to be approved. Reject it, and submit a new one if the "
+    "change is still wanted."
+)
+
+
+class ProposalStale(CrmError):
+    """A pending proposal is older than the approval window; it may still be rejected."""
+
+    http_status = 409
+    code = "proposal_stale"
+    next_step: NextStep = "tell_user"
+
+    def __init__(
+        self,
+        message: str = PROPOSAL_STALE_MESSAGE,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail)
+
+
 class TurnTimeout(CrmError):
     """An eval turn outlived its wall-clock deadline and was cancelled.
 
@@ -280,6 +303,7 @@ TAXONOMY: Final[tuple[type[CrmError], ...]] = (
     ValidationFailed,
     Conflict,
     ContactDeparted,
+    ProposalStale,
 )
 
 #: A mapped entry's constructor: takes ``message`` and returns a :class:`CrmError`.

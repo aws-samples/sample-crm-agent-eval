@@ -3,13 +3,13 @@
 
 Implements the AgentCore Runtime HTTP protocol contract on ``0.0.0.0:8080``: ``GET /ping`` for
 health and ``POST /invocations`` for the agent interaction, with a ``text/event-stream`` response.
-``/invocations`` also accepts ``mode`` values ``isolation_probe``, ``delegation``, ``cancel`` and
-``eval_turn`` (JSON, eval tenants only); every mode goes through :func:`_authenticated_payload`, which keeps only the
-:data:`crm.envelope.AGENT_IDENTITY_KEY` channel in the SigV4-authenticated payload. Identity, tuning
-and event framing are delegated to :mod:`agents.runtime_entrypoint`, and turns are driven by
-:func:`agents.turn_driver.drive_turn` with each tier's provider resolved by that tier's family. A
-chat turn's stream carries a ``heartbeat`` event after every :data:`HEARTBEAT_INTERVAL_SECONDS`
-without another event.
+``/invocations`` also accepts ``mode`` values ``isolation_probe``, ``cancel`` and ``eval_turn``
+(JSON, eval tenants only); any other ``mode`` value takes the turn path. Every mode goes through
+:func:`_authenticated_payload`, which keeps only the :data:`crm.envelope.AGENT_IDENTITY_KEY`
+channel in the SigV4-authenticated payload. Identity, tuning and event framing are delegated to
+:mod:`agents.runtime_entrypoint`, and turns are driven by :func:`agents.turn_driver.drive_turn`
+with each tier's provider resolved by that tier's family. A chat turn's stream carries a
+``heartbeat`` event after every :data:`HEARTBEAT_INTERVAL_SECONDS` without another event.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import AsyncGenerator, Callable, Iterator, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterator
 from typing import Any, Final
 
 from starlette.applications import Starlette
@@ -44,31 +44,25 @@ from agents.conversation_history import (
     InMemoryConversationHistory,
 )
 from agents.events import AgentEvent, ErrorKind
-from agents.registry import RegisteredTool, tool_registry_for
+from agents.registry import tool_registry_for
 from agents.runtime_entrypoint import (
     InMemorySessionStore,
     RuntimeInvocation,
     decode_invocation,
-    event_payload,
     format_sse_line,
     resolve_identity,
     resolve_tuning,
     run_turn,
 )
-from agents.subagents import ALL_SUBAGENT_SPECS, SUBAGENT_SPECS_BY_ROLE
+from agents.subagents import SUBAGENT_SPECS_BY_ROLE
 from agents.supervisor import (
-    DIRECT_TOOL_NAMES,
     SUPERVISOR_ROLE,
     classify_tool_result,
-    describe_truncation,
     is_cancellation_event,
-    proposal_event_for,
-    synthesize_reply,
 )
 from agents.tool_dispatch import (
     action_function_name,
     agent_identity_event,
-    dispatch_tool_call,
     production_dispatch,
 )
 from agents.turn_driver import ProviderResolver, TurnRecords, drive_turn
@@ -294,47 +288,6 @@ def _record_store() -> Store:
     if _store is None:
         _store = Store(table_prefix=os.environ.get("CRM_TABLE_PREFIX", ""))
     return _store
-
-
-#: Module-level, patchable binding of :func:`agents.tool_dispatch.dispatch_tool_call`, used by the
-#: delegation mode; the turn path passes an identity-bound dispatch to the turn driver instead.
-_dispatch_tool_call = dispatch_tool_call
-
-
-def _all_tools() -> tuple[RegisteredTool, ...]:
-    """Return every tool the supervisor or a subagent may reach, supervisor tools first.
-
-    Supervisor direct tools are listed first, then every subagent's tools, deduplicated by name.
-    """
-    seen: dict[str, RegisteredTool] = {}
-    for tool in tool_registry_for(SUPERVISOR_ROLE):
-        seen.setdefault(tool.name, tool)
-    for spec in SUBAGENT_SPECS_BY_ROLE.values():
-        for tool in spec.tools:
-            seen.setdefault(tool.name, tool)
-    return tuple(seen.values())
-
-
-def proposal_event_or_none(tool_output: Mapping[str, Any]) -> AgentEvent | None:
-    """Return the structured ``proposal`` event ``tool_output`` carries, or ``None`` if it carries none.
-
-    Rendering is delegated to :func:`agents.supervisor.proposal_event_for`.
-
-    Args:
-        tool_output: One action Lambda's own wire response, from :func:`agents.tool_dispatch.dispatch_tool_call`.
-
-    Returns:
-        The rendered event, or ``None`` when the response carries no proposal at all — an error
-        response, or any tool other than ``submit_proposal``.
-
-    Raises:
-        ValueError: The response carries a ``proposal`` block that is not renderable.
-    """
-    body = tool_output.get("body", tool_output)
-    payload = body if isinstance(body, Mapping) else {}
-    if not isinstance(payload.get("proposal"), Mapping):
-        return None
-    return proposal_event_for(dict(tool_output))
 
 
 def _history_messages(session_id: str, identity: Identity) -> list[dict[str, object]]:
@@ -649,124 +602,6 @@ def _isolation_probe_response(payload: dict[str, Any]) -> Response:
                 "event": "isolation_probe",
                 "rep_id": identity.rep_id,
                 "reason": f"role={role or 'supervisor'} trigger={trigger_raw or 'none'}",
-            }
-        )
-    )
-    return JSONResponse(body)
-
-
-#: Payload field value selecting the delegation mode, and the fields it reads. This mode invokes the
-#: named tool's action Lambda for real, without a model call.
-_DELEGATION_MODE: Final[str] = "delegation"
-_TOOL_NAME_KEY: Final[str] = "tool_name"
-_TOOL_INPUT_KEY: Final[str] = "tool_input"
-
-
-def resolve_delegation_role(tool_name: str) -> str | None:
-    """Return the subagent role that owns ``tool_name``, or ``None`` if the supervisor holds it.
-
-    A tool in :data:`agents.supervisor.DIRECT_TOOL_NAMES` resolves to ``None``; any other resolves to
-    the first role in :data:`agents.subagents.ALL_SUBAGENT_SPECS` order that holds it.
-
-    Args:
-        tool_name: The tool the turn wants called.
-
-    Returns:
-        The owning subagent role, or ``None`` when the supervisor holds ``tool_name`` directly or
-        when no role holds it at all (the caller distinguishes the two by checking the tool exists).
-    """
-    if tool_name in DIRECT_TOOL_NAMES:
-        return None
-    for spec in ALL_SUBAGENT_SPECS:
-        if tool_name in spec.tool_names:
-            return spec.role
-    return None
-
-
-def _delegation_response(payload: dict[str, Any]) -> Response:
-    """Answer a delegation request: route it, dispatch it for real, and classify the outcome.
-
-    Identity resolves through :func:`resolve_identity`; with no usable identity it returns ``401``.
-    The tool is routed by :func:`resolve_delegation_role`, dispatched by
-    :func:`agents.tool_dispatch.dispatch_tool_call` on the ``agent`` identity channel, and its
-    response classified by :func:`agents.supervisor.classify_tool_result`. A ``denied`` or
-    ``tool_failure`` outcome carries no ``reported_result``.
-
-    Args:
-        payload: The inbound body, already reduced to the ``agent`` identity channel. Reads
-            ``tool_name`` and an optional ``tool_input`` object.
-
-    Returns:
-        A JSON response carrying ``mode``, ``delegated``, ``delegation``, ``outcome``,
-        ``reported_result``, ``proposal_event`` (the proposal event payload when the dispatched
-        tool raised a proposal, else ``None``), ``reply_text``, and the Lambda's own
-        ``tool_result``; or a taxonomy-shaped error response.
-    """
-    try:
-        identity = resolve_identity(payload)
-    except CrmError as exc:
-        logger.info(json.dumps({"event": "delegation_rejected", "reason": exc.code}))
-        return JSONResponse(exc.to_api_response(), status_code=exc.http_status)
-
-    tool_name = str(payload.get(_TOOL_NAME_KEY) or "")
-    tool = {registered.name: registered for registered in _all_tools()}.get(tool_name)
-    if tool is None:
-        unknown_tool = ValidationFailed(
-            "That tool is not recognised.",
-            source=f"agent.invocation.{_TOOL_NAME_KEY}",
-            detail=f"unknown tool {tool_name!r}",
-        )
-        return JSONResponse(unknown_tool.to_api_response(), status_code=unknown_tool.http_status)
-
-    raw_input = payload.get(_TOOL_INPUT_KEY)
-    tool_input: dict[str, object] = dict(raw_input) if isinstance(raw_input, dict) else {}
-
-    role = resolve_delegation_role(tool_name)
-    try:
-        tool_result = _dispatch_tool_call(tool, tool_input, identity=identity)
-    except Exception:
-        logger.exception(json.dumps({"event": "delegation_failed", "reason": "dispatch_failed"}))
-        failure = CrmError("The request could not be completed.")
-        return JSONResponse(failure.to_api_response(), status_code=failure.http_status)
-
-    outcome = classify_tool_result(tool_result)
-    try:
-        proposal_event = proposal_event_or_none(tool_result)
-    except ValueError as exc:
-        logger.warning(json.dumps({"event": "proposal_render_failed", "reason": str(exc)[:200]}))
-        unrenderable = CrmError("The proposed change could not be presented for approval.")
-        return JSONResponse(unrenderable.to_api_response(), status_code=unrenderable.http_status)
-    body: dict[str, Any] = {
-        _MODE_KEY: _DELEGATION_MODE,
-        "delegated": role is not None,
-        "delegation": (
-            None
-            if role is None
-            else {_ROLE_KEY: role, _TOOL_NAME_KEY: tool_name, _TOOL_INPUT_KEY: tool_input}
-        ),
-        "direct_tool": tool_name if role is None else None,
-        "outcome": {
-            "kind": outcome.kind,
-            "missing_scope": outcome.missing_scope,
-            "denial_message": outcome.denial_message,
-            "error_message": outcome.error_message,
-        },
-        "reported_result": outcome.data,
-        "proposal_event": None if proposal_event is None else event_payload(proposal_event),
-        "reply_text": synthesize_reply(
-            outcome,
-            truncation_notice=describe_truncation(tool_result, event_truncated=False),
-        ),
-        "tool_result": tool_result,
-    }
-
-    # Log keys are limited to `scripts/check_log_redaction.py`'s allowlist.
-    logger.info(
-        json.dumps(
-            {
-                "event": "delegation",
-                "rep_id": identity.rep_id,
-                "reason": f"role={role or SUPERVISOR_ROLE} tool={tool_name} outcome={outcome.kind}",
             }
         )
     )
@@ -1117,7 +952,7 @@ async def invocations(request: Request) -> Response:
     """``POST /invocations`` -- the primary agent interaction endpoint (JSON in; SSE or JSON out).
 
     Reduces the body with :func:`_authenticated_payload`, answers the ``isolation_probe``,
-    ``delegation``, ``cancel`` and ``eval_turn`` modes, and otherwise decodes a turn with
+    ``cancel`` and ``eval_turn`` modes, and otherwise decodes a turn with
     :func:`agents.runtime_entrypoint.decode_invocation` and streams
     :func:`agents.runtime_entrypoint.run_turn`'s already-framed SSE lines verbatim.
 
@@ -1150,9 +985,6 @@ async def invocations(request: Request) -> Response:
 
     if payload.get(_MODE_KEY) == _ISOLATION_PROBE_MODE:
         return _isolation_probe_response(payload)
-
-    if payload.get(_MODE_KEY) == _DELEGATION_MODE:
-        return _delegation_response(payload)
 
     # Dispatched before decoding, which requires a prompt.
     if payload.get(_MODE_KEY) == _CANCEL_MODE:
@@ -1252,5 +1084,4 @@ __all__ = [
     "configure_logging",
     "invocations",
     "ping",
-    "resolve_delegation_role",
 ]

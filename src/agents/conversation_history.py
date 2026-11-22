@@ -11,7 +11,9 @@ and then capped at ``max_field_chars``.
 :class:`InMemoryConversationHistory` is process-local and lost on restart.
 :class:`DynamoDbConversationHistory` keeps one ``reps`` item per ``(tenant, session_id)`` through
 :class:`crm.store.store.Store`, expiring ``ttl_seconds`` after its last write, and serialises
-concurrent writers with an optimistic version check.
+concurrent writers with an optimistic version check. That check orders turns by when their writes
+commit, not by when the turns began: a turn whose write lands after a later turn's is appended
+after it, and no turn sequence exists to reorder them.
 """
 
 from __future__ import annotations
@@ -121,15 +123,27 @@ class ConversationHistoryStore(Protocol):
     """The server-side conversation-history contract the production turn path reads and writes."""
 
     def record_turn(self, session_id: str, *, identity: Identity, prompt: str, answer: str) -> None:
-        """Record ``(prompt, answer)`` for ``session_id`` on behalf of ``identity``."""
+        """Record ``(prompt, answer)`` for ``session_id`` on behalf of ``identity``.
+
+        Raises:
+            crm.errors.ValidationFailed: ``session_id`` is blank.
+        """
         raise NotImplementedError
 
     def history_for(self, session_id: str, *, identity: Identity) -> tuple[HistoryTurn, ...]:
-        """Return the prior turns for ``session_id`` visible to ``identity`` (oldest first)."""
+        """Return the prior turns for ``session_id`` visible to ``identity`` (oldest first).
+
+        Raises:
+            crm.errors.ValidationFailed: ``session_id`` is blank.
+        """
         raise NotImplementedError
 
     def clear(self, session_id: str, *, identity: Identity) -> None:
-        """Forget ``session_id``'s history on behalf of its owner ``identity``."""
+        """Forget ``session_id``'s history on behalf of its owner ``identity``.
+
+        Raises:
+            crm.errors.ValidationFailed: ``session_id`` is blank.
+        """
         raise NotImplementedError
 
 
@@ -207,12 +221,14 @@ class InMemoryConversationHistory:
         """Forget ``session_id``'s history. A no-op when it is not present.
 
         Raises:
+            crm.errors.ValidationFailed: ``session_id`` is blank.
             crm.errors.ScopeDenied: ``session_id`` belongs to a different principal.
         """
-        session = self._sessions.get(session_id)
+        key = _require_session_id(session_id)
+        session = self._sessions.get(key)
         if session is not None and session.owner != _Owner.of(identity):
             raise _denied("clear of a session the caller does not own")
-        self._sessions.pop(session_id, None)
+        self._sessions.pop(key, None)
 
 
 def _utc_now() -> datetime:
@@ -223,7 +239,8 @@ class DynamoDbConversationHistory:
     """A durable :class:`ConversationHistoryStore` on the ``reps`` table, one item per session.
 
     The item key embeds the caller's tenant, so another tenant's session reads empty. An item past
-    its ``expires_at`` reads empty, whether or not a TTL has deleted it yet. Every read is strongly
+    its ``expires_at`` reads empty, whether or not a TTL has deleted it yet, but only its owner may
+    write or clear it until it is deleted. Every read is strongly
     consistent. Item attributes are exactly :data:`HISTORY_ITEM_ATTRIBUTES`; there is no
     ``tenant``, so no index lists the item.
 
@@ -259,9 +276,13 @@ class DynamoDbConversationHistory:
     def record_turn(self, session_id: str, *, identity: Identity, prompt: str, answer: str) -> None:
         """Append a redacted, bounded ``(prompt, answer)`` to ``session_id``'s item.
 
+        An expired item still belongs to its owner until it is deleted; the owner's write replaces
+        its turns with the new one.
+
         Raises:
             crm.errors.ValidationFailed: ``session_id`` is blank.
-            crm.errors.ScopeDenied: ``session_id`` already belongs to a different principal.
+            crm.errors.ScopeDenied: ``session_id``'s item, expired or not, belongs to a different
+                principal.
             HistoryWriteConflict: Every one of :data:`MAX_WRITE_ATTEMPTS` writes lost a race.
             crm.errors.CrmError: The store failed, or the stored item is malformed.
         """
@@ -278,10 +299,13 @@ class DynamoDbConversationHistory:
             item = self._store.get_item(HISTORY_TABLE, {_PARTITION_KEY: key}, consistent=True)
             expected_version = None if item is None else _version_of(item)
             prior: list[dict[str, str]] = []
-            if item is not None and not _expired(item, now):
+            if item is not None:
                 if _owner_of(item) != owner:
                     raise _denied("write to a session the caller does not own")
-                prior = [{"prompt": turn.prompt, "answer": turn.answer} for turn in _turns_of(item)]
+                if not _expired(item, now):
+                    prior = [
+                        {"prompt": turn.prompt, "answer": turn.answer} for turn in _turns_of(item)
+                    ]
             turns = [*prior, new_turn][-self.max_turns :]
             written = self._store.put_conditional(
                 HISTORY_TABLE,
@@ -323,16 +347,16 @@ class DynamoDbConversationHistory:
         return _turns_of(item)
 
     def clear(self, session_id: str, *, identity: Identity) -> None:
-        """Delete ``session_id``'s item. A no-op when it is missing or expired.
+        """Delete ``session_id``'s item, expired or not. A no-op when it is missing.
 
         Raises:
             crm.errors.ValidationFailed: ``session_id`` is blank.
-            crm.errors.ScopeDenied: The item belongs to a different principal.
+            crm.errors.ScopeDenied: The item, expired or not, belongs to a different principal.
             crm.errors.CrmError: The store failed, or the stored item is malformed.
         """
         key = self._key(session_id, identity)
         item = self._store.get_item(HISTORY_TABLE, {_PARTITION_KEY: key}, consistent=True)
-        if item is None or _expired(item, self._clock()):
+        if item is None:
             return
         if _owner_of(item) != _Owner.of(identity):
             raise _denied("clear of a session the caller does not own")

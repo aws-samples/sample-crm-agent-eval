@@ -175,6 +175,8 @@ class TurnOutcome:
         truncation_disclosed: Whether the turn surfaced a truncation notice, via
             :func:`agents.supervisor.describe_truncation`, for the truncation ``truncated`` reports.
             ``silent_truncation`` is ``truncated and not truncation_disclosed``.
+        output_truncated: Whether any model call of the turn, at any tier, stopped at the
+            output-token cap. Independent of ``truncated``, which is about tool output.
         observed_outcomes: Outcome labels the harness attaches for task-specific
             ``forbidden_outcomes`` checks this module cannot derive from the event stream (for
             example ``"wrong_contact_mutated"``). Every label is checked against the task's
@@ -190,6 +192,7 @@ class TurnOutcome:
     budget_exhausted_tier: Tier | None = None
     truncated: bool = False
     truncation_disclosed: bool = False
+    output_truncated: bool = False
     observed_outcomes: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:

@@ -51,6 +51,7 @@ _COMMON: dict[str, Any] = {
     "git_revision": "rev",
     "price_table_version": "1.0.0",
     "cost_withheld": True,
+    "dirty_tree": False,
 }
 
 

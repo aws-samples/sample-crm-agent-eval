@@ -31,7 +31,10 @@ repos:
 
       # One scan of the staged diff and one of the working tree's non-ignored files, as
       # `githooks/pre-commit` runs; the latter is the `check_secret_scan.py` gate itself.
-      # No `-c`: gitleaks loads the untracked `.gitleaks.toml` when present, else its built-in rules.
+      # The working-tree gate resolves the untracked `.gitleaks.toml`, else the tracked
+      # `config/gitleaks.toml`, else built-in rules. The staged entry passes no `-c`, so it loads
+      # `.gitleaks.toml` when present, else built-in rules; `githooks/pre-commit` also applies the
+      # tracked fallback to the staged scan, which an argv `entry` cannot express.
       # `env -u` drops inherited git location variables, which would point gitleaks at another
       # repository. `GIT_INDEX_FILE` is kept: for a partial commit it names the index being committed.
       # `githooks/pre-commit` additionally validates `GIT_INDEX_FILE` and the attributes file, which

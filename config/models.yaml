@@ -30,7 +30,7 @@ families:
   openai:
     tiers:
       supervisor:
-        model: openai.gpt-6.1-sol
+        model: openai.gpt-6.2-sol
         tuning: { effort: medium }
       subagent:
         model: openai.gpt-6.1-terra

@@ -343,8 +343,10 @@ tasks:
       reaching the timeline through the opportunity record is a correct answer and is not scored as a
       miss.
       **This task now exercises truncation.** PD-08 (`fixtures/generate.py`) plants 55 activities
-      on opp-0000, so a default `list_activities` page of 50, or a `get_opportunity` carrying the
-      full timeline, is larger than the tool-result bound and reaches the model truncated with a
+      on opp-0000. A default `list_activities` page of 50 is larger than the handler page budget,
+      so the handler returns a shorter page flagged `truncated: true` with a `next_cursor` to the
+      rest; a `get_opportunity` carrying the full timeline is larger than the tool-result bound and
+      is trimmed on the way to the model. Either result reaches the model flagged truncated with a
       disclosure. `forbidden_outcomes: [silent_truncation]`, derived from `outcome.truncated and
       not outcome.truncation_disclosed`, therefore checks a truncation the turn actually receives:
       whether the turn reports the listing as truncated rather than presenting it as complete. It

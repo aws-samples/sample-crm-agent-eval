@@ -40,7 +40,7 @@ from agents.events import (
 from agents.runtime_entrypoint import event_payload, format_sse_line
 
 #: Version of the frame contract itself, asserted by the relay at its hop.
-SCHEMA_VERSION: Final[str] = "3.0.0"
+SCHEMA_VERSION: Final[str] = "3.1.0"
 
 #: Build-output path for the rendered artefact, relative to the repository root.
 ARTEFACT_RELPATH: Final[str] = "build/schema/agent_events.json"

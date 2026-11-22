@@ -7,6 +7,8 @@
  *
  * `useAgentStream` holds the current turn and empties its transcript on every `sendPrompt`; each
  * arriving frame is forwarded into `AssistantPanelProvider`, which holds the whole conversation.
+ * When a resume is answered with `replay_unavailable`, a turn bubble renders only the frames after
+ * that frame, so the dropped attempt's partial answer is discarded in favour of the re-run.
  *
  * The transcript renders whether or not the runtime config has resolved; only the composer depends
  * on it. One always-mounted `polite` live region covers the transcript.
@@ -19,7 +21,7 @@ import { useLocation } from "react-router-dom";
 import { CrmApiError, CrmApiClient } from "../../api/CrmApiClient";
 import { useAuth } from "../../auth/AuthProvider";
 import { getRuntimeConfig } from "../../config/runtimeConfig";
-import { useAgentStream } from "../../hooks/useAgentStream";
+import { REPLAY_UNAVAILABLE_KIND, useAgentStream } from "../../hooks/useAgentStream";
 import { usePageContext } from "../../hooks/usePageContext";
 import { newTransactionKey } from "../../pages/approvals/transactionKey";
 import { getSessionTuning } from "../tuning/sessionTuning";
@@ -54,6 +56,11 @@ export const NEW_CONVERSATION_TESTID = "assistant-new-conversation";
 /** The answer while it streams (before completion), and one node per `event_id` within it. */
 export const STREAMING_ANSWER_TESTID = "assistant-streaming-answer";
 export const STREAMING_TEXT_TESTID = "assistant-streaming-text";
+
+/** The status note shown when a resumed turn had to start again from the beginning. */
+export const REPLAY_UNAVAILABLE_TESTID = "assistant-replay-unavailable";
+export const REPLAY_UNAVAILABLE_TEXT =
+  "The connection dropped before this answer was saved, so the assistant started it again.";
 
 /** The composer's visible label, and the accessible name of its field. */
 export const PROMPT_LABEL = "Ask about this page";
@@ -221,6 +228,14 @@ function resolveTerminalState(
   return null;
 }
 
+/** A turn's frames after its last `replay_unavailable` frame: the attempt that is still current. */
+function currentAttemptFrames(frames: readonly AgentEventFrame[]): readonly AgentEventFrame[] {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    if (frames[index].kind === REPLAY_UNAVAILABLE_KIND) return frames.slice(index + 1);
+  }
+  return frames;
+}
+
 /**
  * One turn, as a bubble: the user's prompt (when present), the steps it took, its answer, a
  * terminal-state pill, and its own usage meter, each once the turn has produced them.
@@ -236,7 +251,8 @@ function TurnBubble({
   readonly onApprove?: (id: string) => void;
   readonly onReject?: (id: string) => void;
 }): JSX.Element {
-  const answer = answerState(turn.frames);
+  const frames = currentAttemptFrames(turn.frames);
+  const answer = answerState(frames);
   return (
     <section data-testid={TURN_BUBBLE_TESTID} className="flex flex-col gap-4">
       {turn.prompt === "" ? null : (
@@ -248,7 +264,7 @@ function TurnBubble({
         </p>
       )}
       <EventTrace
-        events={turn.frames}
+        events={frames}
         decisions={decisions}
         {...(onApprove === undefined ? {} : { onApprove })}
         {...(onReject === undefined ? {} : { onReject })}
@@ -269,7 +285,7 @@ function TurnBubble({
           <TurnStatePill state={turn.terminalState} />
         </div>
       )}
-      <UsageMeter events={turn.frames} />
+      <UsageMeter events={frames} />
     </section>
   );
 }
@@ -314,6 +330,9 @@ export function AssistantConversation(): JSX.Element {
    * Forwarding cursor into the hook's transcript.
    */
   const forwardedCountRef = useRef(0);
+  // The key of the transcript's first entry when last forwarded; a new first entry means the hook
+  // started a new transcript (a send, or a resume answered with `replay_unavailable`).
+  const forwardedFirstKeyRef = useRef<string | undefined>(undefined);
   // Whether the user asked to stop the current turn; a cancelled turn has no terminal frame. Reset
   // per send.
   const cancelledTurnRef = useRef(false);
@@ -322,9 +341,17 @@ export function AssistantConversation(): JSX.Element {
   const startFreshRef = useRef(false);
 
   useEffect(() => {
-    // Every send resets the hook transcript to [], so a length below the cursor restarts forwarding
-    // from the top of this turn. A reconnect only grows the transcript.
-    if (stream.transcript.length < forwardedCountRef.current) forwardedCountRef.current = 0;
+    // A send empties the hook transcript, and a resume answered with `replay_unavailable` restarts it
+    // with that frame; either shows as a shorter transcript or a new first entry, and restarts
+    // forwarding from the top. Any other reconnect only grows the transcript.
+    const firstKey = stream.transcript[0]?.key;
+    if (
+      stream.transcript.length < forwardedCountRef.current ||
+      firstKey !== forwardedFirstKeyRef.current
+    ) {
+      forwardedCountRef.current = 0;
+    }
+    forwardedFirstKeyRef.current = firstKey;
     for (let index = forwardedCountRef.current; index < stream.transcript.length; index += 1) {
       appendTurn(toEventFrame(stream.transcript[index].event));
     }
@@ -525,6 +552,16 @@ export function AssistantConversation(): JSX.Element {
           {disclosure.message}
         </p>
       )}
+
+      {stream.replayUnavailable ? (
+        <p
+          data-testid={REPLAY_UNAVAILABLE_TESTID}
+          role="status"
+          className="text-2xs leading-relaxed text-text-secondary"
+        >
+          {REPLAY_UNAVAILABLE_TEXT}
+        </p>
+      ) : null}
 
       {stream.connectionState === "failed" && stream.failureReason !== undefined ? (
         <p

@@ -14,6 +14,7 @@ Runs against a `moto`-mocked DynamoDB client: zero credentials, zero network, ze
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import boto3
@@ -113,7 +114,11 @@ def _seed_proposal(
     target_id: str = "opp-1",
     tenant: str = _TENANT,
 ) -> None:
-    """Write a proposal row directly, bypassing ``submit_proposal``'s own scope check."""
+    """Write a proposal row directly, bypassing ``submit_proposal``'s own scope check.
+
+    The row is stamped with the current time, so it is inside the approval window.
+    """
+    submitted_at = datetime.now(UTC).isoformat()
     store.put_item(
         "proposals",
         {
@@ -128,8 +133,8 @@ def _seed_proposal(
             "after_payload": {"stage": "Qualification"},
             "reason": "advance",
             "actor_rep_id": _REP,
-            "created_at": "2024-01-01T00:00:00+00:00",
-            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_at": submitted_at,
+            "updated_at": submitted_at,
         },
     )
 

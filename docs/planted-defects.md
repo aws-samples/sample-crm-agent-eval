@@ -15,7 +15,8 @@ disabling any one planting changes only its own records.
 
 PD-01 and PD-02 were rewritten so that their notes state the evidence a correct proposal needs.
 PD-04 … PD-07 were added for the multi-field, report-only, ambiguity and multi-step-write tasks.
-PD-08 was added so that gt-05's large-tool-result task receives a result over the tool-result bound.
+PD-08 was added so that gt-05's large-tool-result task receives a result that cannot be returned in
+one piece.
 
 | Defect | Records | Golden task |
 |---|---|---|
@@ -159,14 +160,18 @@ the only rows that can satisfy the task's new-row assertions.
 corpus, drawn from a generator seeded separately from the base corpus, and dated at UTC midnight
 between the opportunity's `created_at` and its recorded `last_touch`. No other record changes.
 
-**Why it matters.** `opp-demo-0000` now has 57 activities. Any 50 of them, the default
-`list_activities` page, exceed the agents' tool-result bound (`TOOL_RESULT_BYTE_CEILING`,
-32,768 bytes of `repr`). So does a `get_opportunity` on it, which carries the whole timeline. Such a
-result reaches the model with its activity list trimmed and a truncation disclosure. The
-opportunity record and its notes are not trimmed.
+**Why it matters.** `opp-demo-0000` now has 57 activities. A default `list_activities` page of
+50 is larger than the handler page budget (`HANDLER_PAGE_BYTE_BUDGET` in `src/crm/paging.py`,
+28,672 bytes of `repr`), so the handler returns a shorter page flagged `truncated: true`, with a
+`next_cursor` minted from the last activity it kept; following the cursor reaches every activity
+exactly once. A `get_opportunity` on it carries the whole timeline and exceeds the agents'
+tool-result bound (`TOOL_RESULT_BYTE_CEILING`, 32,768 bytes of `repr`), so it reaches the model
+with its activity list trimmed and a truncation disclosure, and paging cannot recover the trimmed
+activities. The opportunity record and its notes are not trimmed.
 
-**Expected handling.** The turn reports the activity listing as truncated rather than presenting it
-as complete. gt-04 and gt-05 check this with `forbidden_outcomes: [silent_truncation]`.
+**Expected handling.** The turn reports the activity listing as truncated, or pages on to the rest,
+rather than presenting a partial listing as complete. gt-04 and gt-05 check this with
+`forbidden_outcomes: [silent_truncation]`.
 
 ## Regeneration and verification
 

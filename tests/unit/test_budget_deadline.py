@@ -30,6 +30,8 @@ from agents.budget import (
     until_deadline,
     within_deadline,
 )
+from agents.tier_attribution import is_final_usage
+from providers.base import ProviderEvent
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SWEEP_ASL = _REPO_ROOT / "infra" / "templates" / "eval_sweep.asl.json"
@@ -501,3 +503,50 @@ def test_until_deadline_does_not_count_a_stream_cut_after_a_metered_item(
 
     assert _run(_collect()) == ["usage"]
     assert budget.calls_without_usage == expected
+
+
+def test_until_deadline_counts_a_stream_cut_after_only_provisional_usage() -> None:
+    """A provisional usage item does not meter the call, so a cut after it is still counted."""
+    provisional = ProviderEvent(type="usage", input_tokens=5, output_tokens=0, provisional=True)
+
+    async def _stalls_after_provisional() -> AsyncIterator[ProviderEvent]:
+        yield provisional
+        await asyncio.sleep(60)
+        yield ProviderEvent(type="usage", input_tokens=5, output_tokens=3)
+
+    async def _scenario(budget: TurnBudget) -> list[ProviderEvent]:
+        stream = until_deadline(
+            _stalls_after_provisional(),
+            budget,
+            tier="supervisor",
+            role="supervisor",
+            is_metered=is_final_usage,
+        )
+        return [item async for item in stream]
+
+    budget = _budget(0.1)
+    assert _run(_scenario(budget)) == [provisional]
+    assert budget.calls_without_usage == 1
+
+
+def test_until_deadline_does_not_count_a_stream_cut_after_final_usage() -> None:
+    """Control: the same cut after a final usage item is metered and not counted."""
+
+    async def _stalls_after_final() -> AsyncIterator[ProviderEvent]:
+        yield ProviderEvent(type="usage", input_tokens=5, output_tokens=3)
+        await asyncio.sleep(60)
+        yield ProviderEvent(type="completed")
+
+    async def _scenario(budget: TurnBudget) -> list[ProviderEvent]:
+        stream = until_deadline(
+            _stalls_after_final(),
+            budget,
+            tier="supervisor",
+            role="supervisor",
+            is_metered=is_final_usage,
+        )
+        return [item async for item in stream]
+
+    budget = _budget(0.1)
+    assert len(_run(_scenario(budget))) == 1
+    assert budget.calls_without_usage == 0

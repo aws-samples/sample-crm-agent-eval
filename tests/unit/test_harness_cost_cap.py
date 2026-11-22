@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Iterator
 from pathlib import Path
@@ -48,7 +49,7 @@ def _noop_seeder(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _Unit:
-    """A stand-in carrying only the ``usage_records`` the guard reads."""
+    """A stand-in task unit carrying only the ``usage_records`` the guard reads."""
 
     def __init__(self, *tokens: tuple[str, int]) -> None:
         self.usage_records = tuple(
@@ -67,8 +68,8 @@ class _Unit:
         )
 
 
-def _units(*units: _Unit) -> list[TaskUnitResult]:
-    return list(units)  # type: ignore[arg-type]
+def _task(unit: _Unit) -> TaskUnitResult:
+    return unit  # type: ignore[return-value]
 
 
 _HAIKU = "anthropic.claude-haiku-5-5"
@@ -91,64 +92,65 @@ def test_a_non_positive_or_non_finite_cap_is_refused(cap: float) -> None:
         SweepCostGuard(cap)
 
 
-def test_the_first_unit_always_starts() -> None:
-    """With nothing spent and no unit completed, the projection is zero."""
-    SweepCostGuard(1e-12).before_unit()
+def test_the_first_task_always_starts() -> None:
+    """With nothing spent and no task completed, the projection is zero."""
+    SweepCostGuard(1e-12).before_task()
 
 
-def test_record_unit_sums_every_record_across_tiers_and_models() -> None:
+def test_record_task_sums_every_record_across_tiers_and_models() -> None:
     guard = SweepCostGuard(100.0)
     unit = _Unit((_HAIKU, 10_000), (_SONNET, 20_000))
-    guard.record_unit(_units(unit))
+    guard.record_task(_task(unit))
     assert guard.spent_usd == pytest.approx(_record_cost(unit))
     assert guard.spent_usd > 0
-    assert guard.largest_unit_usd == guard.spent_usd
-    assert guard.completed_units == 1
+    assert guard.largest_task_usd == guard.spent_usd
+    assert guard.completed_tasks == 1
 
 
-def test_largest_unit_is_the_maximum_not_the_last() -> None:
+def test_largest_task_is_the_maximum_not_the_last() -> None:
     guard = SweepCostGuard(100.0)
     big, small = _Unit((_SONNET, 50_000)), _Unit((_SONNET, 1_000))
-    guard.record_unit(_units(big))
-    guard.record_unit(_units(small))
-    assert guard.largest_unit_usd == pytest.approx(_record_cost(big))
+    guard.record_task(_task(big))
+    guard.record_task(_task(small))
+    assert guard.largest_task_usd == pytest.approx(_record_cost(big))
     assert guard.spent_usd == pytest.approx(_record_cost(big) + _record_cost(small))
 
 
-def test_spent_plus_largest_above_the_cap_refuses_the_next_unit() -> None:
+def test_spent_plus_largest_above_the_cap_refuses_the_next_task() -> None:
     unit = _Unit((_SONNET, 100_000))
     cost = _record_cost(unit)
     guard = SweepCostGuard(cost * 1.5)
-    guard.record_unit(_units(unit))
+    guard.record_task(_task(unit))
     with pytest.raises(SweepCostCapExceeded) as raised:
-        guard.before_unit()
+        guard.before_task()
     assert raised.value.spent_usd == pytest.approx(cost)
-    assert raised.value.largest_unit_usd == pytest.approx(cost)
+    assert raised.value.largest_task_usd == pytest.approx(cost)
     assert raised.value.max_cost_usd == cost * 1.5
-    assert raised.value.completed_units == 1
+    assert raised.value.completed_tasks == 1
+    assert "before task 2" in str(raised.value)
     assert "--max-cost-usd" in str(raised.value)
 
 
 def test_spent_plus_largest_equal_to_the_cap_still_starts() -> None:
     unit = _Unit((_SONNET, 100_000))
     guard = SweepCostGuard(100.0)
-    guard.record_unit(_units(unit))
-    guard.max_cost_usd = guard.spent_usd + guard.largest_unit_usd
-    guard.before_unit()
+    guard.record_task(_task(unit))
+    guard.max_cost_usd = guard.spent_usd + guard.largest_task_usd
+    guard.before_task()
 
 
 # -- run_sweep -----------------------------------------------------------------------------------
 
 
-def test_a_breach_stops_before_the_next_unit_tears_down_and_writes_nothing(
+def test_a_breach_stops_before_the_next_task_tears_down_and_writes_no_matrix(
     store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With a cap below one unit's cost, repeat 0 runs, repeat 1 never starts."""
-    started: list[str] = []
+    """With a cap below one task's cost, exactly one task runs; the rest never start."""
+    started: list[tuple[str, str]] = []
     from eval.sweep_units import run_task_unit as real_run_task_unit
 
     def _recording_run_task_unit(**kwargs: Any) -> TaskUnitResult:
-        started.append(str(kwargs["tenant"]))
+        started.append((str(kwargs["tenant"]), str(kwargs["task"]["id"])))
         return real_run_task_unit(**kwargs)
 
     torn_down: list[tuple[str, ...]] = []
@@ -172,14 +174,66 @@ def test_a_breach_stops_before_the_next_unit_tears_down_and_writes_nothing(
             max_cost_usd=1e-9,
         )
 
-    assert raised.value.completed_units == 1
+    assert raised.value.completed_tasks == 1
     assert raised.value.spent_usd > 1e-9
-    assert len(set(started)) == 1, "only the first unit tenant may run any task"
+    assert len(started) == 1, "only the first task may run"
     assert len(torn_down) == 1 and len(torn_down[0]) == 2, "both unit tenants are torn down"
     assert not (tmp_path / "matrix.json").exists()
     assert not (tmp_path / "matrix.md").exists()
     assert not (tmp_path / "matrix.csv").exists()
     assert not list((tmp_path / "raw").glob("*.json"))
+    manifest = json.loads((tmp_path / "partial" / "partial-run.json").read_text(encoding="utf-8"))
+    assert manifest["run_id"] == "run-cap-breach"
+    assert manifest["reason"] == "cost_cap"
+    assert manifest["completed_units"] == []
+    assert manifest["in_flight_unit"]["completed_task_ids"] == [started[0][1]]
+
+
+def test_a_mid_unit_breach_keeps_the_in_flight_units_completed_tasks(
+    store: Store, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cap that trips inside a unit persists that unit's finished tasks beside the manifest."""
+    from eval.sweep_units import run_task_unit as real_run_task_unit
+
+    probed: list[TaskUnitResult] = []
+
+    def _recording_run_task_unit(**kwargs: Any) -> TaskUnitResult:
+        unit = real_run_task_unit(**kwargs)
+        probed.append(unit)
+        return unit
+
+    monkeypatch.setattr(harness, "run_task_unit", _recording_run_task_unit)
+    run_sweep(store=store, arm_specs=_ARM, run_id="run-cap-probe")
+    monkeypatch.setattr(harness, "run_task_unit", real_run_task_unit)
+    costs = [
+        sum(
+            r.cost.input + r.cost.output + r.cost.cache_write + r.cost.cache_read
+            for r in unit.usage_records
+        )
+        for unit in probed
+    ]
+    assert len(costs) >= 3 and min(costs) > 0
+    cap = (costs[0] + costs[1] + max(costs[0], costs[1])) * 0.999
+
+    with pytest.raises(SweepCostCapExceeded) as raised:
+        run_sweep(
+            store=store,
+            arm_specs=_ARM,
+            output_dir=tmp_path,
+            run_id="run-cap-mid-unit",
+            max_cost_usd=cap,
+        )
+
+    assert raised.value.completed_tasks == 2
+    partial = tmp_path / "partial"
+    manifest = json.loads((partial / "partial-run.json").read_text(encoding="utf-8"))
+    in_flight = manifest["in_flight_unit"]
+    assert len(in_flight["completed_task_ids"]) == 2
+    snapshot = json.loads(
+        (partial / "units" / "run-cap-mid-unit" / in_flight["raw"]).read_text(encoding="utf-8")
+    )
+    assert [task["task_id"] for task in snapshot["tasks"]] == in_flight["completed_task_ids"]
+    assert all(task["invocation_attributions"] for task in snapshot["tasks"])
 
 
 def test_a_cap_above_the_spend_completes_every_unit(store: Store) -> None:
@@ -250,3 +304,4 @@ def test_a_breach_through_the_cli_exits_four_naming_spent_and_cap(
     assert "spent $" in err and "--max-cost-usd $0.0000" in err
     assert "no matrix artifact written" in err
     assert not (tmp_path / "matrix.json").exists()
+    assert (tmp_path / "partial" / "partial-run.json").exists()

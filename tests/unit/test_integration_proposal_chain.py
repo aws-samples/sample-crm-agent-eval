@@ -243,6 +243,14 @@ def test_full_chain_passes_every_check_against_real_handler_behaviour(store: Sto
         ("stale_approval", "target_unchanged_by_the_refusal"),
         ("stale_approval", "proposal_still_pending"),
         ("stale_approval", "refusal_wrote_no_audit_record"),
+        ("aged_approval", "setup_backdate"),
+        ("aged_approval", "refused_with_proposal_stale"),
+        ("aged_approval", "target_unchanged_by_the_refusal"),
+        ("aged_approval", "proposal_still_pending"),
+        ("aged_approval", "refusal_wrote_no_audit_record"),
+        ("aged_approval", "aged_proposal_still_rejectable"),
+        ("aged_approval", "fresh_proposal_approves"),
+        ("aged_approval", "fresh_target_committed"),
         ("reject", "proposal_row_is_rejected"),
         ("reject", "target_mutates_nothing"),
         ("reject", "approval_after_rejection_refused_with_conflict"),
@@ -297,15 +305,14 @@ def test_the_chain_uses_one_independent_target_record_per_leg(store: Store) -> N
 
     list(checks(_test_context(store), http_caller=spy, lease=_FakeLease(store)))
     created = _created_row_keys(recorded)
-    # Six legs' targets plus the note-revert leg's.
-    assert len(created["opportunities"]) == 7, created
+    # Six legs' targets, the note-revert leg's, and the aged leg's aged and fresh targets.
+    assert len(created["opportunities"]) == 9, created
     # The delete leg's contact and the delete-revert leg's.
     assert len(created["contacts"]) == 2, created
-    # Ten submit_proposal calls: three stage-change legs, the delete leg's accepted proposal and
-    # its refused one, the payload-allowlist leg's three refused payloads plus its accepted
-    # one, and the delete-revert leg's delete (recorded from the call body, so the teardown proof
-    # covers proposals that were refused and therefore never written, and asserts their absence).
-    assert len(created["proposals"]) == 10, created
+    # Twelve submit_proposal calls, refused ones included: three stage-change legs, the aged leg's
+    # aged and fresh ones, the delete leg's accepted and refused ones, the payload-allowlist leg's
+    # three refused payloads and its accepted one, and the delete-revert leg's delete.
+    assert len(created["proposals"]) == 12, created
 
 
 # -- the demo tenant is refused before any call is made ----------------------------------------
@@ -1193,3 +1200,68 @@ def test_a_row_count_aws_error_is_reported_by_code_not_message(
     monkeypatch.setattr(module, "_tenant_row_count", denied_after_the_snapshot)
     results = _run_chain(store)
     _assert_masked(results, _find(results, RESOURCE_CLASS, "demo_tenant_untouched"))
+
+
+# -- an aged pending proposal is refused with proposal_stale; a fresh one approves -------------
+
+
+def test_an_approval_that_ignores_the_age_window_fails_the_aged_leg(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the staleness guard patched out, the aged approval succeeds and the leg fails twice."""
+    import crm.proposals as proposals_module
+
+    monkeypatch.setattr(proposals_module, "_require_not_stale", lambda *_a, **_k: None)
+    results = _run_chain(store)
+    refused = _find(results, "aged_approval", "refused_with_proposal_stale")
+    assert refused.status == "fail" and "SUCCEEDED" in refused.detail
+    assert _find(results, "aged_approval", "target_unchanged_by_the_refusal").status == "fail"
+    assert _find(results, "aged_approval", "proposal_still_pending").status == "fail"
+    assert _find(results, "aged_approval", "fresh_proposal_approves").status == "pass"
+
+
+def test_an_aged_refusal_under_another_code_fails_the_member_check(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 409 `conflict` for the aged proposal is not `ProposalStale`, so the check fails."""
+    import crm.proposals as proposals_module
+    from crm.errors import Conflict
+
+    def conflict_instead(*_args: Any, **_kwargs: Any) -> None:
+        raise Conflict("The proposal is old.")
+
+    monkeypatch.setattr(proposals_module, "_require_not_stale", conflict_instead)
+    results = _run_chain(store)
+    refused = _find(results, "aged_approval", "refused_with_proposal_stale")
+    assert refused.status == "fail"
+    assert "'conflict'" in refused.detail
+
+
+def test_a_window_that_also_refuses_fresh_proposals_fails_the_fresh_control(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-length window refuses every approval; the fresh control catches it."""
+    from datetime import timedelta
+
+    import crm.proposals as proposals_module
+
+    monkeypatch.setattr(proposals_module, "PROPOSAL_MAX_PENDING_AGE", timedelta(seconds=-1))
+    results = _run_chain(store)
+    assert _find(results, "aged_approval", "refused_with_proposal_stale").status == "pass"
+    assert _find(results, "aged_approval", "fresh_proposal_approves").status == "fail"
+    assert _find(results, "aged_approval", "fresh_target_committed").status == "fail"
+
+
+def test_a_failed_backdate_skips_the_aged_leg_and_names_why(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.smoke.integration_proposal_chain as chain_module
+
+    def refuse(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("AccessDenied")
+
+    monkeypatch.setattr(chain_module, "_backdate_proposal", refuse)
+    results = _run_chain(store)
+    assert _find(results, "aged_approval", "setup_backdate").status == "fail"
+    skipped = [r for r in results if r.resource == "aged_approval" and r.status == "skip"]
+    assert {r.check for r in skipped} == {check for _, check in chain_module._AGED_LEG_CHECKS}

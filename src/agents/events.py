@@ -4,10 +4,12 @@
 Every event an agent turn can produce is one of the kinds in :data:`EVENT_KINDS`. This extends
 :data:`providers.base.EventType` with ``proposal`` (a ``submit_proposal`` result), ``text_delta``
 (one chunk of streamed answer text, grouped by ``event_id``, always ``partial``; the following
-``completed`` or ``error`` frame settles it) and ``heartbeat`` (an idle keep-alive carrying no
-fields). ``usage`` and ``completed`` may carry the turn's cost and resolved tiers.
+``completed`` or ``error`` frame settles it), ``heartbeat`` (an idle keep-alive carrying no
+fields) and ``replay_unavailable`` (sent first on a resume the session store cannot replay, before
+the turn runs afresh; it carries no fields). ``usage`` and ``completed`` may carry the turn's cost and resolved tiers.
 :meth:`AgentEvent.__post_init__` rejects any field combination that does not match the declared
-``kind``.
+``kind``, and strips control characters from every text field via
+:func:`strip_control_chars`.
 
 An exhausted turn budget ends the stream with a terminal ``error`` event whose ``error_kind`` is
 ``"budget_exhausted"``. An oversized tool result is truncated at a record boundary and marked with
@@ -33,10 +35,19 @@ EVENT_KINDS: Final[tuple[str, ...]] = (
     "error",
     "text_delta",
     "heartbeat",
+    "replay_unavailable",
 )
 
 EventKind = Literal[
-    "tool_call", "tool_result", "proposal", "usage", "completed", "error", "text_delta", "heartbeat"
+    "tool_call",
+    "tool_result",
+    "proposal",
+    "usage",
+    "completed",
+    "error",
+    "text_delta",
+    "heartbeat",
+    "replay_unavailable",
 ]
 
 #: Kinds that may carry token counts, cost lines and resolved tiers.
@@ -56,6 +67,19 @@ TOOL_RESULT_BYTE_CEILING: Final[int] = 32_768
 
 #: The payload key a bounded tool result sets to ``True`` to report it was truncated.
 TOOL_OUTPUT_TRUNCATED_KEY: Final[str] = "truncated"
+
+#: C0 control characters and DEL removed from event text; tab and newline are kept.
+_CONTROL_CHARS: Final[dict[int, None]] = {
+    code: None for code in (*range(0x00, 0x20), 0x7F) if code not in (0x09, 0x0A)
+}
+
+#: The event fields carrying free text, each passed through :func:`strip_control_chars`.
+_TEXT_FIELDS: Final[tuple[str, ...]] = ("text", "error_message", "partial_work")
+
+
+def strip_control_chars(text: str) -> str:
+    """Return ``text`` without U+0000–U+001F (except tab and newline) and U+007F."""
+    return text.translate(_CONTROL_CHARS)
 
 
 class CostLine(TypedDict):
@@ -151,11 +175,19 @@ class AgentEvent:
     resolved_tiers: tuple[ResolvedTierInfo, ...] | None = None
 
     def __post_init__(self) -> None:
-        """Reject a field combination that does not match ``kind`` (closure enforcement)."""
+        """Reject a field combination that does not match ``kind``; strip control characters.
+
+        ``text``, ``error_message`` and ``partial_work`` are replaced by their
+        :func:`strip_control_chars` form when they are strings.
+        """
         if self.kind not in EVENT_KINDS:
             raise ValueError(
                 f"unrecognised event kind {self.kind!r}; expected one of {EVENT_KINDS}"
             )
+        for name in _TEXT_FIELDS:
+            value = getattr(self, name)
+            if isinstance(value, str):
+                object.__setattr__(self, name, strip_control_chars(value))
 
         _require(self.kind == "tool_call", self.tool_name is not None, "tool_call", "tool_name")
         _require(self.kind == "tool_call", self.tool_input is not None, "tool_call", "tool_input")
@@ -437,5 +469,6 @@ __all__ = [
     "bound_tool_output",
     "budget_exhausted_event",
     "record_list_field",
+    "strip_control_chars",
     "truncate_tool_output",
 ]

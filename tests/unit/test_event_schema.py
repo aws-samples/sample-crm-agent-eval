@@ -138,6 +138,16 @@ def test_schema_carries_its_version(schema: dict[str, object]) -> None:
     assert schema["$id"] == f"urn:crm-agent-eval:sse-event:{SCHEMA_VERSION}"
 
 
+def test_schema_is_version_3_1_0_and_declares_replay_unavailable(
+    schema: dict[str, object],
+) -> None:
+    """The frame contract that added ``replay_unavailable`` is 3.1.0 and enumerates the kind."""
+    assert SCHEMA_VERSION == "3.1.0"
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    assert "replay_unavailable" in properties["kind"]["enum"]
+
+
 def test_framing_is_recovered_from_format_sse_line(schema: dict[str, object]) -> None:
     """The prefix and delimiter in the artefact are the ones ``format_sse_line`` actually emits."""
     frame = format_sse_line(budget_exhausted_event(partial_work="w", error_message="m"))
@@ -182,6 +192,7 @@ def _one_event_per_kind() -> list[AgentEvent]:
         ),
         AgentEvent(kind="text_delta", text="Hel", event_id="ans-1", partial=True),
         AgentEvent(kind="heartbeat"),
+        AgentEvent(kind="replay_unavailable"),
         AgentEvent(
             kind="usage",
             input_tokens=11,

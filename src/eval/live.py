@@ -8,6 +8,8 @@
    exclusion.
 2. A failure outside the cold-start/retry/throttle exclusion taxonomy raises
    :class:`LiveInvocationError`, which aborts the sweep before any artifact is published.
+3. A transport failure while reading a stream that opened successfully raises
+   :class:`MidStreamTransportError` on its first occurrence and is never retried.
 
 :meth:`ThrottleRetryingProvider.stream` drains each attempt's events into a list before yielding
 any of them, so a failed attempt can be retried. The ``usage`` event's ``latency_ms`` is passed
@@ -16,9 +18,10 @@ through unchanged.
 
 from __future__ import annotations
 
-import time
+import asyncio
+import inspect
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Final
 
 from eval.metrics import Exclusion, ExclusionCategory
@@ -51,6 +54,36 @@ _TRANSIENT_SERVER_ERROR_PREFIXES: Final[frozenset[str]] = frozenset(
 
 _RETRYABLE_PREFIXES: Final[frozenset[str]] = _THROTTLE_PREFIXES | _TRANSIENT_SERVER_ERROR_PREFIXES
 
+#: Leading ``<prefix>:`` tokens of a mid-stream transport failure: ``httpx2.TransportError`` and
+#: every subclass, plus the SDK connection and timeout errors, as both adapters render a failure
+#: raised while reading an opened stream.
+MID_STREAM_TRANSPORT_PREFIXES: Final[frozenset[str]] = frozenset(
+    {
+        "TransportError",
+        "TimeoutException",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "NetworkError",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "CloseError",
+        "ProtocolError",
+        "LocalProtocolError",
+        "RemoteProtocolError",
+        "ProxyError",
+        "UnsupportedProtocol",
+        "SSEError",
+        "APIConnectionError",
+        "APITimeoutError",
+    }
+)
+
+#: The body every mid-stream transport rendering carries after its ``<prefix>:``.
+MID_STREAM_TRANSPORT_BODY: Final[str] = "The model provider request failed."
+
 #: The HTTP status of a retried transport attempt that is a throttle; any other is a RETRY.
 _THROTTLE_STATUS: Final[int] = 429
 
@@ -68,6 +101,23 @@ class LiveInvocationError(RuntimeError):
     """
 
 
+class MidStreamTransportError(LiveInvocationError):
+    """Raised when a stream that opened successfully failed in transport; never retried.
+
+    Attributes:
+        model_id: The model whose stream failed.
+        error_message: The adapter's ``<ExceptionTypeName>: …`` rendering.
+    """
+
+    def __init__(self, *, model_id: str, error_message: str) -> None:
+        super().__init__(
+            f"live invocation of {model_id} failed mid-stream in transport and is not retried: "
+            f"{error_message}"
+        )
+        self.model_id = model_id
+        self.error_message = error_message
+
+
 def _leading_prefix(message: str) -> str:
     """Return ``message``'s leading ``<prefix>`` token (before the first ``:``), or ``""``."""
     head, separator, _ = message.partition(":")
@@ -81,6 +131,20 @@ def is_retryable_error(message: str) -> bool:
     credential renderings carry no retryable prefix.
     """
     return _leading_prefix(message) in _RETRYABLE_PREFIXES
+
+
+def is_mid_stream_transport_error(message: str) -> bool:
+    """Return whether ``message`` is an adapter's rendering of a mid-stream transport failure.
+
+    Matches ``<prefix>: The model provider request failed.`` exactly, with ``<prefix>`` in
+    :data:`MID_STREAM_TRANSPORT_PREFIXES`. SDK-exhausted renderings never match.
+    """
+    head, separator, body = message.partition(":")
+    return (
+        bool(separator)
+        and head in MID_STREAM_TRANSPORT_PREFIXES
+        and body.strip() == MID_STREAM_TRANSPORT_BODY
+    )
 
 
 def _retry_exclusion_category(message: str) -> ExclusionCategory:
@@ -109,7 +173,7 @@ class ThrottleRetryingProvider(ModelProvider):
         *,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         backoff_seconds: float = DEFAULT_BACKOFF_SECONDS,
-        sleep: Callable[[float], None] = time.sleep,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         """Wrap ``wrapped`` with bounded retry on an in-band transient failure.
 
@@ -117,13 +181,16 @@ class ThrottleRetryingProvider(ModelProvider):
             wrapped: The live adapter whose turns are retried.
             max_attempts: Total attempts per turn, including the first. Must be at least 1.
             backoff_seconds: Base seconds for the exponential backoff between attempts.
-            sleep: How to wait between attempts.
+            sleep: An async function awaited between attempts, so the event loop keeps running.
 
         Raises:
             ValueError: When ``max_attempts`` is below 1.
+            TypeError: When ``sleep`` is not an async function.
         """
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if not inspect.iscoroutinefunction(sleep):
+            raise TypeError("sleep must be an async function; a blocking sleep stalls the loop")
         self._wrapped = wrapped
         self._max_attempts = max_attempts
         self._backoff_seconds = backoff_seconds
@@ -159,6 +226,7 @@ class ThrottleRetryingProvider(ModelProvider):
             an error.
 
         Raises:
+            MidStreamTransportError: When an attempt failed in transport mid-stream; no retry.
             LiveInvocationError: When the final attempt failed: an in-band transient failure that
                 exhausted ``max_attempts``, or any failure :func:`is_retryable_error` rejects.
         """
@@ -174,6 +242,8 @@ class ThrottleRetryingProvider(ModelProvider):
                 return
 
             message = failure.error_message or "the provider reported an unnamed error"
+            if is_mid_stream_transport_error(message):
+                raise MidStreamTransportError(model_id=model_id, error_message=message)
             if not is_retryable_error(message) or attempt == self._max_attempts:
                 raise LiveInvocationError(
                     f"live invocation of {model_id} failed on attempt "
@@ -184,7 +254,7 @@ class ThrottleRetryingProvider(ModelProvider):
                 _retry_exclusion_category(message),
                 f"retrying {model_id} after attempt {attempt} of {self._max_attempts}: {message}",
             )
-            self._sleep(self._backoff_seconds * (2 ** (attempt - 1)))
+            await self._sleep(self._backoff_seconds * (2 ** (attempt - 1)))
 
     def _record_transport_retries(self, retried: tuple[RetriedAttempt, ...], model_id: str) -> None:
         """Record one exclusion per transport attempt the SDK retried."""
@@ -224,8 +294,12 @@ def build_live_provider(family: Family, *, region_name: str) -> ThrottleRetrying
 __all__ = [
     "DEFAULT_BACKOFF_SECONDS",
     "DEFAULT_MAX_ATTEMPTS",
+    "MID_STREAM_TRANSPORT_BODY",
+    "MID_STREAM_TRANSPORT_PREFIXES",
     "LiveInvocationError",
+    "MidStreamTransportError",
     "ThrottleRetryingProvider",
     "build_live_provider",
+    "is_mid_stream_transport_error",
     "is_retryable_error",
 ]
