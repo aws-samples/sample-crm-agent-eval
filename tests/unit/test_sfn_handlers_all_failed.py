@@ -93,3 +93,11 @@ def test_every_item_failing_counts_each_failure_and_ends_terminal(
     assert record.teardown_status == "ok"
     assert read_lock(all_failed.store) is None
     assert len(all_failed.runtime.requests) == ITEMS
+
+
+def test_every_item_failing_returns_the_tasks_failed_code_without_detail(
+    all_failed: RecordingSweep,
+) -> None:
+    payload = require_run(all_failed.store, all_failed.run_id).to_payload()
+    assert payload["error_code"] == "tasks_failed"
+    assert "error_detail" not in payload

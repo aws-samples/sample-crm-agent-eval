@@ -24,7 +24,7 @@ const EMPTY: SessionTuning = {
 
 const MIXED: SessionTuning = {
   tiers: {
-    supervisor: { family: "openai", model: "openai.gpt-6-astra", effort: "none" },
+    supervisor: { family: "openai", model: "openai.gpt-6.2-astra", effort: "none" },
     subagent: { family: "anthropic", model: "anthropic.claude-sonnet-5-5", effort: "low" },
     tool: { family: "anthropic", model: "anthropic.claude-haiku-5-5", effort: null },
   },

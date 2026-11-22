@@ -67,29 +67,6 @@
         "model_id": "anthropic.claude-sonnet-5-5",
         "tier": "subagent"
       },
-      "openai.gpt-6-astra": {
-        "assignable_tiers": [
-          "supervisor"
-        ],
-        "context_window_tokens": 1050000,
-        "effort": {
-          "capped_at_when_thinking_disabled": null,
-          "default": "medium",
-          "supported": true,
-          "values": [
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ]
-        },
-        "family": "openai",
-        "inference_profile": "global.openai.gpt-6-astra",
-        "model_id": "openai.gpt-6-astra",
-        "tier": "supervisor"
-      },
       "openai.gpt-6-luna": {
         "assignable_tiers": [
           "tool"
@@ -113,29 +90,6 @@
         "model_id": "openai.gpt-6-luna",
         "tier": "tool"
       },
-      "openai.gpt-6.1-sol": {
-        "assignable_tiers": [
-          "supervisor"
-        ],
-        "context_window_tokens": 1000000,
-        "effort": {
-          "capped_at_when_thinking_disabled": null,
-          "default": "medium",
-          "supported": true,
-          "values": [
-            "none",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ]
-        },
-        "family": "openai",
-        "inference_profile": "global.openai.gpt-6.1-sol",
-        "model_id": "openai.gpt-6.1-sol",
-        "tier": "supervisor"
-      },
       "openai.gpt-6.1-terra": {
         "assignable_tiers": [
           "subagent"
@@ -158,6 +112,52 @@
         "inference_profile": "global.openai.gpt-6.1-terra",
         "model_id": "openai.gpt-6.1-terra",
         "tier": "subagent"
+      },
+      "openai.gpt-6.2-astra": {
+        "assignable_tiers": [
+          "supervisor"
+        ],
+        "context_window_tokens": 1050000,
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6.2-astra",
+        "model_id": "openai.gpt-6.2-astra",
+        "tier": "supervisor"
+      },
+      "openai.gpt-6.2-sol": {
+        "assignable_tiers": [
+          "supervisor"
+        ],
+        "context_window_tokens": 1050000,
+        "effort": {
+          "capped_at_when_thinking_disabled": null,
+          "default": "medium",
+          "supported": true,
+          "values": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        "family": "openai",
+        "inference_profile": "global.openai.gpt-6.2-sol",
+        "model_id": "openai.gpt-6.2-sol",
+        "tier": "supervisor"
       }
     },
     "request_prompt_limits": {
@@ -194,7 +194,7 @@
           }
         },
         "supervisor": {
-          "model_id": "openai.gpt-6.1-sol",
+          "model_id": "openai.gpt-6.2-sol",
           "tuning": {
             "effort": "medium"
           }
@@ -406,7 +406,7 @@
       "model": null,
       "requested": null,
       "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6.1-sol",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "supervisor"
     },
     {
@@ -414,39 +414,23 @@
       "model": null,
       "requested": "none",
       "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6.1-sol",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "supervisor"
     },
     {
       "family": "openai",
-      "model": "openai.gpt-6.1-sol",
+      "model": "openai.gpt-6.2-sol",
       "requested": null,
       "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6.1-sol",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "supervisor"
     },
     {
       "family": "openai",
-      "model": "openai.gpt-6.1-sol",
+      "model": "openai.gpt-6.2-sol",
       "requested": "none",
       "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6.1-sol",
-      "tier": "supervisor"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": null,
-      "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6-astra",
-      "tier": "supervisor"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": "none",
-      "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6-astra",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "supervisor"
     },
     {
@@ -483,7 +467,39 @@
     },
     {
       "family": "openai",
+      "model": "openai.gpt-6.2-astra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.2-astra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-astra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.2-astra",
+      "tier": "supervisor"
+    },
+    {
+      "family": "openai",
       "model": null,
+      "requested": null,
+      "resolved_effort": "low",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": null,
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.1-terra",
       "requested": null,
       "resolved_effort": "low",
       "resolved_model": "openai.gpt-6.1-terra",
@@ -491,42 +507,10 @@
     },
     {
       "family": "openai",
-      "model": null,
-      "requested": "none",
-      "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6.1-terra",
-      "tier": "subagent"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6.1-terra",
-      "requested": null,
-      "resolved_effort": "low",
-      "resolved_model": "openai.gpt-6.1-terra",
-      "tier": "subagent"
-    },
-    {
-      "family": "openai",
       "model": "openai.gpt-6.1-terra",
       "requested": "none",
       "resolved_effort": "none",
       "resolved_model": "openai.gpt-6.1-terra",
-      "tier": "subagent"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": null,
-      "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6-astra",
-      "tier": "subagent"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": "none",
-      "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6-astra",
       "tier": "subagent"
     },
     {
@@ -547,18 +531,34 @@
     },
     {
       "family": "openai",
-      "model": "openai.gpt-6.1-sol",
+      "model": "openai.gpt-6.2-astra",
       "requested": null,
       "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6.1-sol",
+      "resolved_model": "openai.gpt-6.2-astra",
       "tier": "subagent"
     },
     {
       "family": "openai",
-      "model": "openai.gpt-6.1-sol",
+      "model": "openai.gpt-6.2-astra",
       "requested": "none",
       "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6.1-sol",
+      "resolved_model": "openai.gpt-6.2-astra",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-sol",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.2-sol",
+      "tier": "subagent"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-sol",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "subagent"
     },
     {
@@ -595,38 +595,6 @@
     },
     {
       "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": null,
-      "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6-astra",
-      "tier": "tool"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6-astra",
-      "requested": "none",
-      "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6-astra",
-      "tier": "tool"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6.1-sol",
-      "requested": null,
-      "resolved_effort": "medium",
-      "resolved_model": "openai.gpt-6.1-sol",
-      "tier": "tool"
-    },
-    {
-      "family": "openai",
-      "model": "openai.gpt-6.1-sol",
-      "requested": "none",
-      "resolved_effort": "none",
-      "resolved_model": "openai.gpt-6.1-sol",
-      "tier": "tool"
-    },
-    {
-      "family": "openai",
       "model": "openai.gpt-6.1-terra",
       "requested": null,
       "resolved_effort": "medium",
@@ -639,6 +607,38 @@
       "requested": "none",
       "resolved_effort": "none",
       "resolved_model": "openai.gpt-6.1-terra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-astra",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.2-astra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-astra",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.2-astra",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-sol",
+      "requested": null,
+      "resolved_effort": "medium",
+      "resolved_model": "openai.gpt-6.2-sol",
+      "tier": "tool"
+    },
+    {
+      "family": "openai",
+      "model": "openai.gpt-6.2-sol",
+      "requested": "none",
+      "resolved_effort": "none",
+      "resolved_model": "openai.gpt-6.2-sol",
       "tier": "tool"
     }
   ],

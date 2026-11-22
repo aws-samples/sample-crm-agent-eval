@@ -83,8 +83,8 @@ function matrix() {
       "anthropic.claude-opus-5-5": { model_id: "anthropic.claude-opus-5-5", family: "anthropic", tier: "supervisor", effort: effort(["low", "medium"], "medium") },
       "anthropic.claude-sonnet-5-5": { model_id: "anthropic.claude-sonnet-5-5", family: "anthropic", tier: "subagent", effort: effort(["low", "medium"], "medium") },
       "anthropic.claude-haiku-5-5": { model_id: "anthropic.claude-haiku-5-5", family: "anthropic", tier: "tool", effort: effort(["low", "medium", "high"], "medium") },
-      "openai.gpt-6-astra": { model_id: "openai.gpt-6-astra", family: "openai", tier: "supervisor", effort: effort(["none", "low"], "low") },
-      "openai.gpt-6.1-sol": { model_id: "openai.gpt-6.1-sol", family: "openai", tier: "subagent", effort: effort(["none", "low"], "low") },
+      "openai.gpt-6.2-astra": { model_id: "openai.gpt-6.2-astra", family: "openai", tier: "supervisor", effort: effort(["none", "low"], "low") },
+      "openai.gpt-6.2-sol": { model_id: "openai.gpt-6.2-sol", family: "openai", tier: "subagent", effort: effort(["none", "low"], "low") },
       "openai.gpt-6-luna": { model_id: "openai.gpt-6-luna", family: "openai", tier: "tool", effort: effort(["none", "low"], "low") },
     },
     tiers: {
@@ -94,8 +94,8 @@ function matrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: {} },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: {} },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: {} },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: {} },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: {} },
         tool: { model_id: "openai.gpt-6-luna", tuning: {} },
       },
     },

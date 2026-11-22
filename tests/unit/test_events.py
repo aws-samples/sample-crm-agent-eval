@@ -7,8 +7,16 @@ import json
 
 import pytest
 
-from agents.events import EVENT_KINDS, AgentEvent, CostLine, ResolvedTierInfo
+from agents.events import (
+    EVENT_KINDS,
+    AgentEvent,
+    CostLine,
+    ResolvedTierInfo,
+    budget_exhausted_event,
+    strip_control_chars,
+)
 from agents.runtime_entrypoint import event_payload, format_sse_line
+from agents.supervisor import describe_truncation
 
 _COST_LINE: CostLine = {
     "tier": "subagent",
@@ -46,6 +54,7 @@ def _non_accounted_events() -> list[tuple[str, dict[str, object]]]:
         ("error", {"error_kind": "tool_failure", "error_message": "m"}),
         ("text_delta", {"text": "x", "event_id": "e-1", "partial": True}),
         ("heartbeat", {}),
+        ("replay_unavailable", {}),
     ]
 
 
@@ -235,3 +244,126 @@ def test_sse_line_refuses_non_finite_json() -> None:
     object.__setattr__(event, "cost_usd", float("nan"))
     with pytest.raises(ValueError):
         format_sse_line(event)
+
+
+def test_replay_unavailable_is_a_declared_kind_and_carries_no_fields() -> None:
+    """A ``replay_unavailable`` event renders every field but ``kind`` null or false."""
+    assert "replay_unavailable" in EVENT_KINDS
+    payload = event_payload(AgentEvent(kind="replay_unavailable"))
+    assert payload["kind"] == "replay_unavailable"
+    assert {key for key, value in payload.items() if value not in (None, False)} == {"kind"}
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("text", "x"),
+        ("event_id", "e-1"),
+        ("partial", True),
+        ("truncated", True),
+        ("input_tokens", 1),
+        ("tool_name", "t"),
+        ("tool_output", {"items": []}),
+        ("proposal_id", "p-1"),
+        ("error_kind", "tool_failure"),
+        ("error_message", "m"),
+        ("partial_work", "w"),
+        ("cost_usd", 0.1),
+        ("cost_withheld", False),
+        ("resolved_tiers", (_RESOLVED_TIER,)),
+    ],
+)
+def test_replay_unavailable_rejects_any_field(field_name: str, value: object) -> None:
+    """A ``replay_unavailable`` event carrying any kind-specific field is rejected."""
+    with pytest.raises(ValueError):
+        AgentEvent(kind="replay_unavailable", **{field_name: value})  # type: ignore[arg-type]
+
+
+_C0_EXCEPT_TAB_NEWLINE = "".join(chr(code) for code in range(0x20) if code not in (0x09, 0x0A))
+
+
+def test_strip_control_chars_removes_c0_and_del_but_keeps_tab_and_newline() -> None:
+    """Every C0 character except tab and newline, plus DEL, is removed; nothing else changes."""
+    raw = f"a{_C0_EXCEPT_TAB_NEWLINE}b\x7fc\td\ne\u0080f\u00e9"
+    assert strip_control_chars(raw) == "abc\td\ne\u0080f\u00e9"
+
+
+def test_strip_control_chars_leaves_clean_text_unchanged() -> None:
+    clean = "Pipeline is $1,200\tfor Q3.\nNext line — ok."
+    assert strip_control_chars(clean) == clean
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "field_name"),
+    [
+        ("completed", {}, "text"),
+        ("text_delta", {"event_id": "e-1", "partial": True}, "text"),
+        ("error", {"error_kind": "tool_failure"}, "error_message"),
+    ],
+)
+def test_text_bearing_events_strip_control_chars(
+    kind: str, fields: dict[str, object], field_name: str
+) -> None:
+    """Each text-bearing field is stored, and rendered on the wire, without control characters."""
+    event = AgentEvent(
+        kind=kind,  # type: ignore[arg-type]
+        **{field_name: "ok\x1b[31m\x00\ttab\nline\x7f"},  # type: ignore[arg-type]
+        **fields,  # type: ignore[arg-type]
+    )
+    assert getattr(event, field_name) == "ok[31m\ttab\nline"
+    wire = json.loads(format_sse_line(event).removeprefix("data: "))
+    assert wire[field_name] == "ok[31m\ttab\nline"
+
+
+def test_budget_exhausted_event_strips_control_chars_from_both_text_fields() -> None:
+    event = budget_exhausted_event(partial_work="one\x07 write", error_message="cap\x08 reached")
+    assert event.partial_work == "one write"
+    assert event.error_message == "cap reached"
+
+
+_DROPPED_NOTICE = "The tool result was too large to include in full and was truncated."
+
+
+def test_a_byte_cut_list_page_with_a_cursor_says_more_records_follow() -> None:
+    page: dict[str, object] = {
+        "body": {"activities": [{"activity_id": "a"}], "truncated": True, "next_cursor": "c"}
+    }
+    notice = describe_truncation(page, event_truncated=False)
+    assert notice is not None
+    assert "more records follow" in notice and "next_cursor" in notice
+    assert "truncated" not in notice and "too large" not in notice
+
+
+def test_a_cursor_continuable_search_page_does_not_claim_the_search_stopped_early() -> None:
+    page: dict[str, object] = {
+        "body": {"items": [], "truncated": True, "examined_count": 2000, "next_cursor": "c"}
+    }
+    notice = describe_truncation(page, event_truncated=False)
+    assert notice is not None
+    assert "2000" in notice and "more records follow" in notice
+    assert "stopped early" not in notice and "may be included" not in notice
+
+
+@pytest.mark.parametrize("next_cursor", [None, ""])
+def test_a_flagged_page_without_a_cursor_keeps_the_incomplete_notices(
+    next_cursor: str | None,
+) -> None:
+    listing: dict[str, object] = {
+        "body": {"activities": [], "truncated": True, "next_cursor": next_cursor}
+    }
+    search: dict[str, object] = {
+        "body": {"items": [], "truncated": True, "examined_count": 7, "next_cursor": None}
+    }
+    assert describe_truncation(listing, event_truncated=False) == _DROPPED_NOTICE
+    notice = describe_truncation(search, event_truncated=False)
+    assert notice is not None and notice.startswith("Search stopped early after examining 7")
+
+
+def test_a_page_trimmed_by_the_byte_ceiling_is_described_as_truncated_even_with_a_cursor() -> None:
+    page: dict[str, object] = {"body": {"activities": [], "truncated": True, "next_cursor": "c"}}
+    assert describe_truncation(page, event_truncated=True) == _DROPPED_NOTICE
+
+
+def test_an_unflagged_page_with_a_cursor_has_no_notice() -> None:
+    page: dict[str, object] = {"body": {"activities": [{"activity_id": "a"}], "next_cursor": "c"}}
+    assert describe_truncation(page, event_truncated=False) is None

@@ -16,6 +16,7 @@ from moto import mock_aws
 from crm.authz import Identity
 from crm.cursor import bound_operation, decode_cursor, encode_cursor
 from crm.errors import ScopeDenied, ValidationFailed
+from crm.paging import HANDLER_PAGE_BYTE_BUDGET
 from crm.search import EXAMINATION_BUDGET, search_opportunities
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
@@ -211,20 +212,59 @@ def test_truncation_ceiling_examines_at_most_the_budget_even_far_over(
 def test_next_cursor_resumes_examination_past_the_first_truncated_call(
     store: Store, identity: Identity
 ) -> None:
-    total = EXAMINATION_BUDGET + 10
-    _seed_many(store, total, name="Acme Renewal")
+    _seed_many_named(store, EXAMINATION_BUDGET + 5, prefix="filler", name="Beta Filler")
+    _seed_many_named(store, 5, prefix="match", name="Zeta Match")
 
-    first = search_opportunities(store, identity, query="acme")
+    first = search_opportunities(store, identity, query="zeta")
     assert first.truncated is True
+    assert first.items == []
     assert first.next_cursor is not None
 
-    second = search_opportunities(store, identity, query="acme", cursor=first.next_cursor)
+    second = search_opportunities(store, identity, query="zeta", cursor=first.next_cursor)
 
     assert second.truncated is False
     assert second.examined_count == 10
-    first_ids = {item["opportunity_id"] for item in first.items}
-    second_ids = {item["opportunity_id"] for item in second.items}
-    assert first_ids.isdisjoint(second_ids)
+    assert sorted(str(item["opportunity_id"]) for item in second.items) == [
+        f"match-{i:05d}" for i in range(5)
+    ]
+
+
+def test_a_match_set_over_the_page_byte_budget_is_cut_and_marked_truncated(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, 300, name="Acme Renewal")
+
+    result = search_opportunities(store, identity, query="acme")
+
+    assert result.truncated is True
+    assert result.next_cursor is not None
+    assert 0 < len(result.items) < 300
+    assert len(repr(result.items).encode("utf-8")) <= HANDLER_PAGE_BYTE_BUDGET
+
+
+def test_following_byte_cut_pages_reaches_every_match_exactly_once(
+    store: Store, identity: Identity
+) -> None:
+    _seed_many(store, 300, name="Acme Renewal")
+    _seed_many_named(store, 40, prefix="other", name="Globex Expansion")
+
+    seen: list[str] = []
+    cursor: str | None = None
+    pages = 0
+    for _ in range(100):
+        result = search_opportunities(store, identity, query="acme", cursor=cursor)
+        pages += 1
+        assert len(repr(result.items).encode("utf-8")) <= HANDLER_PAGE_BYTE_BUDGET
+        seen.extend(str(item["opportunity_id"]) for item in result.items)
+        cursor = result.next_cursor
+        assert (cursor is not None) is result.truncated
+        if cursor is None:
+            break
+
+    assert cursor is None
+    assert pages > 1
+    assert len(seen) == len(set(seen))
+    assert sorted(seen) == [f"opp-{i:05d}" for i in range(300)]
 
 
 def test_resuming_with_a_cursor_and_no_further_matches_still_reports_a_full_examined_count(
@@ -395,7 +435,7 @@ def test_a_cursor_replayed_with_different_index_selecting_filters_is_refused(
     store: Store, identity: Identity, replay_filters: dict[str, str]
 ) -> None:
     _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
-    first = search_opportunities(store, identity, query="acme", stage="Discovery")
+    first = search_opportunities(store, identity, query="globex", stage="Discovery")
     assert first.next_cursor is not None
 
     with pytest.raises(ValidationFailed) as refused:
@@ -416,7 +456,7 @@ def test_a_cursor_replayed_with_the_same_filters_and_a_different_query_resumes(
     store: Store, identity: Identity
 ) -> None:
     _seed_many(store, EXAMINATION_BUDGET + 10, name="Acme Renewal")
-    first = search_opportunities(store, identity, query="acme", stage="Discovery")
+    first = search_opportunities(store, identity, query="globex", stage="Discovery")
     assert first.next_cursor is not None
 
     second = search_opportunities(

@@ -130,7 +130,7 @@ no `Resource = "*"`, no `LeadingKeys` on an `application_code` table).
 ## Validation
 
 `cd infra && terraform validate` exercises the module through the root. It also validates
-standalone; `versions.tf` pins the same `hashicorp/aws` 6.72.0 as the root:
+standalone; `versions.tf` pins the same `hashicorp/aws` 6.73.0 as the root:
 
 ```bash
 cd infra/modules/lambda_action

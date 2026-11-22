@@ -86,9 +86,18 @@ class ProviderEvent:
         latency_ms: The latency (milliseconds) of the successful model call this event belongs to,
             stamped on the ``usage`` event by the live adapter: from the successful attempt's
             request to the end of the stream. Retried attempts are not timed. ``None`` on the stub.
-        retried_attempts: On every ``usage`` and ``error`` event, one :class:`RetriedAttempt` per
-            transport attempt the vendor SDK retried, in attempt order: every recorded attempt except
-            the last. Empty on the stub and whenever the first attempt was the last.
+        retried_attempts: On every non-provisional ``usage`` event and every ``error`` event, one
+            :class:`RetriedAttempt` per transport attempt the vendor SDK retried, in attempt order:
+            every recorded attempt except the last. Empty on a provisional ``usage`` event, on the
+            stub, and whenever the first attempt was the last.
+        output_truncated: On a ``usage`` event, ``True`` when the provider reported that the call
+            stopped at the output-token cap. Only a ``usage`` event may set it.
+        provisional: On a ``usage`` event, ``True`` when its counts are an early estimate (input
+            known, output not yet) that a later non-provisional ``usage`` for the same call
+            supersedes. Only a ``usage`` event may set it.
+
+    Raises:
+        ValueError: When ``output_truncated`` or ``provisional`` is set on a non-``usage`` event.
     """
 
     type: EventType
@@ -105,6 +114,14 @@ class ProviderEvent:
     error_message: str | None = None
     latency_ms: float | None = None
     retried_attempts: tuple[RetriedAttempt, ...] = ()
+    output_truncated: bool = False
+    provisional: bool = False
+
+    def __post_init__(self) -> None:
+        if self.type != "usage":
+            for name in ("output_truncated", "provisional"):
+                if getattr(self, name):
+                    raise ValueError(f"{name} may be set only on a usage event, not {self.type!r}")
 
 
 @dataclass(frozen=True, slots=True)

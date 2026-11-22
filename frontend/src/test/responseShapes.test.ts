@@ -8,7 +8,7 @@
  * The exporter's tool list is derived from `crm.toolspec.definitions.ALL_TOOLS`; the first two
  * assertions fail if a tool drops out of coverage.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,15 +17,16 @@ import { describe, expect, it } from "vitest";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..", "..", "..");
 
-function runPythonExporter(): Record<string, string[]> {
-  const pythonBin = execFileSync(resolve(repoRoot, "scripts", "repo_python.sh"), ["--print"], {
+const EXPORTER = resolve(repoRoot, "frontend", "scripts", "export_response_shapes.py");
+
+function repoPython(): string {
+  return execFileSync(resolve(repoRoot, "scripts", "repo_python.sh"), ["--print"], {
     encoding: "utf-8",
   }).trim();
-  const raw = execFileSync(
-    pythonBin,
-    [resolve(repoRoot, "frontend", "scripts", "export_response_shapes.py")],
-    { cwd: repoRoot, encoding: "utf-8" },
-  );
+}
+
+function runPythonExporter(): Record<string, string[]> {
+  const raw = execFileSync(repoPython(), [EXPORTER], { cwd: repoRoot, encoding: "utf-8" });
   return JSON.parse(raw) as Record<string, string[]>;
 }
 
@@ -65,6 +66,27 @@ const EXPECTED_ENVELOPES: Readonly<Record<string, readonly string[]>> = {
   update_contact: ["contact"],
   update_opportunity: ["opportunity"],
 };
+
+describe("the exporter's seeded proposals stay inside the approval window", () => {
+  it("refuses, naming the bound, to seed a proposal approve_proposal would reject as stale", () => {
+    const aged = spawnSync(repoPython(), [EXPORTER, "--proposal-age-hours", String(7 * 24)], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+    });
+    expect(aged.status).not.toBe(0);
+    expect(aged.stderr).toContain("PROPOSAL_MAX_PENDING_AGE");
+    expect(aged.stdout).toBe("");
+  });
+
+  it("seeds a proposal just inside the window that approve_proposal still accepts", () => {
+    const fresh = spawnSync(repoPython(), [EXPORTER, "--proposal-age-hours", String(7 * 24 - 1)], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+    });
+    expect(fresh.status, fresh.stderr).toBe(0);
+    expect((JSON.parse(fresh.stdout) as Record<string, string[]>).approve_proposal).toEqual(["proposal"]);
+  });
+});
 
 describe("wire response shapes (derived from crm.handlers, not restated)", () => {
   const shapes = runPythonExporter();

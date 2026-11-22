@@ -140,6 +140,7 @@ def assemble(units: list[TaskUnitResult], family: Family, mode: str, **overrides
         "price_table_version": "1.0.0",
         "cost_withheld": True,
         "timestamp": "2026-01-01T00:00:00+00:00",
+        "dirty_tree": False,
     }
     kwargs.update(overrides)
     return assemble_arm(units, **kwargs)

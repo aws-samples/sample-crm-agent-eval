@@ -497,19 +497,111 @@ def test_run_turn_with_resume_from_omitted_runs_a_fresh_turn_despite_recorded_ev
     assert _sse_texts(lines) == ["second"]
 
 
-def test_run_turn_with_resume_from_at_or_beyond_last_sequence_runs_a_fresh_turn() -> None:
-    """resume_from equal to (or beyond) the last recorded sequence means nothing to replay, so a
-    genuinely new turn's events are consumed and recorded normally."""
+def _kinds(lines: list[str]) -> list[str]:
+    return [json.loads(line[len("data: ") : -2])["kind"] for line in lines]
+
+
+def _replay_unavailable_logs(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    records = [json.loads(record.getMessage()) for record in caplog.records]
+    return [record for record in records if record.get("event") == "resume_replay_unavailable"]
+
+
+@pytest.mark.parametrize("resume_from", [1, 5])
+def test_run_turn_with_resume_from_at_or_beyond_last_sequence_signals_then_runs_fresh(
+    resume_from: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A resume with nothing left to replay yields ``replay_unavailable`` first, unrecorded, then
+    the genuinely new turn's events, consumed and recorded normally."""
     store = InMemorySessionStore()
     invocation = _fake_invocation(session_id="sess-4")
     store.append("sess-4", AgentEvent(kind="completed", text="turn one"))
 
     new_events = iter([AgentEvent(kind="completed", text="turn two")])
-    lines = list(run_turn(invocation, new_events, store=store, resume_from=1, resume=True))
-    assert len(lines) == 1
-    body = json.loads(lines[0][len("data: ") : -2])
-    assert body["text"] == "turn two"
+    with caplog.at_level("INFO", logger="agents.runtime_entrypoint"):
+        lines = list(
+            run_turn(invocation, new_events, store=store, resume_from=resume_from, resume=True)
+        )
+
+    assert _kinds(lines) == ["replay_unavailable", "completed"]
+    first = json.loads(lines[0][len("data: ") : -2])
+    assert {key for key, value in first.items() if value not in (None, False)} == {"kind"}
+    assert json.loads(lines[1][len("data: ") : -2])["text"] == "turn two"
     assert store.last_sequence("sess-4") == 2
+    assert _kinds([format_sse_line(e) for e in store.events_after("sess-4", sequence=0)]) == [
+        "completed"
+    ]
+    assert _replay_unavailable_logs(caplog) == [
+        {"event": "resume_replay_unavailable", "reason": "caught_up", "session_id": "sess-4"}
+    ]
+
+
+def test_run_turn_resume_with_nothing_recorded_signals_then_runs_fresh(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A resume for a session with no recorded events signals, logs ``nothing_recorded`` and
+    runs the turn, recording only the turn's own events."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-empty")
+
+    with caplog.at_level("INFO", logger="agents.runtime_entrypoint"):
+        lines = list(
+            run_turn(
+                invocation,
+                iter([AgentEvent(kind="completed", text="fresh")]),
+                store=store,
+                resume_from=0,
+                resume=True,
+            )
+        )
+
+    assert _kinds(lines) == ["replay_unavailable", "completed"]
+    assert store.last_sequence("sess-empty") == 1
+    assert _replay_unavailable_logs(caplog) == [
+        {
+            "event": "resume_replay_unavailable",
+            "reason": "nothing_recorded",
+            "session_id": "sess-empty",
+        }
+    ]
+
+
+def test_a_later_resume_never_replays_a_replay_unavailable_signal() -> None:
+    """The signal is not recorded, so a reconnect to the re-run replays only the re-run's events."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-rerun")
+    rerun = [
+        AgentEvent(kind="usage", input_tokens=1, output_tokens=1),
+        AgentEvent(kind="completed", text="rerun"),
+    ]
+    list(run_turn(invocation, iter(rerun), store=store, resume_from=0, resume=True))
+
+    replayed = list(run_turn(invocation, iter([]), store=store, resume_from=0, resume=True))
+
+    assert _kinds(replayed) == ["usage", "completed"]
+
+
+def test_neither_a_fresh_turn_nor_a_replay_emits_replay_unavailable(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The signal is reserved for a resume that cannot replay."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-plain")
+    with caplog.at_level("INFO", logger="agents.runtime_entrypoint"):
+        fresh = list(
+            run_turn(invocation, iter([AgentEvent(kind="completed", text="a")]), store=store)
+        )
+        follow_up = list(
+            run_turn(
+                invocation,
+                iter([AgentEvent(kind="completed", text="b")]),
+                store=store,
+                resume_from=1,
+            )
+        )
+        replay = list(run_turn(invocation, iter([]), store=store, resume_from=0, resume=True))
+
+    assert "replay_unavailable" not in _kinds(fresh + follow_up + replay)
+    assert _replay_unavailable_logs(caplog) == []
 
 
 def test_in_memory_session_store_events_after_returns_empty_tuple_for_unknown_session() -> None:
@@ -818,3 +910,60 @@ def _fake_invocation(*, session_id: str) -> RuntimeInvocation:
         tuning=tuning,
         resolved_tiers=resolved,
     )
+
+
+@pytest.mark.parametrize("resume_from", [-1, -50])
+def test_run_turn_resume_with_a_negative_cursor_signals_then_runs_fresh(
+    resume_from: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A resume whose cursor is negative cannot be replayed, so it signals before the fresh turn."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-neg")
+    list(run_turn(invocation, iter([AgentEvent(kind="completed", text="first")]), store=store))
+    assert store.last_sequence("sess-neg") == 1
+
+    with caplog.at_level("INFO", logger="agents.runtime_entrypoint"):
+        lines = list(
+            run_turn(
+                invocation,
+                iter([AgentEvent(kind="completed", text="second")]),
+                store=store,
+                resume_from=resume_from,
+                resume=True,
+            )
+        )
+
+    assert _kinds(lines) == ["replay_unavailable", "completed"]
+    assert json.loads(lines[1][len("data: ") : -2])["text"] == "second"
+    assert store.last_sequence("sess-neg") == 2
+    assert _replay_unavailable_logs(caplog) == [
+        {"event": "resume_replay_unavailable", "reason": "invalid_cursor", "session_id": "sess-neg"}
+    ]
+
+
+@pytest.mark.parametrize("recorded", [0, 1, 3])
+@pytest.mark.parametrize("resume_from", [-1, 0, 1, 2, 3, 4])
+def test_every_resume_either_replays_or_signals_replay_unavailable(
+    recorded: int, resume_from: int
+) -> None:
+    """A ``resume: true`` call never runs a fresh turn silently: it replays, or signals first."""
+    store = InMemorySessionStore()
+    invocation = _fake_invocation(session_id="sess-grid")
+    _fill(store, "sess-grid", recorded)
+
+    lines = list(
+        run_turn(
+            invocation,
+            iter([AgentEvent(kind="completed", text="fresh")]),
+            store=store,
+            resume_from=resume_from,
+            resume=True,
+        )
+    )
+
+    replayable = 0 <= resume_from < recorded
+    if replayable:
+        assert "replay_unavailable" not in _kinds(lines)
+        assert _sse_texts(lines) == [f"e{index}" for index in range(resume_from + 1, recorded + 1)]
+    else:
+        assert _kinds(lines) == ["replay_unavailable", "completed"]

@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+#
+# Tracked gitleaks rule set: gitleaks' built-in rules plus this repository's custom detection rules.
+# scripts/check_secret_scan.py and both pre-commit hooks use it when the untracked local
+# `.gitleaks.toml` is absent. Custom rule ids carry a `crm-` prefix: an id equal to a built-in rule's
+# merges into it rather than adding a rule.
+title = "crm-agent-eval tracked gitleaks rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "crm-aws-access-key-id"
+description = "AWS access key id (long-term IAM user or STS temporary credential)"
+regex = '''(A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+tags = ["key", "aws"]
+
+[[rules]]
+id = "crm-aws-secret-access-key"
+description = "AWS secret access key, assigned to a variable naming it as such"
+regex = '''(?i)aws_secret_access_key["']?\s*[:=]\s*["']?[A-Za-z0-9/+=]{40}'''
+tags = ["key", "aws"]
+
+[[rules]]
+id = "crm-private-key"
+description = "PEM-format private key block"
+regex = '''-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----'''
+tags = ["key"]
+
+[[rules]]
+id = "crm-anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{20,}'''
+tags = ["key", "anthropic"]
+
+[[rules]]
+id = "crm-openai-api-key"
+description = "OpenAI API key"
+regex = '''sk-(proj-)?[A-Za-z0-9_-]{20,}'''
+tags = ["key", "openai"]
+
+[[rules]]
+id = "crm-generic-high-entropy-secret"
+description = "A credential-shaped variable assigned a long opaque value"
+regex = '''(?i)(secret|token|api[_-]?key|password|passwd)["']?\s*[:=]\s*["'][A-Za-z0-9_\-./+=]{20,}["']'''
+tags = ["generic"]
+
+# Exempts only the `--i-understand-this-is-billable` flag, by matched value. gitleaks 8.30.1 honours
+# only the singular `[rules.allowlist]`.
+[rules.allowlist]
+description = "billable-acknowledgment CLI flag, exempted by value wherever it is documented"
+regexTarget = "match"
+regexes = ['''=\s*"--i-understand-this-is-billable"''']

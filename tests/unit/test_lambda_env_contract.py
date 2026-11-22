@@ -56,6 +56,7 @@ _EVAL_TRIGGER_OPTIONAL: frozenset[str] = frozenset(
         "AWS_PROFILE",
         "AWS_SHARED_CREDENTIALS_FILE",
         "CONVERSATION_HISTORY_STORE",
+        "CRM_EVAL_VERBOSE_ERRORS",
         "EVAL_SUBSTRATE",
         "LOG_LEVEL",
     }

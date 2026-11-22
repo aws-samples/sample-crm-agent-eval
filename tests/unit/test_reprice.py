@@ -139,6 +139,7 @@ def _entry(model_id: str, input_tokens: int, tier: str = "supervisor") -> dict[s
         "tokens": {"input_tokens": input_tokens, "output_tokens": 10},
         "cache": {"read_tokens": 0, "write_tokens": 0},
         "latency_ms": None,
+        "output_truncated": False,
         "task_id": "gt-added",
         "repeat_index": 0,
     }
@@ -168,6 +169,36 @@ def test_a_malformed_entry_is_refused() -> None:
         attribution_from_entry({"tier": "supervisor"})
     with pytest.raises(RepriceRefused, match="not an object"):
         with_archived_pricing(["not", "an", "entry"])
+
+
+@pytest.mark.parametrize("truncated", [True, False])
+def test_an_archived_output_truncated_flag_round_trips(truncated: bool) -> None:
+    entry = {**_entry(_SONNET, 1_000), "output_truncated": truncated}
+    assert attribution_from_entry(entry).output_truncated is truncated
+    assert with_archived_pricing(entry)["output_truncated"] is truncated
+
+
+@pytest.mark.parametrize("value", ["true", 1, None], ids=["string", "int", "null"])
+def test_a_non_boolean_output_truncated_flag_is_refused(value: object) -> None:
+    with pytest.raises(RepriceRefused, match="output_truncated"):
+        attribution_from_entry({**_entry(_SONNET, 1_000), "output_truncated": value})
+
+
+def test_an_entry_without_the_output_truncated_flag_is_refused() -> None:
+    entry = _entry(_SONNET, 1_000)
+    del entry["output_truncated"]
+    with pytest.raises(RepriceRefused, match="output_truncated"):
+        attribution_from_entry(entry)
+
+
+def test_a_sweeps_archived_attributions_carry_the_output_truncated_flag(sweep_dir: Path) -> None:
+    """The pre-aggregation writer archives the flag the reader requires, on every entry."""
+    archives = sorted((sweep_dir / "raw" / "pre-aggregation").glob("*.json"))
+    assert archives
+    for archive in archives:
+        entries = json.loads(archive.read_text(encoding="utf-8"))["invocation_attributions"]
+        assert entries
+        assert all(isinstance(entry["output_truncated"], bool) for entry in entries)
 
 
 # -- round trip ----------------------------------------------------------------------------------

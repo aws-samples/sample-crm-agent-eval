@@ -67,7 +67,7 @@ build reads the agent-source object from that bucket).
 `runtime.tf` sets no `capacity_provider_configuration`. That argument is what opts a runtime into the
 **Instances** compute type, which bills continuously; without it the runtime uses the default
 microVM/consumption compute type, billed per second while active and nothing at idle. The pinned
-`hashicorp/aws` 6.72.0 schema for `aws_bedrockagentcore_agent_runtime` has no
+`hashicorp/aws` 6.73.0 schema for `aws_bedrockagentcore_agent_runtime` has no
 `capacity_provider_configuration` argument, so the omission is structural.
 
 To check any `aws_bedrockagentcore_*` argument against the provider schema:
@@ -120,13 +120,10 @@ through `agents.runtime_entrypoint.resolve_identity` first.
 |---|---|---|---|
 | absent | the full turn: provider stream, tool dispatch, SSE out | yes | yes, per model-chosen tool call |
 | `isolation_probe` | reports a role's registry-derived tool surface and classifies a synthetic outcome trigger | no | no |
-| `delegation` | routes one **named** tool to its owning subagent and dispatches it | no | yes, one `lambda:InvokeFunction` |
 | `cancel` | records a cancellation request for the caller's own `session_id`, which the running turn reads between steps; returns `accepted`, `already_requested` or `already_terminal` | no | no |
 | `eval_turn` | one eval task's turn for `sweep_task`: requires an `eval-<run_id>` tenant and the arm's schema-3 `tuning` (strictly parsed: any key outside it is refused), runs under the eval budget with `provider_mode` `stub` or `live`, and returns the observed turn as JSON rather than SSE | yes (the stub provider when `provider_mode` is `stub`) | yes, per model-chosen tool call |
 
-`delegation` lets a test target a specific tool and record, which the model-driven turn path cannot. It
-is not read-only: it shares tool dispatch and result classification with the turn path, and so needs
-`ACTION_LAMBDA_PREFIX`. It resolves no provider and constructs no `Store`.
+Any other `mode` value, including the retired `delegation`, takes the full turn path.
 
 ## Inbound auth: the Runtime is IAM, the Gateway is CUSTOM_JWT
 
@@ -170,7 +167,8 @@ The module's own default is `PUBLIC` so it plans standalone with no network inpu
 VPC mode governs **egress only**; it does not change who can call `InvokeAgentRuntime`. The inbound
 boundary is the Runtime's resource policies at the root (`data.aws_iam_policy_document.agent_runtime_*`),
 which include an `aws:SourceVpce` Deny keyed on the `bedrock-agentcore` VPC endpoint, enabled by the
-root variable `runtime_source_vpce_deny_enabled` (default `false`).
+root variable `runtime_source_vpce_deny_enabled` (default `true`; a fresh stack is brought up in two
+stages, see "Fresh stack: two-stage SourceVpce bring-up" in `docs/runbook.md`).
 
 ## Teardown
 

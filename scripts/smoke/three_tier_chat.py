@@ -95,7 +95,7 @@ import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Final, NamedTuple, Protocol
+from typing import Any, Final, NamedTuple
 
 from scripts.smoke.harness import (
     DEFER,
@@ -105,6 +105,11 @@ from scripts.smoke.harness import (
     exception_detail,
     open_https,
     run_main,
+)
+from scripts.smoke.history_cleanup import (
+    HistoryItemsFactory,
+    LiveHistoryItems,
+    delete_session_history,
 )
 
 from agents.conversation_history import DEFAULT_TTL_SECONDS, HISTORY_ITEM_ATTRIBUTES
@@ -163,6 +168,7 @@ MODEL_TURN_ALLOTMENTS: Final[Mapping[str, int]] = {
     "three_tier_chat": 12,
     "mcp_chat_gateway": 2,
     "agents": 1,
+    "chat_resume": 3,
 }
 
 #: The `error_kind` of the Runtime's turn-level validation refusal (`agents.runtime_server`).
@@ -205,7 +211,6 @@ HISTORY_RECALL_TURNS: Final[int] = 4
 
 HISTORY_RECALL_CHECK: Final[str] = "followup_turn_carries_history:anthropic"
 HISTORY_ITEM_CHECK: Final[str] = "history_item_owned_and_expiring"
-HISTORY_ITEMS_DELETED_CHECK: Final[str] = "history_items_deleted"
 HISTORY_OMITTED_RESUME_CHECK: Final[str] = "followup_without_resume_from_carries_history:anthropic"
 HISTORY_LOG_CHECK: Final[str] = "history_store_failures_absent_from_runtime_logs"
 
@@ -220,9 +225,6 @@ HISTORY_FAILURE_EVENTS: Final[tuple[str, ...]] = (
 #: How long check 9 polls the Runtime log group for its turns' `invocation_started` lines.
 _HISTORY_LOG_POLL_SECONDS: Final[float] = 180.0
 _HISTORY_LOG_POLL_INTERVAL: Final[float] = 10.0
-
-#: The `reps` table, which holds the Runtime's conversation-history items.
-_HISTORY_TABLE: Final[str] = "reps"
 
 #: Check 9's question, sent unchanged on B and on the control; it never carries the code word.
 HISTORY_RECALL_PROMPT: Final[str] = (
@@ -437,67 +439,6 @@ RunTurn = Callable[..., TurnResult]
 CloudTrailLookup = Callable[[SmokeContext, int, int], "list[CloudTrailEvent]"]
 #: `(ctx) -> provisioner`. Builds a fresh disposable-user provisioner. Injected by the test.
 ProvisionerFactory = Callable[[SmokeContext], Any]
-
-
-class HistoryItems(Protocol):
-    """Operator access to the `reps` history items, by their `rep_id` key."""
-
-    def get(self, rep_id: str) -> Mapping[str, Any] | None:
-        """The item at `rep_id`, strongly consistent, or `None`."""
-        ...
-
-    def delete(self, rep_id: str) -> None:
-        """Delete the item at `rep_id`; absent is not an error."""
-        ...
-
-
-#: `(ctx) -> HistoryItems`. Live default addresses the deployed `reps` table.
-HistoryItemsFactory = Callable[[SmokeContext], HistoryItems]
-
-
-class _LiveHistoryItems:
-    """`HistoryItems` over the deployed `reps` table, as the operator credential."""
-
-    def __init__(self, ctx: SmokeContext) -> None:
-        from crm.store.store import Store
-
-        names = ctx.outputs.require_mapping("dynamodb_table_names")
-        accounts = str(names["accounts"])
-        self._store = Store(
-            client=ctx.client("dynamodb"), table_prefix=accounts[: -len("accounts")]
-        )
-
-    def get(self, rep_id: str) -> Mapping[str, Any] | None:
-        return self._store.get_item(_HISTORY_TABLE, {"rep_id": rep_id}, consistent=True)
-
-    def delete(self, rep_id: str) -> None:
-        self._store.delete_item(_HISTORY_TABLE, {"rep_id": rep_id})
-
-
-def delete_history_items(items: HistoryItems, keys: Sequence[str]) -> CheckResult:
-    """Delete every history item in `keys` and prove each absent by a consistent re-read."""
-    remaining: list[str] = []
-    try:
-        for key in keys:
-            items.delete(key)
-            if items.get(key) is not None:
-                remaining.append(key)
-    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
-        return CheckResult(
-            resource=RESOURCE_CLASS,
-            check=HISTORY_ITEMS_DELETED_CHECK,
-            status="fail",
-            detail=f"could not delete the history items: {exception_detail(exc)}",
-        )
-    return CheckResult(
-        resource=RESOURCE_CLASS,
-        check=HISTORY_ITEMS_DELETED_CHECK,
-        status="fail" if remaining else "pass",
-        detail=(
-            f"{len(keys)} history key(s) deleted, {len(remaining)} still present on re-read"
-            + (f": {remaining}" if remaining else "")
-        ),
-    )
 
 
 def _tier_profiles(
@@ -1162,7 +1103,7 @@ def evaluate_cache_history(
             resource=RESOURCE_CLASS,
             check=CACHE_HISTORY_CHECK,
             status="pass",
-            detail=f"{observed}; B read cached session history beyond C's prefix",
+            detail=f"{observed}; B read back the latest-message cache point beyond C's prefix",
         )
     if read["C"] == 0 and written == 0:
         return CheckResult(
@@ -1508,7 +1449,7 @@ def checks(
     """
     factory = provisioner_factory if provisioner_factory is not None else _default_provisioner
     send = run_turn if run_turn is not None else _LiveTurns()
-    items_factory = history_items if history_items is not None else _LiveHistoryItems
+    items_factory = history_items if history_items is not None else LiveHistoryItems
     log_lookup = runtime_logs if runtime_logs is not None else _live_runtime_log_lookup
     sessions_by_token: dict[str, list[str]] = {}
 
@@ -1678,7 +1619,7 @@ def checks(
             )
             yield evaluate_page_context_refusal(check, refusal, marker=marker, control=probe)
 
-        # --- Check 8: a same-session follow-up reads cached history beyond the stable prefix ---
+        # --- Check 8: a same-session follow-up reads back the latest-message cache point ---
         if budget.allotment - len(budget.used) < CACHE_HISTORY_TURNS:
             yield budget_refused(budget, "cache-history turns")
             return
@@ -1772,25 +1713,15 @@ def _delete_module_history(
     sessions_by_token: Mapping[str, Sequence[str]],
 ) -> Iterable[CheckResult]:
     """Delete each provisioned user's history items for every session its token was sent with."""
-    keys: list[str] = []
+    sessions_by_tenant: list[tuple[str, Sequence[str]]] = []
     for prov in provisioners:
         token = tokens.get(id(prov))
         sessions = sessions_by_token.get(token, ()) if token is not None else ()
-        tenant = str(prov.tenant()) if sessions else ""
-        keys.extend(history_key(tenant, session) for session in sessions if tenant)
-    if not keys:
-        return
-    try:
-        items = items_factory(ctx)
-    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
-        yield CheckResult(
-            resource=RESOURCE_CLASS,
-            check=HISTORY_ITEMS_DELETED_CHECK,
-            status="fail",
-            detail=f"could not address the history items: {exception_detail(exc)}",
-        )
-        return
-    yield delete_history_items(items, keys)
+        if sessions:
+            sessions_by_tenant.append((str(prov.tenant()), sessions))
+    yield from delete_session_history(
+        ctx, items_factory, sessions_by_tenant, resource=RESOURCE_CLASS
+    )
 
 
 def expected_check_count(_ctx: SmokeContext) -> ExpectedCheckCount:

@@ -25,7 +25,7 @@ from eval.metrics import (
 from tests.unit import test_matrix_tier_comparison as fixtures
 
 _ANTHROPIC = "anthropic.claude-sonnet-5-5"
-_OPENAI = "openai.gpt-6.1-sol"
+_OPENAI = "openai.gpt-6.2-sol"
 _OLD_LABELS = ("Reported input tokens", "Total prompt tokens", "Output tokens")
 _TOKEN_LABELS = [
     "Total input tokens",
@@ -149,7 +149,7 @@ def test_a_stored_summary_without_the_uncached_key_still_renders_the_derived_row
     for entries in stored["tiers"].values():
         for entry in entries:
             del entry["uncached_input_tokens"]
-    assert stored[matrix.RECORD_SHAPE_VERSION_KEY] == 3
+    assert stored[matrix.RECORD_SHAPE_VERSION_KEY] == 4
     assert matrix.tier_comparison_table(stored) == matrix.tier_comparison_table(
         tier_comparison(matrix_result)
     )

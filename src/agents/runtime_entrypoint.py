@@ -9,7 +9,9 @@
    turn starts. Each tier runs its own family.
 3. **Session resumption.** A :class:`SessionStore` records every emitted event under the
    ``session_id``; :func:`run_turn` with ``resume_from`` replays only later events. ``heartbeat``
-   events are streamed but never recorded, so they do not shift resume indices.
+   events are streamed but never recorded, so they do not shift resume indices. A resume the
+   store cannot replay is answered with an unrecorded ``replay_unavailable`` event, then a fresh
+   turn.
    :func:`run_turn` starts each fresh turn with :meth:`SessionStore.begin_turn`, so a session
    holds only its latest turn's events; :class:`InMemorySessionStore` also caps that at
    :data:`MAX_EVENTS_PER_SESSION`, enough for any one chat turn, dropping the oldest first.
@@ -20,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import deque
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
@@ -40,6 +43,8 @@ from crm.toolspec.page_context import PageContext, parse_page_context
 from providers.base import ModelProvider, ResolvedInvocation, Tuning
 from providers.capabilities import CapabilityMatrix, Tier
 from providers.tier_tuning import TurnTuning, parse_wire_tuning, resolve_turn
+
+logger = logging.getLogger(__name__)
 
 #: The ``source`` recorded on a chat turn's tuning when the payload names none.
 _TUNING_SOURCE_UI: Final[str] = "agent.invocation.tuning"
@@ -396,6 +401,10 @@ def run_turn(
     rendering it; a heartbeat is rendered only. A reconnect, where ``resume`` is ``True`` and
     ``resume_from`` is at least ``0`` and below the session's last recorded sequence, yields only
     the recorded events after it and does not consume ``events``. Any other call is a fresh turn.
+    Every other reconnect — nothing recorded, ``resume_from`` at or past the last recorded
+    sequence, or a negative ``resume_from`` — first yields an unrecorded ``replay_unavailable``
+    event, logs ``resume_replay_unavailable`` with its ``reason`` (``nothing_recorded``,
+    ``caught_up`` or ``invalid_cursor``), then runs the turn fresh.
 
     Args:
         invocation: The decoded, tuning-validated invocation driving this turn.
@@ -415,6 +424,23 @@ def run_turn(
         for replayed in store.events_after(invocation.session_id, sequence=resume_from):
             yield format_sse_line(replayed)
         return
+    if resume is True:
+        if last_recorded == 0:
+            reason = "nothing_recorded"
+        elif resume_from < 0:
+            reason = "invalid_cursor"
+        else:
+            reason = "caught_up"
+        logger.info(
+            json.dumps(
+                {
+                    "event": "resume_replay_unavailable",
+                    "reason": reason,
+                    "session_id": invocation.session_id,
+                }
+            )
+        )
+        yield format_sse_line(AgentEvent(kind="replay_unavailable"))
 
     store.begin_turn(invocation.session_id)
     for event in events:

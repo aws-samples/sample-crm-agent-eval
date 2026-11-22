@@ -33,7 +33,10 @@ git config core.hooksPath githooks                      # or: pre-commit install
 - `frontend/`, `src/relay/` and `tests/e2e/browser/` are three separate npm projects, each with its
   own lockfile. They are not a workspace; run `npm ci` in each one you use.
 - The git hooks run `check_no_account_id`, `check_no_vendor_keys`, `check_log_redaction` and
-  gitleaks against staged content, then `check_secret_scan` over the working tree. Any non-zero
+  gitleaks against staged content, then `check_secret_scan` over the working tree. `githooks/pre-commit`
+  scans staged content with the untracked `.gitleaks.toml` when present, else the tracked
+  `config/gitleaks.toml`; the `pre-commit` framework's staged scan uses only the local file or
+  gitleaks' built-in rules. Any non-zero
   `check_secret_scan` status fails the hook, including 3 (gitleaks absent).
 - Figures under `docs/figures/` are drawn and exported with draw.io desktop 32.6.10 (Homebrew
   cask `drawio`, whose CLI is `drawio`), using `drawio -x -f svg --embed-svg-images --theme light`;
@@ -41,7 +44,7 @@ git config core.hooksPath githooks                      # or: pre-commit install
 - Security-relevant pins: `cryptography` 50.0.2, `PyJWT` 2.15.1, `urllib3` 2.8.0 and
   `pytest` 9.1.1 (`requirements.txt`); `vite` 8.3.8 and `tailwindcss` 4.3.5 (`frontend/package.json`;
   Tailwind 4 needs Safari 16.4, Chrome 111 or Firefox 128, see [`frontend/README.md`](../frontend/README.md)); `hashicorp/aws`
-  6.72.0 (exact constraint) and `hashicorp/null` 3.3.2 (lock file only; no version constraint), in
+  6.73.0 (exact constraint) and `hashicorp/null` 3.3.2 (lock file only; no version constraint), in
   `infra/.terraform.lock.hcl`.
 
 ## Running tests
@@ -130,6 +133,7 @@ when the dependency is missing. The authoritative set is
 | `CRM_REQUIRE_RELAY_PACKAGING=1` | the relay packaging tests | `node`, `npm`, `zip` or `unzip` is missing |
 | `CRM_REQUIRE_TERRAFORM=1` | the plan-time infra tests | `terraform` or `infra/.terraform/providers` is missing |
 | `CRM_REQUIRE_RELAY_TESTS=1` | `test-relay` | `npm` or `src/relay/node_modules` is missing |
+| `CRM_REQUIRE_FRONTEND_TESTS=1` | `test-frontend` (the frontend's lint, typecheck and vitest suite) | `npm` or `frontend/node_modules` is missing (`cd frontend && npm ci`) |
 | `CRM_REQUIRE_JOURNEY_STATIC=1` | `test-journeys-static` | `npm` or `tests/e2e/browser/node_modules` is missing (`cd tests/e2e/browser && npm ci`) |
 | `CRM_REQUIRE_TS_CONTRACTS=1` | `tests/integration/test_envelope_groups_contract.py`, `tests/integration/test_eval_envelopes_contract.py` | `node` or `frontend/node_modules` is missing. **Not exported by `make verify`:** only the CI `frontend` job sets it, on the frontend's pinned Node |
 
@@ -180,7 +184,7 @@ for each deferred control.
 | `check_doc_links` | every tracked `.md`'s inline links, images and reference definitions (outside fenced and inline code and HTML comments) name a tracked file or directory, case-sensitively; every `#anchor` on a link to a tracked `.md` matches a GitHub heading slug or an `<a id>`/`<a name>` in it; every tracked `.md` is reachable from `README.md` through `.md` links, except the `EXEMPT_UNREACHABLE` entries (none today). External schemes are skipped. `[SKIP]` when no `.md` is tracked |
 | `check_pipefail_sigpipe` | no pipeline in code running under `pipefail` has a consumer that can stop reading early (`grep -q`/`--quiet`/`-m`, `head`, `sed Nq`) in a non-first position, since its producer's SIGPIPE turns a match into a failure: tracked shell files (shebang-derived plus `*.sh`, after the `set -o pipefail` line), Makefile recipe lines whose shell enables it, GitHub `run:` blocks and GitLab `before_script`+`script`/`after_script`. A `$(… \| head -1 \|\| true)` capture is allowed; a masked pipeline used as a condition is not. `[SKIP]` when no shell file is tracked |
 | `check_untracked_artifact_secrets` | no vendor key in a generated artifact, and untracked artifacts that hold account material stay gitignored |
-| `check_secret_scan` | gitleaks over the working tree's non-ignored files (`git ls-files --cached --others --exclude-standard`), with findings redacted: the untracked local `.gitleaks.toml` when present, else gitleaks' built-in rules; `[SKIP]` without `gitleaks`. Gitignored files (caches, `.venv`, local scanner output) are not read; `check_untracked_artifact_secrets` is their only coverage |
+| `check_secret_scan` | gitleaks over the working tree's non-ignored files (`git ls-files --cached --others --exclude-standard`), with findings redacted: the untracked local `.gitleaks.toml` when present, else the tracked `config/gitleaks.toml` (which extends gitleaks' built-in rules), else the built-in rules alone; `[SKIP]` without `gitleaks`. Gitignored files (caches, `.venv`, local scanner output) are not read; `check_untracked_artifact_secrets` is their only coverage |
 | `check_emitted_css` | every static class token in frontend source resolves to a rule in the built CSS; `[SKIP]` without `npm ci` |
 | `verify_fixtures` | the synthetic dataset regenerates byte-identically |
 | `check_plan_security_baseline` | the infrastructure security baseline (`docs/security-baseline.md`) against a plan fixture; reports `[PARTIAL]` for controls that cannot be resolved from a plan |
@@ -211,8 +215,12 @@ is not tracked fails only on a fresh clone.
 ## Static analysis
 
 ruff `S` runs in `make lint`. bandit, checkov and detect-secrets are not configured in the
-repository. No CI job runs any of them, `pip-audit` or `npm audit`, so a clean result is a
-point-in-time measurement.
+repository, and no CI job runs them, so a clean result from any of them is a point-in-time
+measurement. Dependency auditing does run in CI: the `sca` job in both `.github/workflows/verify.yml`
+and `.gitlab-ci.yml` runs `pip-audit` over `requirements.txt`, which fails the job on any known
+vulnerability, and `npm audit --audit-level=high` in `frontend/`, `src/relay/` and
+`tests/e2e/browser/`, which fails it on High or Critical findings only. The commands below
+reproduce it locally.
 
 | Tool | Config | What it covers |
 |---|---|---|

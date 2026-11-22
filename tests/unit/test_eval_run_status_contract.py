@@ -28,8 +28,8 @@ from eval.trigger import _artifact_links
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 
-#: Emitted run keys the client does not read yet. Empty.
-PENDING_CLIENT_FIELDS_G2_3: Final[frozenset[str]] = frozenset()
+#: Emitted run keys the client does not read yet: the failed-run error code and its detail.
+PENDING_CLIENT_FIELDS_G2_3: Final[frozenset[str]] = frozenset({"error_code", "error_detail"})
 
 #: The one consumer of the eval-run status payload.
 _CLIENT_TS: Final[Path] = _REPO_ROOT / "frontend" / "src" / "pages" / "evals" / "EvalRunClient.ts"
@@ -238,6 +238,8 @@ def _emitted_keys(statuses: frozenset[str] | None = None) -> set[str]:
             finished_at="2026-01-01T00:05:00+00:00",
             teardown_status="failed",
             failure_summary="teardown failed",
+            error_code="step_lambda_error",
+            error_detail="States.TaskFailed",
         ),
     )
     selected = [run for run in variants if statuses is None or run.status in statuses]

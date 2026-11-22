@@ -21,6 +21,7 @@ import pytest
 import yaml
 from scripts.smoke import three_tier_chat
 from scripts.smoke.harness import CheckResult, context_for_test
+from scripts.smoke.history_cleanup import HISTORY_ITEMS_DELETED_CHECK
 from scripts.smoke.three_tier_chat import (
     _CACHE_HISTORY_INSTRUCTION,
     _CLOUDTRAIL_MAX_PAGES,
@@ -44,7 +45,6 @@ from scripts.smoke.three_tier_chat import (
     CACHE_UNREPORTED_REASON,
     HISTORY_FAILURE_EVENTS,
     HISTORY_ITEM_CHECK,
-    HISTORY_ITEMS_DELETED_CHECK,
     HISTORY_LOG_CHECK,
     HISTORY_OMITTED_RESUME_CHECK,
     HISTORY_RECALL_CHECK,
@@ -73,7 +73,6 @@ from scripts.smoke.three_tier_chat import (
     attribution_collision_row,
     cache_history_prompt,
     checks,
-    delete_history_items,
     evaluate_cache_history,
     evaluate_cache_read,
     evaluate_history_cross_session,
@@ -214,7 +213,7 @@ def test_the_current_config_selects_the_sol_sonnet_haiku_profiles() -> None:
         "tool": "anthropic",
     }
     assert selection.profiles == {
-        "supervisor": "global.openai.gpt-6.1-sol",
+        "supervisor": "global.openai.gpt-6.2-sol",
         "subagent": "global.anthropic.claude-sonnet-5-5",
         "tool": "global.anthropic.claude-haiku-5-5",
     }
@@ -1669,6 +1668,13 @@ def test_a_follow_up_reading_beyond_the_fresh_prefix_passes() -> None:
     assert (row.check, row.status) == (CACHE_HISTORY_CHECK, "pass")
 
 
+def test_check_8_claims_latest_message_caching_not_session_history() -> None:
+    """The pass detail names what the row measures; check 9 owns the session-history claim."""
+    row = _history_row(_history_turn(4400), _history_turn(4400, 300), _history_turn(4700))
+    assert "latest-message cache point" in row.detail
+    assert "session history" not in row.detail
+
+
 def test_a_follow_up_reading_only_the_fresh_prefix_fails() -> None:
     row = _history_row(_history_turn(4400), _history_turn(4400), _history_turn(4400))
     assert row.status == "fail"
@@ -1934,28 +1940,6 @@ def test_an_item_not_owned_or_not_expiring_in_the_ttl_fails(overrides: dict[str,
 
 def test_an_absent_item_fails() -> None:
     assert _item_row(None).status == "fail"
-
-
-def test_deleting_the_history_items_proves_each_absent() -> None:
-    items = _FakeHistoryItems({"k1": {}, "k2": {}})
-    row = delete_history_items(items, ["k1", "k2", "k3"])
-    assert (row.check, row.status) == (HISTORY_ITEMS_DELETED_CHECK, "pass")
-    assert items.items == {}
-    assert items.deleted == ["k1", "k2", "k3"]
-
-
-def test_an_item_surviving_its_delete_fails_the_row() -> None:
-    row = delete_history_items(_FakeHistoryItems({"k1": {}}, sticky=["k1"]), ["k1"])
-    assert row.status == "fail"
-    assert "k1" in row.detail
-
-
-def test_a_delete_error_fails_the_row_rather_than_raising() -> None:
-    class _Refusing(_FakeHistoryItems):
-        def delete(self, rep_id: str) -> None:
-            raise RuntimeError("AccessDenied")
-
-    assert delete_history_items(_Refusing({}), ["k1"]).status == "fail"
 
 
 def _recall_indices(prompts: list[str]) -> list[int]:

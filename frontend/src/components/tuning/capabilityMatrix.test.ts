@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /**
  * Tests for the pure capability-matrix parse/query helpers, over matrix shapes mirroring
- * `config/model_capabilities.yaml`'s entries (Opus 5.5, Sonnet 5.5, Haiku 5.5, Astra, GPT-6.1 Sol,
+ * `config/model_capabilities.yaml`'s entries (Opus 5.5, Sonnet 5.5, Haiku 5.5, Astra, GPT-6.2 Sol,
  * Luna).
  */
 import { execFileSync } from "node:child_process";
@@ -75,8 +75,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: "high",
         },
       },
-      "openai.gpt-6-astra": {
-        model_id: "openai.gpt-6-astra",
+      "openai.gpt-6.2-astra": {
+        model_id: "openai.gpt-6.2-astra",
         family: "openai",
         tier: "supervisor",
         effort: {
@@ -86,8 +86,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: null,
         },
       },
-      "openai.gpt-6.1-sol": {
-        model_id: "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-sol": {
+        model_id: "openai.gpt-6.2-sol",
         family: "openai",
         tier: "subagent",
         effort: {
@@ -116,8 +116,8 @@ function rawMatrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: { effort: "low" } },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: { effort: "low" } },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: { effort: "medium" } },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: { effort: "low" } },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: { effort: "medium" } },
         tool: { model_id: "openai.gpt-6-luna", tuning: { effort: "low" } },
       },
     },
@@ -154,7 +154,7 @@ describe("modelFor", () => {
   it("resolves the model assigned to a family's tier", () => {
     const matrix = parseCapabilityMatrix(rawMatrix());
     expect(modelFor(matrix, "anthropic", "tool").modelId).toBe("anthropic.claude-haiku-5-5");
-    expect(modelFor(matrix, "openai", "supervisor").modelId).toBe("openai.gpt-6-astra");
+    expect(modelFor(matrix, "openai", "supervisor").modelId).toBe("openai.gpt-6.2-astra");
   });
 });
 
@@ -521,8 +521,8 @@ describe("parseCapabilityMatrix rejects a malformed payload, naming the field", 
     const raw = JSON.parse(JSON.stringify(rawMatrix())) as {
       models: Record<string, Record<string, unknown>>;
     };
-    raw.models["openai.gpt-6-astra"][REMOVED_TUNING_PARAMETER] = { supported: true };
-    const model = parseCapabilityMatrix(raw).models["openai.gpt-6-astra"];
+    raw.models["openai.gpt-6.2-astra"][REMOVED_TUNING_PARAMETER] = { supported: true };
+    const model = parseCapabilityMatrix(raw).models["openai.gpt-6.2-astra"];
     expect(Object.keys(model ?? {})).not.toContain(REMOVED_TUNING_PARAMETER);
   });
 

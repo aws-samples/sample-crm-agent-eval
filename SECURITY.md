@@ -121,13 +121,13 @@ account.
 |---|---|---|---|---|
 | TM-01 | Spoofing | Forged or unsigned JWT at an edge | relay, REST authorizer and Gateway interceptor each verify the RS256 signature against the pool JWKS, expiry and app client; Gateway `CUSTOM_JWT` checks allowed clients and audiences | none known; Low |
 | TM-02 | Spoofing | Token stolen from the browser or a client store and replayed | token expiry; refresh-token revocation at sign-out; enforced CSP with no `unsafe-inline` script; markdown rendered without raw HTML; each surface accepts only its own app client | a stolen token works until expiry; Medium |
-| TM-03 | Spoofing | Caller-supplied `_identity` or `_agent_identity` in a request body | channel chosen from top-level event keys; interceptor and tool tier strip identity keys; Runtime resource policy admits only the relay, sweep and chat-target roles | in-account principals with `lambda:InvokeFunction` on action Lambdas can hand-build an envelope, which the local live harness does by design; Low |
+| TM-03 | Spoofing | Caller-supplied `_identity` or `_agent_identity` in a request body | channel chosen from top-level event keys; interceptor and tool tier strip identity keys; Runtime resource policy admits only the relay, sweep and chat-target roles, and by default denies any call not arriving through the stack's `bedrock-agentcore` VPC endpoint (`runtime_source_vpce_deny_enabled`) | in-account principals with `lambda:InvokeFunction` on action Lambdas can hand-build an envelope, which the local live harness does by design; Low |
 | TM-04 | Spoofing | Self-registration or username chosen to collide with a rep | `allow_admin_create_user_only`; pre-token trigger keys on the immutable Cognito username; only operators write `reps` rows | operator misuse; Low |
 | TM-05 | Tampering | Cross-tenant or out-of-book read or write | structural tenant keys; `require_scope` / `require_record_scope` in every handler touching an existing record; caller-bound KMS-encrypted pagination cursors | none known; Low |
 | TM-06 | Tampering | Indirect prompt injection steers a write | proposals for high-risk changes; human approval bound to the stored proposal; writes limited to the rep's own book; per-turn tool-call and time budgets | injected text can still steer low-risk writes inside the rep's book; Medium |
 | TM-07 | Tampering | Tampered SPA assets or `/config.json` | origin bucket private, OAC-only, writes denied to all but operators; CSP `connect-src` pins API and Cognito origins | anyone who can write the origin can replace the JavaScript too; Low |
 | TM-08 | Tampering | Eval sweep writes outside its run | disposable tenants; `demo`/`canary` writes refused; every sweep step that writes (seed, aggregate, teardown, finalize) first re-checks that its execution still owns the run, and a refused step ends the execution without writing | none known; Low |
-| TM-09 | Repudiation | A user denies a write or approval | audit row in the same transaction as each mutation, naming the verified rep; API Gateway access logs; CloudTrail | audit rows omit the entry channel; MCP callers share one service principal; relay log lines carry no rep id; Low |
+| TM-09 | Repudiation | A user denies a write or approval | audit row in the same transaction as each mutation, naming the verified rep and the channel the write arrived on (`apigw`, `gateway` or `agent`); API Gateway access logs; CloudTrail | MCP callers share one service principal; relay log lines carry no rep id; Low |
 | TM-10 | Information disclosure | Bulk extraction through the agent | scope predicate on every read; per-call result and read caps; per-turn tool-call cap | a rep can summarise their whole book, which they may already read; Low |
 | TM-11 | Information disclosure | CRM data sent to the model provider | Bedrock in the deploying account over SigV4; data retention governed by the account's Bedrock setting; synthetic data | no per-field redaction, which would break the measurement; Low with synthetic data, revisit for real data |
 | TM-12 | Information disclosure | Leaked artefact URL | presigned GET of one object for 300 s, issued only to admins or full-visibility users; keys built server-side from the run id, `..` refused; S3 access logs | bearer link until expiry; Low |
@@ -137,8 +137,10 @@ account.
 | TM-16 | Denial of service | Dependency outage at sign-in or on the request path | pre-token trigger falls back to an empty book without full visibility (least privilege); JWKS and allowlist cached per warm environment and retried after failure | a failed reps lookup logs at INFO with no alarm; Low |
 | TM-17 | Elevation of privilege | Machine token with broad scope | interceptor maps every machine token to one service principal limited to the demo tenant and without full visibility; service principals cannot decide proposals | one principal for every MCP client; Medium if a second client is ever added |
 | TM-18 | Elevation of privilege | Non-admin drives privileged eval actions | live submit, cancel and unlock need the admin group; stub sweeps and run reads need admin or full visibility, enforced server-side | none beyond the documented policy; Low |
-| TM-19 | Elevation of privilege | Compromised dependency or build input | exact pins with a frozen lock installed `--no-deps`; one lockfile per npm project; SDKs only in the Runtime image; gitleaks and vendor-key gates; dev mock server applied only to `vite serve` and absent from the build | no CI job runs `pip-audit`, `npm audit` or other SCA; Medium |
+| TM-19 | Elevation of privilege | Compromised dependency or build input | exact pins with a frozen lock installed `--no-deps`; one lockfile per npm project; SDKs only in the Runtime image; gitleaks and vendor-key gates; the CI `sca` job runs `pip-audit` over the frozen Python lock (any known vulnerability fails it) and `npm audit --audit-level=high` in each npm project; dev mock server applied only to `vite serve` and absent from the build | npm findings below High do not fail the job; container images are not scanned in CI; a vulnerability published after the last pipeline run is not seen until the next one; Low |
 | TM-20 | Information disclosure | Bearer headers on internal hops | CloudFront to API traffic stays inside the VPC on a VPC origin; the ALB is internal and admits only security groups; ALB to execute-api is HTTPS | the CloudFront-to-ALB hop is HTTP inside the VPC, with no certificate to terminate TLS there; Low |
+| TM-21 | Tampering | A rep is persuaded to approve a misleading or long-forgotten proposal | high-risk changes need an explicit approve in the UI; the proposal card renders from the stored proposal, not from model text; the UI shows the tool trace beside the answer; approving a proposal pending for more than 7 days, or of unknown age, is refused with `proposal_stale` (rejecting it stays allowed) | a rep can still approve a recent stored proposal on the strength of a misleading answer; Low |
+| TM-22 | Tampering | Model-authored control characters reach a renderer or a terminal | the Runtime removes U+0000–U+001F (except tab and newline) and U+007F from every event's `text`, `error_message` and `partial_work` before the event is emitted, so streamed answers, stored answers and answers returned to MCP clients carry none | proposal summaries, tool inputs and tool outputs are not stripped; a client that prints them to a terminal must neutralise them; Low |
 
 ## OWASP Top 10 (2025)
 
@@ -146,7 +148,7 @@ account.
 |---|---|---|---|
 | A01 Broken Access Control | tenant, book and role scope on every record; admin-only eval actions | one scope predicate in the action Lambdas; structural tenant keys; channel-decoded identity; authorizer on every API route; resource policies on every data store | TM-03, TM-17 |
 | A02 Security Misconfiguration | CloudFront, S3, API Gateway, IAM and KMS configuration | plan-time `check_plan_security_baseline`; Layer 4–6 live smoke; private origins with Block Public Access; no internet-facing ingress; enforced CSP and HSTS | no WAF; CloudFront minimum TLS deferred until a custom certificate is configured |
-| A03 Software Supply Chain Failures | Python, npm and container dependencies | exact pins and frozen locks (`check_pin_drift`); `--no-deps` installs; lockfile per npm project; SDKs confined to the Runtime image | no SCA in CI (TM-19) |
+| A03 Software Supply Chain Failures | Python, npm and container dependencies | exact pins and frozen locks (`check_pin_drift`); `--no-deps` installs; lockfile per npm project; SDKs confined to the Runtime image; the CI `sca` job audits the Python lock and each npm project | npm findings below High pass; no container-image scan in CI (TM-19) |
 | A04 Cryptographic Failures | data at rest and in transit | KMS CMKs with rotation on tables, buckets, logs and parameters; TLS-only bucket policies; HTTPS at the viewer; KMS-encrypted caller-bound cursors | TM-20; viewer TLS minimum deferred |
 | A05 Injection | DynamoDB expressions, markdown rendering, shell in scripts | DynamoDB calls only through `src/crm/store/store.py` with expression attribute values; generated input validators with `maxLength`; markdown without raw HTML; `shellcheck` over every shell file | CRM strings accept control characters |
 | A06 Insecure Design | agent writes and delegation | proposals for high-risk writes; four exclusive delegation outcomes so a denial is never reported as data; measurement-only eval with no verdict | TM-06 |
@@ -168,7 +170,7 @@ account.
 | LLM07 Misinformation | fabricated CRM facts in answers | delegation outcomes are typed (`data`, `denied`, `tool_failure`, `no_match`), so a denial or failure is never turned into data; the UI shows the tool trace beside the answer | a model can still misstate data it was given |
 | LLM08 Hidden Context Exposure | system prompts, answer style, page-context framing and the tool schemas the models receive | nothing in the model's context is meant to be secret: the prompts are published in `config/agent_prompts/`, and the agents' tool registry and the Gateway MCP tool definitions are generated from the tracked toolspec, which MCP clients can also list; no credential, token or identity is placed in model context; authorization never depends on prompt text or tool descriptions | none: the rest of a turn's context is the user's own prompt, page context and scoped data |
 | LLM09 Vector and Embedding Weaknesses | not applicable | the system has no vector store, embedding index or semantic cache; search is a DynamoDB index query with text matching in process | none |
-| LLM10 Improper Output Handling | model output rendered in the SPA, passed to tools and returned to MCP clients | markdown without raw HTML, `https:` and relative links only, no image fetch; tool arguments validated by the handler; SSE frames generated from one schema | control characters in answers are not removed, so an MCP client that prints answers to a terminal must neutralise them |
+| LLM10 Improper Output Handling | model output rendered in the SPA, passed to tools and returned to MCP clients | markdown without raw HTML, `https:` and relative links only, no image fetch; tool arguments validated by the handler; SSE frames generated from one schema; control characters removed from answer, error and partial-work text (TM-22) | proposal summaries, tool inputs and tool outputs keep any control characters (TM-22) |
 
 ## OWASP Top 10 for Agentic Applications (2026)
 
@@ -182,7 +184,7 @@ account.
 | ASI06 Memory & Context Poisoning | durable chat history, the only agent memory that outlives a turn | history keeps each turn's prompt and final answer, never tool payloads; it is kept per session and owner and refused to any other user; at most 10 turns of at most 4,000 characters each, redacted; it expires 24 hours after its last write; no long-term, shared or vector memory; eval turns use no history | an answer that repeats injected CRM text is read again by later turns of the same session until the history expires (TM-06) |
 | ASI07 Insecure Inter-Agent Communication | supervisor-to-subagent delegation | subagents run in the supervisor's Runtime process and are called in-process, with no network hop, message bus, agent discovery or agent-to-agent protocol; a delegation passes one `intent` string and returns one typed outcome; the callers into the Runtime (relay, chat target, sweep) sign with SigV4 and are admitted by its resource policy | the intent is natural language, so injected text can still shape it (TM-06) |
 | ASI08 Cascading Failures | one bad output spreading through delegations, turns or sweeps | per-turn token, tool-call and time budgets end a runaway turn; a denial or failure is never turned into data; writes stay inside the caller's tenant and book; agents run only within a user's turn or an admin-started sweep, and never start another turn; sweep tasks run one at a time in disposable tenants | TM-14, TM-15 |
-| ASI09 Human-Agent Trust Exploitation | a rep approving a change because an answer persuaded them | high-risk changes need an explicit approve in the UI; the proposal card renders from the stored proposal, not from model text; the UI shows the tool trace beside the answer | a rep can still approve a stored proposal on the strength of a misleading answer; Low |
+| ASI09 Human-Agent Trust Exploitation | a rep approving a change because an answer persuaded them | high-risk changes need an explicit approve in the UI; the proposal card renders from the stored proposal, not from model text; the UI shows the tool trace beside the answer; a proposal pending for more than 7 days can no longer be approved | a rep can still approve a recent stored proposal on the strength of a misleading answer (TM-21); Low |
 | ASI10 Rogue Agents | an agent drifting from its intended scope | an agent keeps no state beyond its session's history, holds no credential and cannot change its own prompts, tools or model; it acts only inside a user's turn or a sweep; every write is audited under the verified rep | no alarm on unusual agent behaviour (TM-09) |
 
 ## Accepted risks and open items
@@ -194,16 +196,17 @@ listed under [Limitations](README.md#limitations).
 - CloudFront minimum TLS 1.2 needs a custom ACM certificate (see the security baseline's Transport
   row).
 - MFA stays optional by owner policy. Deployers handling real data should require it.
-- No SCA job in CI (TM-19).
-- CloudTrail has no alarms; audit rows do not record the entry channel (TM-09).
+- npm findings below High do not fail CI (`pip-audit` fails on any known vulnerability), and
+  container images are not scanned (TM-19).
+- CloudTrail has no alarms (TM-09).
 - One shared MCP service principal (TM-17).
 - Prompts and tool results reach Bedrock unredacted; acceptable only for synthetic data (TM-11).
 - Injected CRM text that an answer repeats stays in that session's history, and is read by its
   later turns, until the history expires (TM-06).
-- A rep can approve a stored proposal because a misleading answer persuaded them. The card shows
-  the stored change, so what is approved is what is stored.
-- Answers returned to MCP clients keep any control characters; a client that prints them to a
-  terminal must neutralise them.
+- A rep can approve a recent stored proposal because a misleading answer persuaded them. The card
+  shows the stored change, so what is approved is what is stored (TM-21).
+- Proposal summaries, tool inputs and tool outputs keep any control characters; a client that
+  prints them to a terminal must neutralise them (TM-22).
 
 ## External threat model review
 

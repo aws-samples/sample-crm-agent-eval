@@ -88,12 +88,40 @@ def test_the_typecheck_does_not_regenerate_while_compiling(steps: list[dict[str,
     assert not any(run.strip() == "npm run typecheck" for run in _runs(steps)), _runs(steps)
 
 
-def test_the_install_is_lockfile_only(steps: list[dict[str, Any]]) -> None:
-    """The job installs with `npm ci` and never with `npm install`."""
-    runs = _runs(steps)
+#: Flags that may follow `npm ci` without changing what it installs.
+_LOCKFILE_SAFE_NPM_CI_FLAGS = frozenset({"--no-audit", "--no-fund"})
 
-    assert any(run.strip() == "npm ci" for run in runs), runs
-    assert not any("npm install" in run for run in runs), runs
+
+def _is_lockfile_only_install(run: str) -> bool:
+    tokens = run.split()
+    return tokens[:2] == ["npm", "ci"] and set(tokens[2:]) <= _LOCKFILE_SAFE_NPM_CI_FLAGS
+
+
+def _lockfile_only_violation(runs: list[str]) -> str | None:
+    if not any(_is_lockfile_only_install(run) for run in runs):
+        return f"no step installs with a bare or allowlisted-flag `npm ci`: {runs}"
+    if any("npm install" in run for run in runs):
+        return f"a step installs with `npm install`: {runs}"
+    return None
+
+
+def test_the_install_is_lockfile_only(steps: list[dict[str, Any]]) -> None:
+    """The job installs with `npm ci`, taking only allowlisted flags, and never `npm install`."""
+    assert _lockfile_only_violation(_runs(steps)) is None
+
+
+@pytest.mark.parametrize(
+    "mutant",
+    ["npm install", "npm ci --no-audit --legacy-peer-deps"],
+    ids=["npm-install", "unknown-flag"],
+)
+def test_the_lockfile_only_check_rejects_a_mutant(steps: list[dict[str, Any]], mutant: str) -> None:
+    """Replacing the install with `npm install` or an unlisted flag fails the check."""
+    runs = _runs(steps)
+    mutated = [mutant if _is_lockfile_only_install(run) else run for run in runs]
+
+    assert mutated != runs
+    assert _lockfile_only_violation(mutated) is not None
 
 
 def test_the_node_version_comes_from_the_repositorys_single_pin(

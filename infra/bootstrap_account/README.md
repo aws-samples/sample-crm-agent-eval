@@ -85,7 +85,7 @@ terraform init -backend=false -input=false -plugin-dir=../.terraform/providers
 terraform validate
 ```
 
-`.terraform.lock.hcl` carries the same `hashicorp/aws` 6.72.0 entry as `infra/.terraform.lock.hcl`.
+`.terraform.lock.hcl` carries the same `hashicorp/aws` 6.73.0 entry as `infra/.terraform.lock.hcl`.
 
 ## Common failures
 

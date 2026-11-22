@@ -13,6 +13,7 @@ from crm.errors import (
     ContactDeparted,
     CrmError,
     NotFound,
+    ProposalStale,
     ProviderUnavailable,
     ScopeDenied,
     ServiceBusy,
@@ -29,11 +30,12 @@ EXPECTED_STATUSES = {
     ValidationFailed: 400,
     Conflict: 409,
     ContactDeparted: 409,
+    ProposalStale: 409,
 }
 
 
 def test_taxonomy_is_exactly_the_documented_set() -> None:
-    """The taxonomy is exactly the six members named in `EXPECTED_STATUSES`, with no duplicates."""
+    """The taxonomy is exactly the seven members named in `EXPECTED_STATUSES`, with no duplicates."""
     assert set(TAXONOMY) == set(EXPECTED_STATUSES)
     assert len(TAXONOMY) == len(EXPECTED_STATUSES), (
         "a member exists twice or EXPECTED_STATUSES lost one"
@@ -210,6 +212,7 @@ EXPECTED_NEXT_STEPS = {
     ValidationFailed: "fix_arguments",
     Conflict: "refresh_then_ask_user",
     ContactDeparted: "tell_user",
+    ProposalStale: "tell_user",
     ServiceBusy: "retry_later",
     TableNotFound: "stop",
     TurnTimeout: "stop",

@@ -432,6 +432,7 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         "total_excluded",
         "dataset_seed",
         "record_shape_version",
+        "output_token_cap",
         # Token usage.
         "input_tokens",
         "output_tokens",
@@ -503,6 +504,8 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
         "budget_exhausted_task_count",
         "truncated_tool_call_count",
         "truncated_task_count",
+        "output_truncated_call_count",
+        "output_truncated_task_count",
         "none",
         *(
             f"summary_{tier}_{suffix}"
@@ -531,6 +534,8 @@ _NON_CURRENCY_NUMERIC_FIELDS: frozenset[str] = frozenset(
                 "budget_exhausted_task_count",
                 "truncated_tool_call_count",
                 "truncated_task_count",
+                "output_truncated_call_count",
+                "output_truncated_task_count",
             )
         ),
         *(

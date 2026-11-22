@@ -10,7 +10,7 @@ terraform {
     aws = {
       source = "hashicorp/aws"
       # This version carries `aws_cloudfront_vpc_origin` and `vpc_origin_config`.
-      version = "6.72.0"
+      version = "6.73.0"
     }
   }
 }

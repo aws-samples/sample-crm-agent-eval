@@ -153,7 +153,12 @@ class TestVocabulary:
         assert record.status == read
         assert record.tasks_total == 0
         if stored == "failed":
-            assert record.failure_summary == "boom"
+            assert record.failure_summary is None
+            assert (record.error_code, record.error_detail) == ("unclassified", None)
+            payload = record.to_payload()
+            assert payload["error_code"] == "unclassified"
+            assert "error" not in payload and "error_detail" not in payload
+            assert "boom" not in json.dumps(payload)
 
     @pytest.mark.parametrize(
         ("field", "value"),
@@ -401,3 +406,73 @@ class TestEarlierFormatLogOncePerRun:
             "e2",
             "e2",
         ]
+
+
+_ARN = "arn:aws:states:us-east-1:123456789012:execution:eval_sweep:r1"
+
+
+class _Sfn:
+    """A Step Functions client answering ``describe_execution`` with one fixed status."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+
+    def describe_execution(self, *, executionArn: str) -> dict[str, Any]:  # noqa: N803
+        return {"executionArn": executionArn, "status": self.status}
+
+
+def _started(store: Store) -> None:
+    assert runs.acquire_lock(store, run_id="r1", now=NOW)
+    _create(store)
+    runs.set_execution_arn(store, run_id="r1", execution_arn=_ARN)
+
+
+class TestErrorCodes:
+    def test_mark_failed_stores_and_returns_the_code_and_detail(self, store: Store) -> None:
+        _create(store)
+        runs.mark_failed(
+            store,
+            run_id="r1",
+            failure_summary="step failed: turn_timeout",
+            error_code="turn_timeout",
+            error_detail="TurnTimeout",
+            now=NOW,
+        )
+        row = store.get_item("eval_runs", {"run_id": "job#r1"}, consistent=True)
+        assert row is not None
+        assert (row["error_code"], row["error_detail"]) == ("turn_timeout", "TurnTimeout")
+        payload = runs.require_run(store, "r1").to_payload()
+        assert payload["error_code"] == "turn_timeout"
+        assert payload["error_detail"] == "TurnTimeout"
+        assert payload["error"] == "step failed: turn_timeout"
+
+    def test_mark_failed_without_a_code_records_unclassified_and_no_detail(
+        self, store: Store
+    ) -> None:
+        _create(store)
+        runs.mark_failed(store, run_id="r1", failure_summary="x", now=NOW)
+        row = store.get_item("eval_runs", {"run_id": "job#r1"}, consistent=True)
+        assert row is not None and row["error_code"] == runs.UNCLASSIFIED_ERROR_CODE
+        assert "error_detail" not in row
+        payload = runs.require_run(store, "r1").to_payload()
+        assert payload["error_code"] == "unclassified" and "error_detail" not in payload
+
+    def test_a_run_that_never_failed_carries_no_error_code(self, store: Store) -> None:
+        _create(store)
+        payload = runs.require_run(store, "r1").to_payload()
+        assert "error_code" not in payload and "error_detail" not in payload
+
+    def test_a_reconciled_run_carries_the_unfinalized_code(self, store: Store) -> None:
+        _started(store)
+        record = runs.reconcile(store, _Sfn("FAILED"), runs.require_run(store, "r1"), now=NOW)
+        assert record.error_code == runs.EXECUTION_UNFINALIZED_ERROR_CODE == "execution_unfinalized"
+
+    def test_an_admin_released_run_carries_the_lock_released_code(
+        self, store: Store, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _started(store)
+        monkeypatch.setattr(runs, "reconcile_lock", lambda *_a, **_k: runs.read_lock(store))
+        admin = Identity(rep_id="rep-admin", full_visibility=True)
+        runs.unlock(store, _Sfn("ABORTED"), identity=admin, now=NOW)
+        record = runs.require_run(store, "r1")
+        assert record.error_code == runs.LOCK_RELEASED_ERROR_CODE == "lock_released"

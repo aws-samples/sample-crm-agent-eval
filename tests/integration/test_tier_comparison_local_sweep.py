@@ -65,6 +65,8 @@ _COMMON_ROWS = (
     "Budget-exhausted tasks",
     "Truncated tool calls",
     "Truncated tasks",
+    "Output-truncated model calls",
+    "Output-truncated tasks",
 )
 
 

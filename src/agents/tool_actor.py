@@ -20,8 +20,13 @@ from typing import Any
 from agents.budget import TurnBudget
 from agents.prompt_estimate import refuse_if_over_limit
 from agents.registry import RegisteredTool
-from agents.tier_attribution import CacheCounts, InvocationAttribution, TokenCounts
-from providers.base import ModelProvider, ResolvedInvocation
+from agents.tier_attribution import (
+    CacheCounts,
+    InvocationAttribution,
+    TokenCounts,
+    provisional_attribution,
+)
+from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
 from providers.capabilities import Tier
 
 #: The tier every tool-tier invocation runs on.
@@ -94,7 +99,8 @@ async def formulate_and_invoke(
             dispatch latency is left ``None``.
         request_prompt_limit: The tool tier's per-request estimated prompt-token limit; ``None``
             checks nothing.
-        budget: The turn's budget, which records a refused request.
+        budget: The turn's budget, which records a refused request and a model call that ended
+            without final usage.
 
     Returns:
         A :class:`ToolActorResult`. ``output`` is the tool's verbatim response (including the
@@ -126,13 +132,20 @@ async def formulate_and_invoke(
     tool_input: dict[str, Any] | None = None
     input_tokens = output_tokens = cache_read = cache_write = 0
     saw_error = False
+    saw_final_usage = False
+    output_truncated = False
+    provisional: ProviderEvent | None = None
     # Model-call latency comes from the provider's usage event, which excludes retries.
     model_latency_ms: float | None = None
 
     async for event in provider.stream(resolved, messages, provider_tools):
         if event.type == "tool_call" and tool_input is None:
             tool_input = dict(event.tool_input or {})
+        elif event.type == "usage" and event.provisional:
+            provisional = event
         elif event.type == "usage":
+            saw_final_usage = True
+            output_truncated = output_truncated or event.output_truncated
             input_tokens += event.input_tokens or 0
             output_tokens += event.output_tokens or 0
             cache_read += event.cache_read_tokens or 0
@@ -142,14 +155,26 @@ async def formulate_and_invoke(
         elif event.type == "error":
             saw_error = True
 
-    invocation = InvocationAttribution(
-        tier=TOOL_TIER,
-        role=role,
-        model_id=resolved.model.model_id,
-        tokens=TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens),
-        cache=CacheCounts(read_tokens=cache_read, write_tokens=cache_write),
-        latency_ms=model_latency_ms,
-    )
+    if provisional is not None and not saw_final_usage:
+        invocation = provisional_attribution(
+            provisional, tier=TOOL_TIER, role=role, model_id=resolved.model.model_id
+        )
+        if budget is not None:
+            budget.note_call_without_usage(
+                tier=TOOL_TIER,
+                role=role,
+                cause="provider_error" if saw_error else "partial_usage",
+            )
+    else:
+        invocation = InvocationAttribution(
+            tier=TOOL_TIER,
+            role=role,
+            model_id=resolved.model.model_id,
+            tokens=TokenCounts(input_tokens=input_tokens, output_tokens=output_tokens),
+            cache=CacheCounts(read_tokens=cache_read, write_tokens=cache_write),
+            latency_ms=model_latency_ms,
+            output_truncated=output_truncated,
+        )
 
     output, dispatch_latency_ms = _resolve_output(
         tool, tool_input, saw_error=saw_error, dispatch=dispatch, clock=clock

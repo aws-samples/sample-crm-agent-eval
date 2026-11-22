@@ -21,7 +21,7 @@ PRICING_PATH = REPO_ROOT / "config" / "pricing.yaml"
 
 HAIKU = "anthropic.claude-haiku-5-5"
 SONNET = "anthropic.claude-sonnet-5-5"
-SOL = "openai.gpt-6.1-sol"
+SOL = "openai.gpt-6.2-sol"
 
 #: (model, family, threshold, standard rates, long-context rates); rates are in/out/cw/cr.
 TIERED: list[tuple[str, Family, int, tuple[float, ...], tuple[float, ...]]] = [
@@ -36,11 +36,11 @@ TIERED: list[tuple[str, Family, int, tuple[float, ...], tuple[float, ...]]] = [
     ),
     ("openai.gpt-6-luna", "openai", 272_000, (0.10, 0.50, 0.125, 0.01), (0.20, 0.75, 0.25, 0.02)),
     (
-        "openai.gpt-6-astra",
+        "openai.gpt-6.2-astra",
         "openai",
         272_000,
-        (10.00, 50.00, 12.50, 1.00),
-        (20.00, 75.00, 25.00, 2.00),
+        (8.00, 40.00, 10.00, 0.40),
+        (16.00, 60.00, 20.00, 0.80),
     ),
 ]
 

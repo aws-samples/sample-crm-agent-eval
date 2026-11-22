@@ -27,7 +27,6 @@ from eval.harness import (
     build_arg_parser,
     main,
     run_sweep,
-    run_sweep_for_ui,
 )
 from eval.tenancy import TenantTeardownError
 
@@ -91,7 +90,7 @@ def test_cli_live_flag_requires_explicit_opt_in() -> None:
 
 
 def test_main_builds_its_own_explicit_endpoint_store_never_a_bare_one(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """``main()`` constructs :class:`crm.store.store.Store` with a non-``None`` client targeting the
     CLI's ``--endpoint-url``, never a bare ``Store(table_prefix=...)``.
@@ -112,24 +111,12 @@ def test_main_builds_its_own_explicit_endpoint_store_never_a_bare_one(
     monkeypatch.setattr(harness, "create_all_tables", _record_provisioning)
     monkeypatch.setattr(harness, "Store", _RaisingStore)
 
-    with pytest.raises(RuntimeError, match="stop before any DynamoDB call"):
-        main(["--output-dir", str(tmp_path)])
+    assert main(["--output-dir", str(tmp_path)]) == 1
+    assert "stop before any DynamoDB call" in capsys.readouterr().err
 
     assert captured["client"] is not None
     assert captured["table_prefix"] == ""
     assert captured["provisioned_prefix"] == ""
-
-
-def test_run_sweep_for_ui_defaults_to_stub(store: Store) -> None:
-    result = run_sweep_for_ui(store=store)
-    assert result.mode == "stub"
-
-
-def test_run_sweep_for_ui_live_true_still_refuses_an_offline_substrate(store: Store) -> None:
-    """The UI's ``live=True`` toggle reaches the same offline-substrate refusal as the CLI's
-    ``--live``."""
-    with pytest.raises(harness.LiveSubstratePairingError, match="requires the live-AWS substrate"):
-        run_sweep_for_ui(store=store, live=True)
 
 
 def test_harness_module_imports_no_model_vendor_sdk_for_invocation() -> None:
@@ -215,7 +202,7 @@ def test_two_stub_sweeps_are_byte_identical_in_their_latency_fields(store: Store
     assert ja == jb
 
 
-def test_run_sweep_and_run_sweep_for_ui_produce_identical_artifacts_for_identical_input(
+def test_two_sweeps_with_one_run_id_produce_identical_scores_for_identical_input(
     store: Store,
 ) -> None:
     """Two :func:`run_sweep` calls with the same arguments and ``run_id`` produce identical
@@ -271,12 +258,19 @@ def test_default_sweep_runs_every_golden_task_once_per_arm(store: Store) -> None
     assert total_task_runs == 2 * task_count
 
 
-def test_a_wider_sweep_requires_an_explicit_arm_specs_argument(store: Store) -> None:
-    """Passing additional arms is the only way to widen the sweep; the module-level default is
-    untouched by doing so."""
+def test_a_wider_sweep_with_a_second_arm_on_one_model_is_refused_before_seeding(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A third arm resolving to an arm-tier model another arm already uses is refused up front;
+    the module-level default is untouched."""
+    seeded: list[str] = []
+    monkeypatch.setattr(harness, "seed_unit_tenants", lambda *_a, **_k: seeded.append("seeded"))
     wide_specs = (*DEFAULT_ARM_SPECS, ArmSpec(family="anthropic", effort="high"))
-    result = run_sweep(store=store, arm_specs=wide_specs)
-    assert len(result.arm_runs) == 3
+
+    with pytest.raises(harness.DuplicateArmModelError, match="arms 0 and 2 both resolve"):
+        run_sweep(store=store, arm_specs=wide_specs)
+
+    assert seeded == []
     assert (
         ArmSpec(family="anthropic", effort="medium"),
         ArmSpec(family="openai", effort="medium"),
@@ -348,6 +342,8 @@ def test_every_arm_provenance_carries_the_fr_9_12_fields_and_no_temperature(stor
         "answer_style_sha256",  # the answer-style prompt hash
         "prompt_bundle_sha256",  # the whole prompt bundle's hash
         "prompt_caching",  # the arm family's prompt-caching method
+        "output_token_cap",
+        "dirty_tree",
     }
     assert set(provenance_fields) == expected_keys
     assert provenance_fields["mode"] == "stub"

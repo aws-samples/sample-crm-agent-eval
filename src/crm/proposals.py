@@ -9,7 +9,8 @@ rejection both condition the status flip on ``status == pending``, so exactly on
 ``after_payload`` is checked by :func:`crm.domain.allowlists.validate_proposal_payload` at submit
 and again at approve. :func:`rebase_proposal` re-captures a pending proposal's ``before_snapshot``
 from current state. Approve and rebase both refuse an opportunity ``stage`` change that is not a
-permitted transition from the record's current stage. Proposal ``Update`` expressions set ``tenant_status`` alongside ``status``;
+permitted transition from the record's current stage. Approve refuses a proposal pending longer
+than :data:`PROPOSAL_MAX_PENDING_AGE` with :class:`crm.errors.ProposalStale`; reject does not. Proposal ``Update`` expressions set ``tenant_status`` alongside ``status``;
 :meth:`crm.store.store.Store.transact_write` applies the table prefix.
 """
 
@@ -20,11 +21,12 @@ import logging
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from crm.domain.allowlists import validate_proposal_payload
 from crm.domain.stages import PERMITTED_TRANSITION_KINDS, classify_requested_transition
-from crm.errors import Conflict, CrmError, NotFound, ValidationFailed
+from crm.errors import Conflict, CrmError, NotFound, ProposalStale, ValidationFailed
 from crm.store.keys import derive, derived_attributes, tenant_prefixed
 from crm.store.store import Store
 from crm.toolspec.definitions import TABLES
@@ -34,6 +36,9 @@ logger = logging.getLogger(__name__)
 _PENDING = "pending"
 _APPROVED = "approved"
 _REJECTED = "rejected"
+
+#: How long a proposal may wait in ``pending`` and still be approved, measured from ``created_at``.
+PROPOSAL_MAX_PENDING_AGE: Final[timedelta] = timedelta(days=7)
 
 #: Operations a proposal may carry out on approval (matches ``submit_proposal``'s tool schema).
 _OPERATIONS = frozenset({"update", "delete"})
@@ -465,6 +470,36 @@ def _replayed_approval(
     return proposal if _approved_by(proposal, transaction_key) else None
 
 
+def _parse_timestamp(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp as aware UTC; ``None`` when absent or unreadable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _require_not_stale(proposal: Mapping[str, object], *, proposal_id: str, now: str) -> None:
+    """Raise :class:`ProposalStale` unless ``proposal`` was created within the approval window.
+
+    A ``created_at`` that is absent or unreadable counts as stale: its age cannot be established.
+    """
+    current = _parse_timestamp(now)
+    if current is None:
+        raise ValueError(f"now is not an ISO-8601 timestamp: {now!r}")
+    created_raw = proposal.get("created_at")
+    created = _parse_timestamp(created_raw)
+    if created is None or current - created > PROPOSAL_MAX_PENDING_AGE:
+        raise ProposalStale(
+            detail=(
+                f"proposal_id={_bounded(proposal_id)} created_at={_bounded(created_raw)} "
+                f"now={_bounded(now)}"
+            )
+        )
+
+
 def approve_proposal(
     store: Store,
     *,
@@ -503,6 +538,9 @@ def approve_proposal(
 
     Raises:
         NotFound: The proposal does not exist under ``tenant``.
+        ProposalStale: The proposal is ``pending`` and its ``created_at`` is more than
+            :data:`PROPOSAL_MAX_PENDING_AGE` before ``now``, absent, or unreadable.
+        ValueError: ``now`` is not an ISO-8601 timestamp.
         Conflict: ``reason="already_decided"`` when the proposal is not ``pending``;
             ``reason="target_missing"`` when the target no longer exists under ``tenant``;
             ``reason="fields_changed"`` with ``conflicting_fields`` when a field the proposal
@@ -554,6 +592,7 @@ def approve_proposal(
     if changed:
         raise _fields_changed_conflict(changed, proposal_id=proposal_id)
     _require_permitted_stage_move(target_table, current, touched)
+    _require_not_stale(proposal, proposal_id=proposal_id, now=now)
 
     after_snapshot = _apply_operation(target_table, current, operation, touched, now=now)
     if operation != "delete" and after_snapshot is None:

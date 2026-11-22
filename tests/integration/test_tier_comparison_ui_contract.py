@@ -34,7 +34,7 @@ FRONTEND_FIXTURE = (
 _OPUS = "anthropic.claude-opus-5-5"
 _SONNET = "anthropic.claude-sonnet-5-5"
 _HAIKU = "anthropic.claude-haiku-5-5"
-_SOL = "openai.gpt-6-1-sol"
+_SOL = "openai.gpt-6.2-sol"
 _LUNA = "openai.gpt-6-1-luna"
 _TIERS = ("supervisor", "subagent", "tool")
 
@@ -89,6 +89,8 @@ def _stub_arm(
             budget_exhausted_task_count=1 if tier == "supervisor" else 0,
             truncated_tool_call_count=truncated,
             truncated_task_count=truncated,
+            output_truncated_call_count=index + 1,
+            output_truncated_task_count=1,
         )
     tasks: tuple[dict[str, object], ...] = tuple(
         {
@@ -116,6 +118,8 @@ def _stub_arm(
             price_table_version="v1",
             answer_style_sha256="0" * 64,
             prompt_caching="explicit cache points",
+            output_token_cap=16_384,
+            dirty_tree=False,
         ),
         model_metrics_fields={
             "cost_withheld_provisional": True,

@@ -177,6 +177,11 @@ VIOLATION_TARGETS: dict[str, str] = {
 #: these DO read a plan, so a fixture could in principle violate them — the reason there is none is
 #: recorded per entry, and the proof is named so it can be found. Same both-directions check.
 IN_MEMORY_MUTATION_CONTROLS: dict[str, str] = {
+    "waf_deferral_current": "A violation fixture would be compliant.json plus one planted web ACL. "
+    "`test_a_planned_web_acl_fails_the_waf_control` and "
+    "`test_a_distribution_web_acl_id_fails_the_waf_control` instead plant an aws_wafv2_web_acl, an "
+    "association, and a known or unknown CloudFront web_acl_id in memory and assert a FAILURE for "
+    "each; the committed fixture carries none, so it reports the control deferred.",
     "cognito_admin_only_signup": "A violation fixture would be a near-copy of compliant.json with one "
     "attribute changed. `TestCognitoAdminOnlySignup` instead mutates the loaded document in memory and "
     "asserts a FAILURE for a false value, an absent block and an unknown block against a current plan, "
@@ -3903,7 +3908,7 @@ data "aws_iam_policy_document" "agentcore_runtime_permissions" {
     resources = concat(
       [for profile in [
         "global.anthropic.claude-opus-5-5",
-        "global.openai.gpt-6-astra",
+        "global.openai.gpt-6.2-astra",
       ] : "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:inference-profile/${profile}"],
       ["arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:project/default"],
     )
@@ -3914,8 +3919,8 @@ data "aws_iam_policy_document" "agentcore_runtime_permissions" {
     effect = "Allow"
     actions = ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"]
     resources = concat(
-      [for model in ["anthropic.claude-opus-5-5", "openai.gpt-6-astra"] : "arn:aws:bedrock:::foundation-model/${model}"],
-      [for model in ["anthropic.claude-opus-5-5", "openai.gpt-6-astra"] : "arn:aws:bedrock:*::foundation-model/${model}"],
+      [for model in ["anthropic.claude-opus-5-5", "openai.gpt-6.2-astra"] : "arn:aws:bedrock:::foundation-model/${model}"],
+      [for model in ["anthropic.claude-opus-5-5", "openai.gpt-6.2-astra"] : "arn:aws:bedrock:*::foundation-model/${model}"],
     )
     condition {
       test     = "StringEquals"
@@ -4153,11 +4158,15 @@ class TestExpectedResourceCounts:
         """A resource type nothing accounts for is how a new resource enters the tree unasserted."""
         document = _compliant_document()
         document["resource_changes"].append(
-            {"type": "aws_wafv2_web_acl", "address": "aws_wafv2_web_acl.planted", "change": {}}
+            {
+                "type": "aws_shield_protection",
+                "address": "aws_shield_protection.planted",
+                "change": {},
+            }
         )
         failed = _failed(_counts_findings(document))
         assert any("(scope) every planned resource type" in row for row in failed), failed
-        assert "aws_wafv2_web_acl" in str(failed)
+        assert "aws_shield_protection" in str(failed)
 
     def test_an_absence_asserted_type_is_accepted_without_a_count(self) -> None:
         """An absence-asserted type (`aws_iam_access_key`) is accepted without an expected count."""
@@ -7959,3 +7968,95 @@ class TestRuntimeHistoryGrant:
             if f.resource == "(coverage) one grant document per dynamodb role policy"
         ]
         assert [f.status for f in coverage] == ["fail"]
+
+
+# ---------------------------------------------------------------------------
+# WAF: a DEFER row owned by the self-check and a plan control that never passes.
+# ---------------------------------------------------------------------------
+
+
+def _waf_findings(document: dict[str, Any]) -> list[Any]:
+    return gate.check_waf_deferral_current(gate.Plan(resource_changes=document["resource_changes"]))
+
+
+def test_the_compliant_plan_reports_the_waf_control_deferred_never_pass() -> None:
+    findings = [
+        f for f in gate.run_gate(load_plan("compliant")) if f.control == "waf_deferral_current"
+    ]
+    assert [f.status for f in findings] == ["deferred"]
+    assert "DEFER (unmet)" in findings[0].detail
+
+
+@pytest.mark.parametrize("resource_type", ["aws_wafv2_web_acl", "aws_wafv2_web_acl_association"])
+def test_a_planned_web_acl_fails_the_waf_control(resource_type: str) -> None:
+    document = _compliant_document()
+    address = f"{resource_type}.planted"
+    document["resource_changes"].append({"type": resource_type, "address": address, "change": {}})
+    findings = _waf_findings(document)
+    assert [(f.resource, f.status) for f in findings] == [(address, "fail")]
+
+
+@pytest.mark.parametrize("field", ["after", "after_unknown"])
+def test_a_distribution_web_acl_id_fails_the_waf_control(field: str) -> None:
+    document = _compliant_document()
+    (distribution,) = [
+        r for r in document["resource_changes"] if r["type"] == "aws_cloudfront_distribution"
+    ]
+    change = distribution["change"]
+    change[field] = {
+        **(change.get(field) or {}),
+        "web_acl_id": "arn:aws:wafv2:planted" if field == "after" else True,
+    }
+    assert [f.status for f in _waf_findings(document)] == ["fail"]
+
+
+def test_the_waf_row_maps_to_the_waf_control_in_the_self_check() -> None:
+    rows = {f.resource: f for f in gate.run_self_check() if f.control == "self_check"}
+    (waf_row,) = [f for name, f in rows.items() if name.startswith("WAF | ")]
+    assert waf_row.status == "pass"
+    assert "has_control=True" in waf_row.detail
+    assert rows[f"(standing DEFER row) {gate.WAF_CONTROL_CELL}"].status == "pass"
+
+
+def test_unregistering_the_waf_control_reds_the_self_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        gate, "CONTROLS", [c for c in gate.CONTROLS if c.control_id != "waf_deferral_current"]
+    )
+    failed = [f.resource for f in gate.run_self_check() if f.status == "fail"]
+    assert any(name.startswith("WAF | ") for name in failed), failed
+
+
+def _baseline_with(tmp_path: Path, old: str, new: str) -> Path:
+    text = gate.SECURITY_BASELINE_PATH.read_text(encoding="utf-8")
+    (line,) = [ln for ln in text.splitlines() if ln.startswith("| WAF | ")]
+    assert text.count(line) == 1
+    path = tmp_path / "security-baseline.md"
+    mutated = text.replace(line, line.replace(old, new)) if old else text.replace(line + "\n", "")
+    path.write_text(mutated, encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("", ""),  # the row deleted
+        ("**DEFER (unmet)**", "review-PASS"),  # the deferral relabelled as met
+        ("| WAF |", "| Web ACL |"),  # the row renamed out of the self-check's reach
+    ],
+    ids=["deleted", "relabelled", "renamed"],
+)
+def test_mutating_the_waf_defer_row_reds_the_self_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str
+) -> None:
+    monkeypatch.setattr(gate, "SECURITY_BASELINE_PATH", _baseline_with(tmp_path, old, new))
+    failed = {f.resource for f in gate.run_self_check() if f.status == "fail"}
+    assert f"(standing DEFER row) {gate.WAF_CONTROL_CELL}" in failed, failed
+
+
+def test_an_unmutated_copy_of_the_baseline_passes_the_self_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        gate, "SECURITY_BASELINE_PATH", _baseline_with(tmp_path, "| WAF |", "| WAF |")
+    )
+    assert [f.resource for f in gate.run_self_check() if f.status == "fail"] == []

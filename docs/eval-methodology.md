@@ -126,11 +126,41 @@ ACTION_LAMBDA_PREFIX=crm-agent-eval \
   .venv/bin/python3 -m src.eval.harness --live --assert-artifacts --max-cost-usd <usd>
 ```
 
-**Cost cap.** `--max-cost-usd` is required with `--live`. Before each (arm, repeat) unit starts, the
-harness compares the priced spend of the completed units plus the most expensive completed unit with
-the cap. When that sum exceeds the cap, no further unit starts, every tenant is torn down, no matrix
-is written, and the exit code is 4. Priced cost is computed from recorded tokens against
+**Cost cap.** `--max-cost-usd` is required with `--live`. Before each task starts, the harness
+compares the priced spend of the completed tasks plus the most expensive completed task with the
+cap; the sweep's first task always runs. When that sum exceeds the cap, no further task starts,
+every tenant is still torn down, the completed results are written as partial results (below), no
+matrix is written, and the exit code is 4. Priced cost is computed from recorded tokens against
 `config/pricing.yaml`, so it estimates the bill; the Bedrock bill is the authority.
+
+**Partial results.** Each finished (arm, repeat) unit's task snapshots are written under
+`<output-dir>/partial/units/<run_id>/` as the sweep runs, and removed when it completes. A sweep that
+ends early, at the cost cap, on an unrecoverable error or on a signal, tears its tenants down,
+leaves those snapshots and writes `<output-dir>/partial/partial-run.json`: the run id, the `reason`
+(`cost_cap`, `signal:<name>` or `error:<type>`), the teardown outcome, the completed units, the
+in-flight unit's completed task ids, and the failed tasks. A sweep that ends while its tasks are
+running writes no `matrix.md`. A failure after the matrix was rendered (writing the CSV, the raw
+archive or the inventory) can leave `matrix.md` beside `partial-run.json`; the manifest's presence
+marks the sweep as unfinished either way.
+
+**Exit codes.** `--help` prints the table from `EXIT_CODES` in `src/eval/harness.py`:
+
+| Code | Meaning |
+|---|---|
+| 0 | the sweep completed and every requested check passed |
+| 1 | teardown failed, `--assert-artifacts` or the live `demo`-delta check failed, a stub sweep targeted `results/`, or an error ended the sweep before a partial manifest was written |
+| 2 | unusable invocation (flags, substrate pairing, cost cap, run id format) |
+| 4 | the cost cap stopped the sweep; partial results written, no matrix |
+| 5 | `--run-id` names a run already recorded in the catalog; nothing ran |
+| 6 | an unrecoverable error ended the sweep; partial results written |
+| 129, 130, 143 | SIGHUP, SIGINT or SIGTERM; tenants torn down, partial results written |
+
+An uncaught error prints one classified line rather than a traceback.
+
+The codes 4, 6, 129, 130 and 143 report how the sweep ended, not whether its teardown succeeded. If
+the teardown itself fails on one of those paths, the code does not change to 1: check the manifest,
+whose `teardown` then reads `failed`, and the run's catalog row, which stays `running` and is what
+`scripts/reap_eval_tenants.py` finds and reaps.
 
 **Account precondition.** `--live` needs the account's Bedrock data-retention mode to permit the
 OpenAI models; at `mode: none` every GPT-6 invocation is rejected. Check it read-only with
@@ -147,6 +177,12 @@ surface's `service_unavailable`) count as `throttle`; transient server faults (B
 surface's `server_error`) count as `retry`. A failure outside the closed exclusion taxonomy (cold
 start, retry, throttle) raises `eval.live.LiveInvocationError` and aborts the sweep, so no artifact
 is published with an uncategorised gap.
+
+A transport failure after a model stream has started (a read error, read timeout, protocol error or
+connect error reported mid-stream) is never retried, because the call may already have been billed
+and partly acted on. It raises `eval.live.MidStreamTransportError`, and the task is recorded as
+failed with error code `mid_stream_transport`: it stays in its denominators, and the sweep goes on
+with the next task.
 
 **Runtime coverage.** A CLI `--live` sweep records `runtime_identifier: live-aws-lambda-dispatch`:
 live models, live DynamoDB and real Lambda dispatch are exercised; the deployed AgentCore Runtime's
@@ -185,6 +221,14 @@ under the ceiling is passed unchanged. The model receives the bounded copy, and 
 attribution records the same flag, so the truncation rows of the tier comparison count what the
 model was actually given. A delegation one of whose leaves was bounded reports itself truncated.
 
+List tools cut their own pages first. `list_activities`, `list_audit_records`, `list_proposals`
+and the search tools keep the longest run of records whose list fits
+`HANDLER_PAGE_BYTE_BUDGET` (28,672 bytes, measured the same way) in `src/crm/paging.py`, mark the
+result `truncated`, and mint `next_cursor` from the last record kept. Following the cursor therefore
+reaches every record exactly once, and a cut page is still counted as a truncated tool call. The
+32,768-byte bound stays as the backstop for every other result, such as `get_opportunity`'s nested
+lists, where records it trims cannot be reached by paging.
+
 The dataset makes the bound reachable. Planted defect PD-08 adds 55 activities to `opp-0000`, so even
 that opportunity's 50 smallest activities together exceed the ceiling. `gt-05`
 asks for every activity on `opp-0000` and so exercises truncation: its listing reaches the model
@@ -201,6 +245,26 @@ leaves its tokens uncounted, so that turn's usage and cost are a **lower bound**
 its usage arrived is counted as metered, and does not make the usage a lower bound. The observed turn carries
 `usage_lower_bound: true`, and each affected arm lists those task runs in
 `usage_lower_bound_task_ids`, with a note under its figures in `matrix.md`.
+An Anthropic call reports its input tokens when its message starts, before any output. When such a
+call is cut off before its final usage, those input tokens are recorded as its usage, still marked
+as a lower bound, so the cost guard and the figures see them. OpenAI reports no usage before a
+response completes, so a cut-off OpenAI call contributes no tokens at all; the lower bound is looser
+for OpenAI than for Anthropic.
+
+### The output-token cap
+
+Every model call, at every tier and in both families, is sent the same output-token cap:
+`TURN_OUTPUT_TOKEN_CAP` = 16,384 in `src/providers/output_limits.py`, as Anthropic `max_tokens` and
+OpenAI `max_output_tokens`. Reasoning tokens count against it in both families. One cap is used so
+that neither family's answers are cut off at a point the other's are not; a unit test keeps it at or
+below every configured model's `max_output_tokens`. A model in `config/model_capabilities.yaml`
+that declares no output limit cannot be checked against it.
+
+A call that stops at the cap (Anthropic `stop_reason: max_tokens`, OpenAI `response.incomplete`
+with reason `max_output_tokens`) is recorded as output-truncated, with its real usage. A tool call
+whose arguments were cut off is dropped, never dispatched, and the round ends as a final answer.
+The turn is then scored like any other, and the cut-off is counted in the Output-truncated rows of
+the tier comparison. An OpenAI response incomplete for any other reason is an error, not an answer.
 
 ### Per-request prompt limits
 
@@ -259,6 +323,12 @@ edit to a prompt file, the answer style, a tool description or a caching mechani
 digest, so sweeps from before and after such an edit are different instruments and are not
 comparable figure for figure. That includes every sweep recorded before the digest existed.
 
+**Code state.** Every arm's provenance also records `git_revision`, `output_token_cap` (the
+per-call output cap its model calls were sent) and `dirty_tree`: whether `git status` showed changes
+to tracked files when the sweep started. `dirty_tree` is `null` exactly when `git_revision` is
+`unknown`, as in a deployed sweep, which runs with no checkout. A dirty tree means the revision does
+not fully identify the code that ran.
+
 ## Tier comparison summary
 
 `matrix.md` opens with a per-tier summary of the sweep's arms. It comes directly after the title,
@@ -298,13 +368,15 @@ Every table has these rows, in this order:
 | Cost per applicable task | The tier's total cost divided by the number of task runs applicable at the tier (the denominator of the task completion rate); `—` when no task run is applicable. At 100% completion it equals Cost per completed task. |
 | Self-corrected retries | The tier's tool calls whose `tool_failure` result was self-corrected (see the retry rule below). `not applicable` at ToolCall, which makes one call per invocation. |
 
-Every table then ends with three more rows:
+Every table then ends with five more rows:
 
 | Row | Definition, per arm, at the tier |
 |---|---|
 | Budget-exhausted tasks | The arm's task runs whose turn ran out of budget at this tier. |
 | Truncated tool calls | The tool calls issued at this tier whose result reported truncation. `not applicable` at Subagent. |
 | Truncated tasks | The arm's task runs with at least one truncated tool call at this tier. `not applicable` at Subagent. |
+| Output-truncated model calls | The tier's model calls that stopped at the output-token cap (see The output-token cap). |
+| Output-truncated tasks | The arm's task runs with at least one output-truncated model call at this tier. |
 
 A turn that runs out of budget is counted at exactly one tier, the tier where the exhaustion was
 first detected; a later detection in the same turn does not move it.
@@ -322,11 +394,17 @@ count at Supervisor, and every call made inside a delegation, whichever role mad
 ToolCall, so both truncation rows read `not applicable` at Subagent. Every call records the
 truncation flag of the bounded result its model received (see The tool-output bound).
 
-In `matrix.json` the three rows are the tier entry's `budget_exhausted_task_count`,
-`truncated_tool_call_count` and `truncated_task_count` (`null` at Subagent for both truncation
-counts). In `matrix.csv` they are `summary_<tier>_budget_exhausted_task_count`,
-`summary_<tier>_truncated_tool_call_count` and `summary_<tier>_truncated_task_count`, with the
-Subagent truncation cells empty.
+An output-truncated model call is counted at the tier that made it, at all three tiers. A turn
+whose calls were cut off at two tiers counts once in each tier's row, and a turn that was both
+output-truncated and out of budget counts in both rows.
+
+In `matrix.json` the five rows are the tier entry's `budget_exhausted_task_count`,
+`truncated_tool_call_count`, `truncated_task_count`, `output_truncated_call_count` and
+`output_truncated_task_count` (`null` at Subagent for the two tool-call truncation counts; the
+output-truncation counts are integers at every tier). In `matrix.csv` they are
+`summary_<tier>_budget_exhausted_task_count`, `summary_<tier>_truncated_tool_call_count`,
+`summary_<tier>_truncated_task_count`, `summary_<tier>_output_truncated_call_count` and
+`summary_<tier>_output_truncated_task_count`, with the Subagent tool-call truncation cells empty.
 
 Delegation outcome counts (`data`, `no_match`, `denied`, `tool_failure` and `none`, over every task
 the arm ran) are not a table row. They are in `matrix.json`, as the subagent entry's
@@ -358,13 +436,16 @@ Reading rules:
   Further notes appear when they apply: stub columns, withheld cost, errored items, and arms whose
   usage is a lower bound.
 - **Older records are refused.** Every arm record, `matrix.json` and its `tier_comparison` block
-  carries `record_shape_version` as its first key, currently 3 (3 added the per-run
-  `budget_exhausted_tier` and `repeat_index` to each task score). A record without it, with any other
-  value, or missing a required field (such as a tier's `total_prompt_tokens`, `cache_read_tokens` or
-  `cache_write_tokens`) is refused with `RecordShapeRefused`, naming the version found and the one
-  required. Nothing is rendered from it: `python -m eval.matrix` and `eval.reprice` exit 2 and write
-  no file, and `tier_comparison_table` raises. Records from earlier sweeps are not upgraded or
-  partly rendered.
+  carries `record_shape_version` as its first key, currently 4 (4 added the two output-truncation
+  rows at every tier and the `output_token_cap` and `dirty_tree` provenance fields; 3 added the
+  per-run `budget_exhausted_tier` and `repeat_index` to each task score). A record without it, with
+  any other value, or missing a required field (such as a tier's `total_prompt_tokens`,
+  `cache_read_tokens` or `cache_write_tokens`, or a provenance's `output_token_cap`) is refused with
+  `RecordShapeRefused`, naming the version found and the one required. Nothing is rendered from it:
+  `python -m eval.matrix` and `eval.reprice` exit 2 and write no file, and `tier_comparison_table`
+  raises. Records from earlier sweeps are not upgraded or partly rendered. On the Evals page, a run
+  whose stored record has an earlier shape is shown as an earlier-format run: its metadata still
+  renders, and its matrix, tier tables and artefacts are hidden.
 
 ## Correctness figures
 
@@ -425,7 +506,7 @@ standard. The thresholds are:
 
 | Model | Long-context above (prompt tokens) |
 |---|---|
-| GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna, GPT-6 Astra | 272,000 |
+| GPT-6.2 Sol, GPT-6.1 Terra, GPT-6 Luna, GPT-6.2 Astra | 272,000 |
 | Claude Haiku 5.5 | 100,000 |
 | Claude Sonnet 5.5, Claude Opus 5.5 | none (no long-context tier) |
 
@@ -447,12 +528,12 @@ every tier, so `arm_cost_total` equals the sum of the three tiers' costs in the 
 arm-level keys of those names; `matrix.csv` carries them as the `arm_cost` and
 `arm_long_context_invocation_count` columns.
 
-Rates come from `config/pricing.yaml` (`price_table_version` 1.3.0), global-route on-demand
+Rates come from `config/pricing.yaml` (`price_table_version` 1.4.0), global-route on-demand
 Standard rates for short context, plus the long-context rates and route multipliers above. The
-Anthropic models and GPT-6 Astra are read from the AWS Price List
+Anthropic models are read from the AWS Price List
 (`aws pricing get-products --service-code AmazonBedrockFoundationModels`, region us-east-1).
-GPT-6.1 Sol, GPT-6.1 Terra and GPT-6 Luna are absent from the us-east-1 Price List, so their rates
-come from the AWS Bedrock model cards (Global CRIS, short context). The file's `sourced_from` and
+GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Terra and GPT-6 Luna rates come from their AWS Bedrock model
+cards (Global CRIS, Standard tier). The file's `sourced_from` and
 `sourced_on` name the exact query and pages.
 To refresh the table, re-read the same sources, transcribe the standard and long-context rates, the
 long-context thresholds and the route multipliers, bump `price_table_version`, and update
@@ -544,7 +625,7 @@ The fault cannot reach any user channel:
 - Activation needs an `eval-<run_id>` tenant (a `demo`, `canary` or run-id-less tenant raises
   `FaultInjectionRefused`) and a task id the registry declares a fault for. A caller-supplied payload
   cannot declare a fault.
-- The chat path and the Runtime's `delegation` mode never call `observe_turn`.
+- The chat path never calls `observe_turn`.
 
 ## The oracle gate
 
@@ -617,7 +698,19 @@ Both family adapters apply one policy, defined in `src/providers/prompt_caching.
   is too short to reach the model's `prompt_cache_min_checkpoint_tokens`. For the latest-message
   point that prefix is the tool definitions plus every message through the latest, including tool
   calls and results. It estimates size at two characters per token, so it omits a point only when
-  the prefix cannot reach the minimum.
+  the prefix cannot reach the minimum. That estimate is optimistic: prose and JSON run nearer four
+  characters per token, so a point can be placed on a prefix that is in fact below the minimum.
+  The platform then declines to cache it, at no cost and with no error, and the request is billed
+  as uncached input. A higher estimate would under-count JSON-heavy prompts and drop points that
+  would have cached, so the estimate is kept. In the Anthropic `CACHING` text, "omitted when its
+  cumulative prefix is below prompt_cache_min_checkpoint_tokens" therefore means omitted when the
+  prefix cannot reach that minimum at two characters per token.
+- **Tool-tier cache figures are not comparable across families.** A tool-tier request is one tool
+  definition, a short directive and the intent in one user message, with no system message, so it
+  carries no stable-prefix point. Such a prompt is typically far below OpenAI's 1,024-token
+  minimum, so the tool tier's cache read and write tokens are expected to be zero for OpenAI.
+  Anthropic's minimum is 512, so its latest-message point can cache a larger tool-tier prompt. A difference in the ToolCall table's
+  cache rows reflects these platform minimums, not caching behaviour.
 
 Each arm records its family's method as `provenance.prompt_caching`, the text of `CACHING` in
 `src/providers/prompt_caching.py`, so a result record states how its requests asked to be cached.
@@ -639,8 +732,8 @@ supervisor and subagent tiers.
 | `anthropic.claude-opus-5-5` | supervisor | 512 |
 | `anthropic.claude-sonnet-5-5` | subagent | 512 |
 | `anthropic.claude-haiku-5-5` | tool | 512 |
-| `openai.gpt-6-astra` | supervisor | 1024 |
-| `openai.gpt-6.1-sol` | supervisor | 1024 |
+| `openai.gpt-6.2-astra` | supervisor | 1024 |
+| `openai.gpt-6.2-sol` | supervisor | 1024 |
 | `openai.gpt-6.1-terra` | subagent | 1024 |
 | `openai.gpt-6-luna` | tool | 1024 |
 
@@ -661,6 +754,11 @@ from it. Each family's caching mechanism is a member of the prompt bundle, so a 
 - **One dataset seed** per sweep.
 - **One prompt bundle per instrument.** Sweeps with different `prompt_bundle_sha256` values sent
   different prompts, tool descriptions or caching requests (see What the models are sent).
+- **Sweeps before record shape 4 are a different instrument.** Shape 4 coincides with the same
+  16,384-token output cap per model call for both families (Anthropic was capped at 8,192 and OpenAI
+  was not capped), the recording of calls cut off at that cap, and list pages cut by bytes so that
+  following the cursor reaches every record. Earlier sweeps' correctness, truncation and cost figures are not comparable with later
+  ones figure for figure.
 - **Sweeps before record shape 3 are a different instrument.** Shape 3 coincides with four changes
   that move figures: the 55 planted activities on `opp-0000`, the tool-output bound on every path,
   leaf calls charged as they are dispatched (with refused leaves counted at ToolCall), and the

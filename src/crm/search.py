@@ -18,9 +18,9 @@ from typing import Final
 
 from crm.authz import Identity, filter_to_scope, require_listing_scope, require_scope
 from crm.cursor import bound_operation, decode_cursor, encode_cursor
-from crm.errors import CrmError, ValidationFailed, bounded_detail_value
+from crm.errors import ValidationFailed, bounded_detail_value
+from crm.paging import bound_page, resume_key
 from crm.store.keys import tenant_prefixed
-from crm.store.schema import table_schema
 from crm.store.store import Store
 
 #: Maximum number of index items examined per call before search stops and reports truncation.
@@ -51,8 +51,9 @@ class SearchResult:
 
     Attributes:
         items: In-scope records matching the query, up to the point examination stopped.
-        truncated: ``True`` when :data:`EXAMINATION_BUDGET` index items were read, or more than
-            ``limit`` in-scope matches were found, so ``items`` may not be the complete match set.
+        truncated: ``True`` when :data:`EXAMINATION_BUDGET` index items were read, more than
+            ``limit`` in-scope matches were found, or the matches exceeded the handler page byte
+            budget, so ``items`` may not be the complete match set.
         examined_count: In-scope items examined across every page this call issued; items outside
             the caller's book are never counted.
         next_cursor: An opaque token resuming examination where this call stopped, valid only for
@@ -144,8 +145,10 @@ def _examine(
     Pages the chosen index, scope-filters each page to ``identity``'s book, then applies
     ``matches``, until the index is exhausted, :data:`EXAMINATION_BUDGET` index items have been
     read, or more in-scope matches than ``limit`` have been collected. ``next_cursor`` is present
-    only when examination truncated with something left to resume from; after a ``limit`` cut it
-    resumes immediately after the last returned item, so no match is skipped.
+    only when examination truncated with something left to resume from. The matches are then cut
+    to ``limit`` and to :data:`crm.paging.HANDLER_PAGE_BYTE_BUDGET` by :func:`crm.paging.bound_page`;
+    after either cut the cursor resumes immediately after the last returned item, so no match is
+    skipped.
     """
     binding = bound_operation(operation, index_name, partition_value)
     page_key = decode_cursor(cursor, identity=identity, operation=binding)
@@ -186,7 +189,11 @@ def _examine(
     items = matched
     if limit is not None and len(matched) > limit:
         items = matched[:limit]
-        page_key = _resume_key(table, index_name, items[-1])
+        page_key = resume_key(table, index_name, items[-1])
+    items, cut = bound_page(items)
+    if cut:
+        truncated = True
+        page_key = resume_key(table, index_name, items[-1])
     return SearchResult(
         items=items,
         truncated=truncated,
@@ -195,31 +202,6 @@ def _examine(
             encode_cursor(page_key, identity=identity, operation=binding) if truncated else None
         ),
     )
-
-
-def _resume_key(table: str, index_name: str, item: dict[str, object]) -> dict[str, object]:
-    """Build the ``ExclusiveStartKey`` that resumes ``index_name`` immediately after ``item``.
-
-    Raises:
-        CrmError: If ``item`` lacks one of the table or index key attributes.
-    """
-    schema = table_schema(table)
-    gsi = schema.gsi(index_name)
-    names = {schema.partition_key, gsi.partition_key}
-    names.update(name for name in (schema.sort_key, gsi.sort_key) if name is not None)
-    key: dict[str, object] = {}
-    for name in sorted(names):
-        value = item.get(name)
-        if isinstance(value, str):
-            key[name] = {"S": value}
-        elif isinstance(value, (int, float)) and not isinstance(value, bool):
-            key[name] = {"N": str(value)}
-        else:
-            raise CrmError(
-                "The request could not be completed.",
-                detail=f"search resume key: {table}.{index_name} item lacks {name}",
-            )
-    return key
 
 
 def _require_well_formed_account_id(account_id: str) -> None:

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
-"""The eval-only fault is unreachable from the Runtime chat and delegation paths.
+"""The eval-only fault is unreachable from the Runtime chat turn path.
 
 Against DynamoDB Local in a seeded ``eval-<run_id>`` tenant, with gt-16's fault declared in a
 fixture registry: ``observe_turn`` and the Runtime ``eval_turn`` mode report ``tool_failure`` for
-``list_activities`` (the positive control), while the chat turn path and the ``delegation`` mode,
-for the same prompt, task id and session, reach the real handler and get ``data``. An
+``list_activities`` (the positive control), while the chat turn path, for the same prompt, task id
+and session, reaches the real handler and gets ``data``. An
 ``eval_turn`` request in the ``demo`` tenant is refused with 403 before any dispatch.
 """
 
@@ -297,26 +297,6 @@ def test_chat_turn_path_returns_data_from_list_activities(
 
     kinds = asyncio.run(_drain())
     assert "completed" in kinds
-    _assert_list_activities_returned_data(local)
-
-
-def test_delegation_mode_returns_data_from_list_activities(
-    gt16: tuple[_Gt16, _LocalLambda],
-) -> None:
-    task, local = gt16
-    response = TestClient(runtime_server.app).post(
-        "/invocations",
-        json={
-            "mode": "delegation",
-            AGENT_IDENTITY_KEY: _agent_block(task, tenant=task.tenant),
-            "task_id": task.task_id,
-            "prompt": task.prompt,
-            "tool_name": "list_activities",
-            "tool_input": {"opportunity_id": task.opportunity_id},
-        },
-    )
-    assert response.status_code == 200, response.text
-    assert response.json()["outcome"]["kind"] == "data"
     _assert_list_activities_returned_data(local)
 
 

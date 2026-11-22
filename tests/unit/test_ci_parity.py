@@ -2364,7 +2364,7 @@ def test_the_verify_job_builds_the_zips_its_gates_verify() -> None:
 # ---------------------------------------------------------------------------
 
 #: GitLab jobs that install a pinned Node release: the relay's in `verify`, the SPA's in `frontend`.
-_GITLAB_NODE_JOBS = ("verify", "frontend")
+_GITLAB_NODE_JOBS = ("verify", "frontend", "sca")
 
 #: `(definition, release host, job or None for any)` for each install verified against a digest.
 _PINNED_RELEASE_INSTALLS: tuple[tuple[Path, str, str | None], ...] = (
@@ -2615,6 +2615,10 @@ _GITLAB_PER_ARCH_INSTALLS: dict[tuple[str, str | None], dict[str, tuple[str, str
         "x86_64": ("FRONTEND_NODE_SHA256_X64", "-linux-x64.tar.xz"),
         "aarch64": ("FRONTEND_NODE_SHA256_ARM64", "-linux-arm64.tar.xz"),
     },
+    (_NODE_RELEASE_HOST, "sca"): {
+        "x86_64": ("FRONTEND_NODE_SHA256_X64", "-linux-x64.tar.xz"),
+        "aarch64": ("FRONTEND_NODE_SHA256_ARM64", "-linux-arm64.tar.xz"),
+    },
 }
 
 
@@ -2798,10 +2802,39 @@ def test_the_journeys_install_from_the_lockfile_and_never_resolve_versions() -> 
 # ---------------------------------------------------------------------------
 
 TS_CONTRACTS_REQUIRE_ENV_VAR = "CRM_REQUIRE_TS_CONTRACTS"
-TS_CONTRACT_FILES = (
-    "tests/integration/test_envelope_groups_contract.py",
-    "tests/integration/test_eval_envelopes_contract.py",
-    "tests/integration/test_resume_contract.py",
+
+
+def _derive_ts_contract_files() -> tuple[str, ...]:
+    """Every tracked `tests/**/test_*.py` other than this file that reads the variable, sorted."""
+    listed = proc_run.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "tests"],
+        capture_output=True,
+        check=True,
+    )
+    this_file = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+    readers = []
+    for raw in listed.stdout.split(b"\0"):
+        rel = raw.decode("utf-8")
+        if not rel or rel == this_file or not Path(rel).name.startswith("test_"):
+            continue
+        if not rel.endswith(".py"):
+            continue
+        path = REPO_ROOT / rel
+        if path.is_file() and TS_CONTRACTS_REQUIRE_ENV_VAR in path.read_text(encoding="utf-8"):
+            readers.append(rel)
+    return tuple(sorted(readers))
+
+
+TS_CONTRACT_FILES = _derive_ts_contract_files()
+
+#: Readers the derivation must find; a smaller derived set means it stopped seeing a file.
+_KNOWN_TS_CONTRACT_FILES = frozenset(
+    {
+        "tests/integration/test_envelope_groups_contract.py",
+        "tests/integration/test_eval_envelopes_contract.py",
+        "tests/integration/test_prompt_cap_contract.py",
+        "tests/integration/test_resume_contract.py",
+    }
 )
 _FRONTEND_JOB = "frontend"
 
@@ -2843,6 +2876,13 @@ def test_the_ts_contracts_variable_has_a_reader_under_tests() -> None:
     """Every contract file the frontend job runs exists and reads the variable."""
     for name in TS_CONTRACT_FILES:
         assert TS_CONTRACTS_REQUIRE_ENV_VAR in (REPO_ROOT / name).read_text(encoding="utf-8"), name
+
+
+def test_the_ts_contract_set_is_derived_from_its_readers() -> None:
+    """The derived set contains every known reader, so a new reader joins it without an edit here."""
+    assert set(TS_CONTRACT_FILES) >= _KNOWN_TS_CONTRACT_FILES, (
+        f"the derivation missed {sorted(_KNOWN_TS_CONTRACT_FILES - set(TS_CONTRACT_FILES))}"
+    )
 
 
 @pytest.mark.parametrize("path", [WORKFLOW_PATH, GITLAB_CI_PATH], ids=lambda p: p.name)
@@ -3045,3 +3085,345 @@ def test_non_vacuity_a_missing_or_early_tier_comparison_diff_is_detected(path: P
 
     early = [e for e in entries if is_diff(e)] + no_diff
     assert _tier_comparison_violations(path, {**jobs, _FRONTEND_JOB: {**frontend, key: early}})
+
+
+# ---------------------------------------------------------------------------
+# Frontend typecheck and unit-run parity, job timeouts, the push filter, the DynamoDB readiness
+# wait, npm install flags, and the dependency-audit (`sca`) job, in both definitions.
+# ---------------------------------------------------------------------------
+
+_CI_PATHS = [WORKFLOW_PATH, GITLAB_CI_PATH]
+_SHUFFLE_FLAG = "--sequence.shuffle=true"
+_DYNAMODB_READY_PROBE = "/dev/tcp/127.0.0.1/8000"
+_NPM_CI_FLAGS = ("--no-audit", "--no-fund")
+_SCA_JOB = "sca"
+SCA_REQUIREMENTS = "ci/requirements-sca.txt"
+_NPM_AUDIT = "npm audit --audit-level=high"
+
+
+def _frontend_run_violations(doc: dict[str, Any]) -> list[str]:
+    """Frontend typecheck lines without `--force`, unit runs without the shuffle, or neither run."""
+    lines = _job_lines(_ci_jobs_from_doc(doc)[_FRONTEND_JOB])
+    typecheck = [line for line in lines if "npm run typecheck" in line]
+    unit = [line for line in lines if re.search(r"npm run test\b", line)]
+    problems = [
+        f"typecheck without --force: {line!r}" for line in typecheck if "--force" not in line
+    ]
+    problems += [f"unit run unshuffled: {line!r}" for line in unit if _SHUFFLE_FLAG not in line]
+    if not typecheck or not unit:
+        problems.append("no frontend typecheck or unit run")
+    return problems
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_both_frontend_jobs_force_the_typecheck_and_shuffle_the_unit_run(path: Path) -> None:
+    """Each frontend job typechecks with `--force` and runs vitest in shuffled order."""
+    text = path.read_text(encoding="utf-8")
+    assert _frontend_run_violations(yaml.safe_load(text)) == []
+    assert _frontend_run_violations(yaml.safe_load(text.replace(" -- --force", "")))
+    assert _frontend_run_violations(yaml.safe_load(text.replace(f" -- {_SHUFFLE_FLAG}", "")))
+
+
+def _jobs_without_timeout(path: Path, doc: dict[str, Any]) -> list[str]:
+    key = "timeout-minutes" if path == WORKFLOW_PATH else "timeout"
+    return sorted(name for name, job in _ci_jobs_from_doc(doc).items() if not job.get(key))
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_every_job_has_a_timeout(path: Path) -> None:
+    """A hung job ends at a declared bound rather than the platform's default."""
+    text = path.read_text(encoding="utf-8")
+    assert _jobs_without_timeout(path, yaml.safe_load(text)) == []
+    key = "timeout-minutes:" if path == WORKFLOW_PATH else "timeout:"
+    assert _jobs_without_timeout(path, yaml.safe_load(_without_first_line(text, key)))
+
+
+def test_pushes_trigger_the_workflow_on_main_only() -> None:
+    """The push filter names the repository's one long-lived branch, `main`."""
+    assert _triggers(_load_workflow(WORKFLOW_PATH.read_text(encoding="utf-8")))["push"] == {
+        "branches": ["main"]
+    }
+
+
+def _dynamodb_wait_violation(path: Path, doc: dict[str, Any]) -> str | None:
+    lines = _job_lines(_verify_job_of(path, doc))
+    probe_at = _first_index(lines, _DYNAMODB_READY_PROBE)
+    verify_at = next((i for i, line in enumerate(lines) if re.search(r"\bmake verify\b", line)), -1)
+    if not -1 < probe_at < verify_at:
+        return f"{path.name}: readiness probe at {probe_at}, make verify at {verify_at}"
+    return None
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_the_verify_job_waits_for_dynamodb_local_before_make_verify(path: Path) -> None:
+    """Both verify jobs probe 127.0.0.1:8000 before the integration suite needs it."""
+    text = path.read_text(encoding="utf-8")
+    assert _dynamodb_wait_violation(path, yaml.safe_load(text)) is None
+    stripped = "\n".join(line for line in text.splitlines() if _DYNAMODB_READY_PROBE not in line)
+    assert _dynamodb_wait_violation(path, yaml.safe_load(stripped)) is not None
+
+
+def _npm_ci_flag_violations(doc: dict[str, Any]) -> list[str]:
+    return [
+        line
+        for job in _ci_jobs_from_doc(doc).values()
+        for line in _job_lines(job)
+        if re.search(r"\bnpm ci\b", line) and not all(flag in line for flag in _NPM_CI_FLAGS)
+    ]
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_every_npm_ci_passes_no_audit_and_no_fund(path: Path) -> None:
+    """Installs never audit (the `sca` job owns that) and never print funding prompts."""
+    text = path.read_text(encoding="utf-8")
+    doc = yaml.safe_load(text)
+    assert any(
+        re.search(r"\bnpm ci\b", line)
+        for job in _ci_jobs_from_doc(doc).values()
+        for line in _job_lines(job)
+    )
+    assert _npm_ci_flag_violations(doc) == []
+    mutant = text.replace("npm ci --no-audit --no-fund", "npm ci --no-fund", 1)
+    assert mutant != text and _npm_ci_flag_violations(yaml.safe_load(mutant))
+
+
+def _npm_project_dirs() -> list[str]:
+    """Every tracked npm project: the directory of each tracked `package-lock.json`."""
+    listed = proc_run.run(
+        ["git", "-C", str(REPO_ROOT), "ls-files", "--", "*package-lock.json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return sorted(str(Path(rel).parent) for rel in listed.stdout.split())
+
+
+def _sca_violations(doc: dict[str, Any]) -> list[str]:
+    """Why a definition's `sca` job does not audit both ecosystems from a separate pinned tree."""
+    job = _ci_jobs_from_doc(doc).get(_SCA_JOB)
+    if not isinstance(job, dict):
+        return ["no sca job"]
+    lines = _job_lines(job)
+    problems: list[str] = []
+    installs = [line for line in lines if re.search(r"\bpip install\b", line)]
+    if not any(f"--no-deps -r {SCA_REQUIREMENTS}" in line for line in installs):
+        problems.append(f"pip-audit is not installed --no-deps from {SCA_REQUIREMENTS}")
+    if any("-r requirements.txt" in line for line in installs):
+        problems.append("the project lock is installed into the audit venv")
+    audits = [line for line in lines if "pip-audit" in line]
+    if not any("--no-deps" in line and "-r requirements.txt" in line for line in audits):
+        problems.append("pip-audit does not audit -r requirements.txt with --no-deps")
+    for directory in _npm_project_dirs():
+        prefix = f"cd {directory} && "
+        if not any(line.startswith(prefix) and _NPM_AUDIT in line for line in lines) and not any(
+            f"(cd {directory} && {_NPM_AUDIT})" in line for line in lines
+        ):
+            problems.append(f"no `{_NPM_AUDIT}` in {directory}")
+    for line in [*audits, *(line for line in lines if "npm audit" in line)]:
+        if "|| true" in line or "--audit-level=critical" in line:
+            problems.append(f"an audit cannot fail: {line!r}")
+    if job.get("allow_failure") or job.get("continue-on-error"):
+        problems.append("the sca job is allowed to fail")
+    return problems
+
+
+def test_the_npm_projects_are_the_three_expected() -> None:
+    """Control for the derivation: it finds the three npm projects the repository documents."""
+    assert _npm_project_dirs() == ["frontend", "src/relay", "tests/e2e/browser"]
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_the_sca_job_audits_the_lock_and_every_npm_project(path: Path) -> None:
+    """pip-audit runs from its own pinned tree over the lock; npm audit fails on High in each project."""
+    assert _sca_violations(_load_ci(path)) == []
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_non_vacuity_each_sca_rule_is_detected(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    mutants = {
+        "relay audit dropped": "\n".join(
+            line for line in text.splitlines() if not ("src/relay" in line and "audit" in line)
+        )
+        if path == GITLAB_CI_PATH
+        else text.replace(
+            "working-directory: src/relay\n        run: npm audit",
+            "working-directory: src/relay\n        run: npm ls",
+            1,
+        ),
+        "audit level lowered": text.replace("--audit-level=high", "--audit-level=critical", 1),
+        "pip-audit resolves deps": text.replace("pip-audit --no-deps", "pip-audit", 1),
+        "lock installed": text.replace(
+            f"--no-deps -r {SCA_REQUIREMENTS}", "--no-deps -r requirements.txt", 1
+        ),
+    }
+    for label, mutant in mutants.items():
+        assert mutant != text, label
+        assert _sca_violations(yaml.safe_load(mutant)), label
+
+
+def test_the_sca_requirements_are_exact_pins_including_pip_audit() -> None:
+    """`ci/requirements-sca.txt` pins every package exactly and is separate from the project lock."""
+    lines = [
+        line.strip()
+        for line in (REPO_ROOT / SCA_REQUIREMENTS).read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    assert lines
+    for line in lines:
+        assert re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][A-Za-z0-9.+!-]*", line), line
+    names = {re.split(r"==", line)[0].lower().replace("_", "-") for line in lines}
+    assert "pip-audit" in names
+    project = LOCKFILE_PATH.read_text(encoding="utf-8").lower().replace("_", "-")
+    assert "pip-audit" not in project, "pip-audit leaked into the project lock"
+
+
+# ---------------------------------------------------------------------------
+# The frontend's lint, typecheck and vitest suite is wired into `make verify`, provisioned by both
+# `make verify` jobs, and covered by both CI frontend jobs.
+# ---------------------------------------------------------------------------
+
+FRONTEND_MAKE_TARGET = "test-frontend"
+FRONTEND_REQUIRE_ENV_VAR = "CRM_REQUIRE_FRONTEND_TESTS"
+_FRONTEND_INSTALL = f"cd {FRONTEND_DIR} && npm ci"
+#: The npm scripts `test-frontend` runs; each CI frontend job must run every one of them.
+_FRONTEND_SUITE_SCRIPTS = (
+    "npm run --silent lint",
+    "npm run --silent typecheck",
+    "npm run --silent test",
+)
+
+
+def _installs_frontend(path: Path, doc: dict[str, Any]) -> bool:
+    """Whether the `make verify` job (or GitLab's inherited `before_script`) runs `npm ci` in
+    `frontend/`."""
+    lines = _job_lines(_verify_job_of(path, doc))
+    if path == GITLAB_CI_PATH:
+        lines += list(_yaml_scalars(doc.get("before_script", [])))
+    return any(_FRONTEND_INSTALL in line for line in lines)
+
+
+def _frontend_job_missing_scripts(doc: dict[str, Any]) -> list[str]:
+    """The `test-frontend` npm scripts the CI frontend job never runs."""
+    lines = _job_lines(_ci_jobs_from_doc(doc)[_FRONTEND_JOB])
+    wanted = [script.replace(" --silent", "") for script in _FRONTEND_SUITE_SCRIPTS]
+    return [script for script in wanted if not any(re.search(rf"{script}\b", ln) for ln in lines)]
+
+
+def test_the_frontend_suite_is_wired_into_make_verify() -> None:
+    """The target exists, runs lint, typecheck and vitest without npx, and `verify` runs it."""
+    recipes = _makefile_recipes()
+    assert recipes.get(FRONTEND_MAKE_TARGET), f"Makefile has no {FRONTEND_MAKE_TARGET!r} recipe"
+    assert FRONTEND_MAKE_TARGET in _verify_sub_targets()
+    recipe_text = "\n".join(recipes[FRONTEND_MAKE_TARGET])
+    for script in _FRONTEND_SUITE_SCRIPTS:
+        assert script in recipe_text, f"{FRONTEND_MAKE_TARGET!r} does not run {script!r}"
+    assert '"$$CRM_REQUIRE_FRONTEND_TESTS" = "1"' in recipe_text, (
+        f"{FRONTEND_MAKE_TARGET!r} never reads {FRONTEND_REQUIRE_ENV_VAR}, so a missing toolchain "
+        "always skips"
+    )
+    assert "npx" not in recipe_text
+
+
+def test_the_frontend_requirement_and_its_ci_provision_agree_in_both_definitions() -> None:
+    """`make verify` exports the frontend require flag exactly when both verify jobs install it."""
+    makefile_text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    exported = FRONTEND_REQUIRE_ENV_VAR in _verify_target_exported_requirements(makefile_text)
+    github = _installs_frontend(WORKFLOW_PATH, _load_ci(WORKFLOW_PATH))
+    gitlab = _installs_frontend(GITLAB_CI_PATH, _load_ci(GITLAB_CI_PATH))
+    assert exported == github == gitlab, (
+        f"{FRONTEND_REQUIRE_ENV_VAR} exported={exported}, GitHub provisions={github}, "
+        f"GitLab provisions={gitlab}: exported-but-unprovisioned is an unexplained CI failure, "
+        "provisioned-but-unexported a silent skip"
+    )
+    assert exported, "the frontend suite is not required by `make verify`"
+
+
+def _without_frontend_install(path: Path, doc: dict[str, Any]) -> dict[str, Any]:
+    """A copy of `doc` whose `make verify` job (and GitLab's top-level `before_script`) no longer
+    installs `frontend/`."""
+    name = _make_verify_job_name(path)
+    job = dict(doc[name] if name in doc else doc["jobs"][name])
+    if path == WORKFLOW_PATH:
+        job["steps"] = [
+            s
+            for s in job.get("steps", [])
+            if not (
+                s.get("working-directory") == FRONTEND_DIR and "npm ci" in str(s.get("run", ""))
+            )
+        ]
+        return {**doc, "jobs": {**doc["jobs"], name: job}}
+    for key in ("before_script", "script"):
+        if key in job:
+            job[key] = [line for line in job[key] if _FRONTEND_INSTALL not in str(line)]
+    top = [line for line in doc.get("before_script", []) if _FRONTEND_INSTALL not in str(line)]
+    return {**doc, name: job, "before_script": top}
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_non_vacuity_dropping_the_frontend_install_is_detected(path: Path) -> None:
+    """Removing the frontend install from a copy of either definition reads as unprovisioned."""
+    doc = _load_ci(path)
+    assert _installs_frontend(path, doc), "fixture assumption broken"
+    assert not _installs_frontend(path, _without_frontend_install(path, doc))
+
+
+@pytest.mark.parametrize("path", _CI_PATHS, ids=lambda p: p.name)
+def test_both_frontend_jobs_run_every_script_test_frontend_runs(path: Path) -> None:
+    """Each CI frontend job runs lint, typecheck and vitest, the same suite as `test-frontend`."""
+    text = path.read_text(encoding="utf-8")
+    assert _frontend_job_missing_scripts(yaml.safe_load(text)) == []
+    for script in ("npm run lint", "npm run typecheck", "npm run test"):
+        mutated = "\n".join(line for line in text.splitlines() if script not in line)
+        assert script in _frontend_job_missing_scripts(yaml.safe_load(mutated)), script
+
+
+# ---------------------------------------------------------------------------
+# The browser-journeys workflow is ready for a hosted runner.
+# ---------------------------------------------------------------------------
+
+_LOCAL_PLAYWRIGHT = "./node_modules/.bin/playwright"
+
+
+def _browser_runner_violations(steps: list[dict[str, Any]]) -> list[str]:
+    """Browser steps that resolve a runner through npx, or run Playwright not from the lockfile."""
+    problems: list[str] = []
+    for step in steps:
+        run = str(step.get("run", ""))
+        if re.search(r"\bnpx\b", run):
+            problems.append(f"npx in {step.get('name')!r}: {run.strip()!r}")
+        if re.search(r"\bplaywright\b", run) and _LOCAL_PLAYWRIGHT not in run:
+            problems.append(f"Playwright not from {_LOCAL_PLAYWRIGHT}: {run.strip()!r}")
+    return problems
+
+
+def test_the_browser_tier_runs_the_pinned_local_playwright_binary() -> None:
+    """Both Playwright steps use the lockfile's binary; no step resolves a runner via npx."""
+    steps = _browser_steps()
+    assert _browser_runner_violations(steps) == []
+    assert sum(_LOCAL_PLAYWRIGHT in str(s.get("run", "")) for s in steps) >= 2, (
+        "expected the browser install and the journey run to use the local Playwright binary"
+    )
+    mutated = BROWSER_WORKFLOW_PATH.read_text(encoding="utf-8").replace(
+        f"{_LOCAL_PLAYWRIGHT} test", "npx --yes playwright test"
+    )
+    job = next(iter(_load_workflow(mutated)["jobs"].values()))
+    assert _browser_runner_violations(job["steps"])
+
+
+def test_the_browser_job_has_a_timeout() -> None:
+    """A hung journey ends at a declared bound rather than the platform's six-hour default."""
+    assert isinstance(_browser_job().get("timeout-minutes"), int)
+    mutated = _without_first_line(
+        BROWSER_WORKFLOW_PATH.read_text(encoding="utf-8"), "timeout-minutes:"
+    )
+    job = next(iter(_load_workflow(mutated)["jobs"].values()))
+    assert not job.get("timeout-minutes")
+
+
+def test_the_browser_install_matches_the_repositorys_npm_ci_flags() -> None:
+    """The journey install is `npm ci --no-audit --no-fund`, as every other CI npm install."""
+    installs = [
+        str(s.get("run", "")).strip() for s in _browser_steps() if "npm ci" in str(s.get("run", ""))
+    ]
+    assert installs == ["npm ci --no-audit --no-fund"], installs

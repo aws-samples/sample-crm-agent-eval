@@ -9,14 +9,20 @@ asserts each tool's response carries the keys the frontend reads.
 
 Run from the repository root with the project's pinned interpreter:
 
-    .venv/bin/python3 frontend/scripts/export_response_shapes.py
+    .venv/bin/python3 frontend/scripts/export_response_shapes.py [--proposal-age-hours H]
+
+The seeded proposals are created ``H`` hours (default 1) before the run, so ``approve_proposal``
+accepts them. An age at or past `crm.proposals.PROPOSAL_MAX_PENDING_AGE` exits non-zero before any
+handler runs, naming the bound.
 """
 
 from __future__ import annotations
 
+import argparse
 import importlib
 import json
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +33,7 @@ import boto3  # noqa: E402
 from moto import mock_aws  # noqa: E402
 
 from crm.envelope import IDENTITY_KEY, identity_event  # noqa: E402
+from crm.proposals import PROPOSAL_MAX_PENDING_AGE  # noqa: E402
 from crm.store.provisioning import create_all_tables  # noqa: E402
 from crm.store.store import Store  # noqa: E402
 from crm.toolspec.definitions import ALL_TOOLS  # noqa: E402
@@ -43,6 +50,9 @@ _AUDIT_OPPORTUNITY = "opp-audit"
 _PROPOSAL_TO_APPROVE = "prop-approve"
 _PROPOSAL_TO_REJECT = "prop-reject"
 _PROPOSAL_TO_REBASE = "prop-rebase"
+
+#: How long before the run the seeded proposals are created, by default.
+DEFAULT_PROPOSAL_AGE = timedelta(hours=1)
 
 
 def _identity() -> dict[str, Any]:
@@ -131,7 +141,7 @@ def _seed_activity(store: Store) -> None:
     )
 
 
-def _seed_proposal(store: Store, *, proposal_id: str) -> None:
+def _seed_proposal(store: Store, *, proposal_id: str, created_at: str) -> None:
     """Seed a pending proposal whose before-snapshot is the target's **whole** current item.
 
     `crm.proposals.approve_proposal` compares the entire record against the stored snapshot and
@@ -155,10 +165,21 @@ def _seed_proposal(store: Store, *, proposal_id: str) -> None:
             "reason": "advance",
             "status": "pending",
             "actor_rep_id": _REP,
-            "created_at": "2024-01-01T00:00:00+00:00",
-            "updated_at": "2024-01-01T00:00:00+00:00",
+            "created_at": created_at,
+            "updated_at": created_at,
         },
     )
+
+
+def _proposal_created_at(age: timedelta) -> str:
+    """The seeded proposals' ``created_at``, ``age`` before now; exits when approval would refuse it."""
+    if age >= PROPOSAL_MAX_PENDING_AGE:
+        raise SystemExit(
+            f"export_response_shapes: a seeded proposal aged {age} is not younger than "
+            f"PROPOSAL_MAX_PENDING_AGE ({PROPOSAL_MAX_PENDING_AGE}), so approve_proposal would "
+            "refuse it as stale. Seed it younger."
+        )
+    return (datetime.now(UTC) - age).isoformat()
 
 
 def _seed_audit_record(store: Store) -> None:
@@ -308,12 +329,13 @@ def _assert_every_tool_accounted_for() -> None:
         )
 
 
-def build_shapes() -> dict[str, list[str]]:
+def build_shapes(proposal_age: timedelta = DEFAULT_PROPOSAL_AGE) -> dict[str, list[str]]:
     """Run every frontend-called handler and return `{tool_name: sorted(body.keys())}`.
 
-    Raises when a handler does not reach a 2xx.
+    Raises when a handler does not reach a 2xx, or when ``proposal_age`` is past the approval window.
     """
     _assert_every_tool_accounted_for()
+    proposal_created_at = _proposal_created_at(proposal_age)
 
     with mock_aws():
         client = boto3.client("dynamodb", region_name="us-east-1")
@@ -327,7 +349,7 @@ def build_shapes() -> dict[str, list[str]]:
         _seed_activity(store)
         _seed_audit_record(store)
         for proposal_id in (_PROPOSAL_TO_APPROVE, _PROPOSAL_TO_REJECT, _PROPOSAL_TO_REBASE):
-            _seed_proposal(store, proposal_id=proposal_id)
+            _seed_proposal(store, proposal_id=proposal_id, created_at=proposal_created_at)
 
         shapes: dict[str, list[str]] = {}
         for tool_name, args in sorted(_TOOL_ARGS.items()):
@@ -349,8 +371,17 @@ def build_shapes() -> dict[str, list[str]]:
         return shapes
 
 
-def main() -> int:
-    json.dump(build_shapes(), sys.stdout, indent=2, sort_keys=True)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--proposal-age-hours",
+        type=float,
+        default=DEFAULT_PROPOSAL_AGE.total_seconds() / 3600,
+        help="how long before the run the seeded proposals were created",
+    )
+    args = parser.parse_args(argv)
+    age = timedelta(hours=args.proposal_age_hours)
+    json.dump(build_shapes(age), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
 

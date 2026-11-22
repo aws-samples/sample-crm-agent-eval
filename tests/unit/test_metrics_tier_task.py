@@ -38,7 +38,9 @@ def _score(tier: str, passed: bool | None) -> TierScore:
     return TierScore(tier=tier, applicable=passed is not None, passed=passed)
 
 
-def _call(tier: Tier, latency_ms: float | None) -> InvocationAttribution:
+def _call(
+    tier: Tier, latency_ms: float | None, *, output_truncated: bool = False
+) -> InvocationAttribution:
     return InvocationAttribution(
         tier=tier,
         role=f"{tier}-role",
@@ -46,6 +48,7 @@ def _call(tier: Tier, latency_ms: float | None) -> InvocationAttribution:
         tokens=TokenCounts(input_tokens=1, output_tokens=1),
         cache=CacheCounts(),
         latency_ms=latency_ms,
+        output_truncated=output_truncated,
     )
 
 
@@ -183,6 +186,8 @@ def test_tier_with_no_completed_task_reports_none_at_count_zero() -> None:
         "budget_exhausted_task_count": 0,
         "truncated_tool_call_count": 0,
         "truncated_task_count": 0,
+        "output_truncated_call_count": 0,
+        "output_truncated_task_count": 0,
     }
 
 
@@ -279,6 +284,8 @@ def test_report_fields_key_order() -> None:
             "budget_exhausted_task_count",
             "truncated_tool_call_count",
             "truncated_task_count",
+            "output_truncated_call_count",
+            "output_truncated_task_count",
         ]
         assert entry["configured_model_id"] == _CONFIGURED[tier]
 
@@ -451,3 +458,73 @@ def test_truncation_is_zero_not_none_at_supervisor_and_tool_without_truncation()
 def test_truncation_is_counted_for_an_unmeasured_arm() -> None:
     entry = _tier(_truncation_observations(), "tool", measured=False)
     assert entry["truncated_tool_call_count"] == 2
+
+
+def _output_truncated(tier: Tier) -> InvocationAttribution:
+    return _call(tier, 10.0, output_truncated=True)
+
+
+def _output_truncation_observations() -> list[TaskTierObservation]:
+    return [
+        _obs(
+            "two-tiers",
+            calls=(
+                _output_truncated("supervisor"),
+                _output_truncated("tool"),
+                _output_truncated("tool"),
+                _call("subagent", 10.0),
+            ),
+        ),
+        _obs("subagent-only", calls=(_output_truncated("subagent"), _call("tool", 10.0))),
+        _obs(
+            "also-exhausted",
+            calls=(_output_truncated("supervisor"),),
+            exhausted_at="supervisor",
+        ),
+        _obs("clean", calls=tuple(_call(tier, 10.0) for tier in ALL_TIERS)),
+    ]
+
+
+def test_output_truncated_calls_and_tasks_are_counted_at_every_tier() -> None:
+    by_tier = _by_tier(_output_truncation_observations())
+    counts = {
+        tier: (
+            by_tier[tier]["output_truncated_call_count"],  # type: ignore[index]
+            by_tier[tier]["output_truncated_task_count"],  # type: ignore[index]
+        )
+        for tier in ALL_TIERS
+    }
+    assert counts == {"supervisor": (2, 2), "subagent": (1, 1), "tool": (2, 1)}
+
+
+def test_a_turn_output_truncated_at_two_tiers_counts_once_in_each_tier() -> None:
+    by_tier = _by_tier([_output_truncation_observations()[0]])
+    assert by_tier["supervisor"]["output_truncated_task_count"] == 1  # type: ignore[index]
+    assert by_tier["tool"]["output_truncated_task_count"] == 1  # type: ignore[index]
+    assert by_tier["subagent"]["output_truncated_task_count"] == 0  # type: ignore[index]
+
+
+def test_an_output_truncated_and_budget_exhausted_turn_counts_in_both_rows() -> None:
+    entry = _tier([_output_truncation_observations()[2]], "supervisor")
+    assert entry["output_truncated_task_count"] == 1
+    assert entry["budget_exhausted_task_count"] == 1
+
+
+def test_output_truncation_is_independent_of_tool_result_truncation() -> None:
+    """A truncated tool result is not an output-truncated model call, and the reverse."""
+    observations = [
+        _obs(
+            "result-only", tool_calls=(_tc("get_account", SUPERVISOR_ROLE, "data", truncated=True),)
+        ),
+        _obs("output-only", calls=(_output_truncated("supervisor"),)),
+    ]
+    entry = _tier(observations, "supervisor")
+    assert entry["truncated_task_count"] == 1
+    assert entry["output_truncated_task_count"] == 1
+    assert entry["output_truncated_call_count"] == 1
+
+
+def test_output_truncation_is_counted_for_an_unmeasured_arm() -> None:
+    entry = _tier(_output_truncation_observations(), "tool", measured=False)
+    assert entry["output_truncated_call_count"] == 2
+    assert entry["output_truncated_task_count"] == 1

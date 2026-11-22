@@ -129,6 +129,30 @@ def test_a_foreign_rep_is_refused_on_read_and_write(
     )
 
 
+def test_an_expired_undeleted_item_is_neither_seizable_nor_left_behind_by_clear(
+    dynamodb_local_store: tuple[Store, str],
+) -> None:
+    """Past expiry and before TTL deletion: a stranger's write and clear are refused, the owner's
+    clear deletes the item."""
+    store, _ = dynamodb_local_store
+    now = [datetime.now(UTC)]
+    history = DynamoDbConversationHistory(store, ttl_seconds=60, clock=lambda: now[0])
+    history.record_turn(_SESSION, identity=_identity(), prompt="p", answer="a")
+    now[0] += timedelta(seconds=61)
+    key = {"rep_id": keys.history_key("demo", _SESSION)}
+    stranger = _identity(rep_id="rep-attacker")
+
+    with pytest.raises(ScopeDenied):
+        history.record_turn(_SESSION, identity=stranger, prompt="seize", answer="x")
+    with pytest.raises(ScopeDenied):
+        history.clear(_SESSION, identity=stranger)
+    item = store.get_item(HISTORY_TABLE, key)
+    assert item is not None and item["owner_rep_id"] == "rep-1"
+
+    history.clear(_SESSION, identity=_identity())
+    assert store.get_item(HISTORY_TABLE, key) is None
+
+
 class _BarrierStore(Store):
     """A `Store` whose first conditional write per thread waits until both writers have read."""
 

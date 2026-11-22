@@ -116,13 +116,19 @@ def test_a_new_or_unknown_session_reads_empty_not_denied(make_store: StoreFactor
     assert store.history_for("never-seen", identity=_identity()) == ()
 
 
-def test_blank_session_id_is_rejected_on_read_and_write(make_store: StoreFactory) -> None:
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"], ids=["empty", "spaces", "whitespace"])
+def test_blank_session_id_is_rejected_on_read_write_and_clear(
+    make_store: StoreFactory, blank: str
+) -> None:
+    """Both implementations refuse a blank session id on every operation, `clear` included."""
     store = make_store()
     ident = _identity()
     with pytest.raises(ValidationFailed):
-        store.history_for("   ", identity=ident)
+        store.history_for(blank, identity=ident)
     with pytest.raises(ValidationFailed):
-        store.record_turn("", identity=ident, prompt="p", answer="a")
+        store.record_turn(blank, identity=ident, prompt="p", answer="a")
+    with pytest.raises(ValidationFailed):
+        store.clear(blank, identity=ident)
 
 
 # --- the store owns its (rep_id, tenant) scope ------------------------------------------------
@@ -457,12 +463,45 @@ def test_dynamodb_every_history_read_is_strongly_consistent(ddb_store: Store) ->
     assert all(call.get("ConsistentRead") is True for call in capturing.get_item_calls)
 
 
-def test_dynamodb_clear_of_an_expired_foreign_item_is_a_no_op(ddb_store: Store) -> None:
+def _expired_owned_item(ddb_store: Store) -> DynamoDbConversationHistory:
+    """Record one turn for `rep-owner` and move the clock past its expiry, before any TTL delete."""
     clock = _Clock()
     store = DynamoDbConversationHistory(ddb_store, clock=clock, ttl_seconds=60)
     store.record_turn(_SESSION, identity=_identity(rep_id="rep-owner"), prompt="p", answer="a")
     clock.now = _T0 + timedelta(seconds=61)
-    store.clear(_SESSION, identity=_identity(rep_id="rep-other"))
+    return store
+
+
+def test_dynamodb_an_expired_item_reads_empty_for_its_owner_and_a_stranger(
+    ddb_store: Store,
+) -> None:
+    store = _expired_owned_item(ddb_store)
+    assert store.history_for(_SESSION, identity=_identity(rep_id="rep-owner")) == ()
+    assert store.history_for(_SESSION, identity=_identity(rep_id="rep-other")) == ()
+
+
+def test_dynamodb_a_stranger_cannot_seize_an_expired_undeleted_item(ddb_store: Store) -> None:
+    """A different principal's write to an expired item is refused and leaves the item untouched."""
+    store = _expired_owned_item(ddb_store)
+    before = _raw_item(ddb_store)
+
+    with pytest.raises(ScopeDenied) as excinfo:
+        store.record_turn(_SESSION, identity=_identity(rep_id="rep-other"), prompt="x", answer="y")
+
+    assert excinfo.value.missing_scope == HISTORY_SCOPE
+    assert _raw_item(ddb_store) == before
+
+
+def test_dynamodb_the_owner_clears_an_expired_undeleted_item(ddb_store: Store) -> None:
+    store = _expired_owned_item(ddb_store)
+    store.clear(_SESSION, identity=_identity(rep_id="rep-owner"))
+    assert _raw_item(ddb_store) is None
+
+
+def test_dynamodb_a_stranger_cannot_clear_an_expired_undeleted_item(ddb_store: Store) -> None:
+    store = _expired_owned_item(ddb_store)
+    with pytest.raises(ScopeDenied):
+        store.clear(_SESSION, identity=_identity(rep_id="rep-other"))
     assert _raw_item(ddb_store) is not None
 
 

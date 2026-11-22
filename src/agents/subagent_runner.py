@@ -73,6 +73,8 @@ from agents.tier_attribution import (
     InvocationAttribution,
     TokenCounts,
     ToolCallAttribution,
+    is_final_usage,
+    provisional_attribution,
 )
 from agents.tool_actor import TOOL_TIER
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
@@ -142,11 +144,6 @@ class SubagentRunResult:
 def _tool_schema(tool: RegisteredTool) -> dict[str, object]:
     """Render a leaf tool in the ``{name, description, input_schema}`` shape the provider reads."""
     return {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
-
-
-def _is_usage(event: ProviderEvent) -> bool:
-    """Whether ``event`` is a usage report, complete or not; once one arrives the runner meters."""
-    return event.type == "usage"
 
 
 def _reports_both_counts(event: ProviderEvent) -> bool:
@@ -296,6 +293,8 @@ class _SubagentDriver:
             saw_incomplete_usage = False
             saw_error = False
             round_latency_ms: float | None = None
+            round_truncated = False
+            round_provisional: ProviderEvent | None = None
             awaiting_tools = False
             round_text = ""
             round_calls: list[dict[str, object]] = []
@@ -317,14 +316,19 @@ class _SubagentDriver:
                     self.budget,
                     tier=SUBAGENT_TIER,
                     role=self.spec.role,
-                    is_metered=_is_usage,
+                    is_metered=is_final_usage,
                 )
             try:
                 async for event in stream:
                     if event.type == "text_delta":
                         round_text += event.text or ""
                         continue
+                    if event.type == "usage" and event.provisional:
+                        round_provisional = event
+                        continue
                     if event.type == "usage":
+                        round_provisional = None
+                        round_truncated = round_truncated or event.output_truncated
                         total_input += event.input_tokens or 0
                         total_output += event.output_tokens or 0
                         total_cache_read += event.cache_read_tokens or 0
@@ -362,6 +366,8 @@ class _SubagentDriver:
                     tokens=TokenCounts(input_tokens=total_input, output_tokens=total_output),
                     cache=CacheCounts(read_tokens=total_cache_read, write_tokens=total_cache_write),
                     latency_ms=round_latency_ms,
+                    output_truncated=round_truncated,
+                    provisional=round_provisional,
                     unreported_cause=(
                         "deadline" if isinstance(stopped, DeadlineReachedError) else "turn_stopped"
                     ),
@@ -375,6 +381,8 @@ class _SubagentDriver:
                 tokens=TokenCounts(input_tokens=total_input, output_tokens=total_output),
                 cache=CacheCounts(read_tokens=total_cache_read, write_tokens=total_cache_write),
                 latency_ms=round_latency_ms,
+                output_truncated=round_truncated,
+                provisional=round_provisional,
                 unreported_cause=None,
             )
 
@@ -395,9 +403,11 @@ class _SubagentDriver:
         tokens: TokenCounts,
         cache: CacheCounts,
         latency_ms: float | None,
+        output_truncated: bool,
+        provisional: ProviderEvent | None,
         unreported_cause: str | None,
     ) -> None:
-        """Meter one subagent round exactly once: an invocation or a budget note, never both.
+        """Meter one subagent round: a metered invocation, or a budget note for an unmetered one.
 
         A round is metered only when it reported both token counts in every usage event. A usage
         event missing either count makes the round unmetered (``partial_usage``), so the turn's
@@ -405,7 +415,8 @@ class _SubagentDriver:
         ended on a provider ``error`` event without complete usage is noted ``provider_error``
         (that cause wins over ``partial_usage``). A round that reported no usage is noted with
         ``unreported_cause`` when given; ``None`` leaves it to :func:`agents.budget.until_deadline`.
-        Notes need a budget.
+        Notes need a budget. An unmetered round that reported ``provisional`` usage is also
+        attributed from it, so its input tokens are counted as a lower bound.
         """
         if saw_usage and not saw_incomplete_usage:
             self.invocations.append(
@@ -416,9 +427,19 @@ class _SubagentDriver:
                     tokens=tokens,
                     cache=cache,
                     latency_ms=latency_ms,
+                    output_truncated=output_truncated,
                 )
             )
             return
+        if provisional is not None:
+            self.invocations.append(
+                provisional_attribution(
+                    provisional,
+                    tier=SUBAGENT_TIER,
+                    role=self.spec.role,
+                    model_id=self.resolved.model.model_id,
+                )
+            )
         if saw_error:
             cause: str | None = "provider_error"
         elif saw_incomplete_usage:

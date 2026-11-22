@@ -194,6 +194,7 @@ if [[ "${1:-}" == "-m" ]]; then
   case "$module" in
     *integration_*) layer=5 ;;
     *three_tier_chat) layer=5 ;;
+    *chat_resume) layer=5 ;;
     *eval_sfn) layer=5 ;;
     *admin_authz) layer=5 ;;
     *user_settings_api) layer=5 ;;
@@ -595,7 +596,7 @@ def test_all_layers_pass_runs_every_module_exactly_once_in_order(
     helper_modules = {
         f"scripts.smoke.{name.removesuffix('.py')}" for name in _SMOKE_CLI_HELPER_MODULES
     }
-    invoked_modules = [m for m in all_invocations if m not in helper_modules]
+    invoked_modules = [m for m in all_invocations if m not in _NON_LAYER_MODULES]
     # Every module in the on-disk inventory runs exactly once.
     assert len(invoked_modules) == len(set(invoked_modules)) == len(_EXPECTED_REAL_SMOKE_MODULES), (
         f"expected {len(_EXPECTED_REAL_SMOKE_MODULES)} unique module invocations, got "
@@ -610,6 +611,11 @@ def test_all_layers_pass_runs_every_module_exactly_once_in_order(
     )
     first_check = min(i for i, m in enumerate(all_invocations) if m not in helper_modules)
     last_check = max(i for i, m in enumerate(all_invocations) if m not in helper_modules)
+    residue_positions = [i for i, m in enumerate(all_invocations) if m == _HISTORY_RESIDUE_MODULE]
+    assert residue_positions == [last_check], (
+        f"expected the history residue check exactly once, after every layer module: "
+        f"{all_invocations}"
+    )
     assert mint_positions[0] < first_check, (
         "the smoke token was minted after a check module already ran, so that module saw no token"
     )
@@ -650,8 +656,12 @@ def test_layer_flag_runs_only_that_layer(
     helper_modules = {
         f"scripts.smoke.{name.removesuffix('.py')}" for name in _SMOKE_CLI_HELPER_MODULES
     }
-    # The token helper runs for every layer selection, so it is excluded here.
-    invoked_modules = [m for m in re.findall(r"-m (\S+)", call_log_text) if m not in helper_modules]
+    # The token helper and the whole-run check run for every layer selection, so they are excluded.
+    invoked_modules = [
+        m
+        for m in re.findall(r"-m (\S+)", call_log_text)
+        if m not in helper_modules | _NON_LAYER_MODULES
+    ]
     # Exactly the script's own LAYER_5_MODULES ran.
     assert set(invoked_modules) == _declared_layer_arrays_from_script()[5]
 
@@ -662,8 +672,7 @@ def test_layer_flag_runs_only_that_layer(
 
 
 def _check_modules_in(call_log_text: str) -> list[str]:
-    helpers = {f"scripts.smoke.{name.removesuffix('.py')}" for name in _SMOKE_CLI_HELPER_MODULES}
-    return [m for m in re.findall(r"-m (\S+)", call_log_text) if m not in helpers]
+    return [m for m in re.findall(r"-m (\S+)", call_log_text) if m not in _NON_LAYER_MODULES]
 
 
 def _throwaway_token() -> str:
@@ -1770,6 +1779,17 @@ _SMOKE_LIBRARY_MODULES: Final[tuple[str, ...]] = (
 #: the run-tenant-bound `CRM_SMOKE_TOKEN` and removes its user.
 _SMOKE_CLI_HELPER_MODULES: Final[tuple[str, ...]] = ("smoke_token.py",)
 
+#: Runnable modules the orchestrator invokes once after every layer, outside the layer arrays.
+#: `history_cleanup.py` is the whole-run conversation-history residue check.
+_SMOKE_WHOLE_RUN_MODULES: Final[tuple[str, ...]] = ("history_cleanup.py",)
+_HISTORY_RESIDUE_MODULE: Final[str] = "scripts.smoke.history_cleanup"
+
+#: Every `-m` module the orchestrator invokes that is not a layer check module.
+_NON_LAYER_MODULES: Final[frozenset[str]] = frozenset(
+    f"scripts.smoke.{name.removesuffix('.py')}"
+    for name in (*_SMOKE_CLI_HELPER_MODULES, *_SMOKE_WHOLE_RUN_MODULES)
+)
+
 #: Every runnable smoke module that must exist on disk, pinned by name.
 _EXPECTED_REAL_SMOKE_MODULES: Final[frozenset[str]] = frozenset(
     {
@@ -1800,6 +1820,7 @@ _EXPECTED_REAL_SMOKE_MODULES: Final[frozenset[str]] = frozenset(
         "scripts.smoke.store_principal_deny",
         "scripts.smoke_text_delta_stream",
         "scripts.smoke.three_tier_chat",
+        "scripts.smoke.chat_resume",
         "scripts.smoke.lambda_actions",
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_bedrock_iam",
@@ -1816,12 +1837,16 @@ _EXPECTED_REAL_SMOKE_MODULES: Final[frozenset[str]] = frozenset(
 def _all_real_smoke_modules() -> list[str]:
     """Every real `scripts.smoke.<mod>` and `scripts.<mod>` (smoke_*) module name on disk.
 
-    Independent of `LAYER`; excludes :data:`_SMOKE_LIBRARY_MODULES` and
-    :data:`_SMOKE_CLI_HELPER_MODULES`.
+    Independent of `LAYER`; excludes :data:`_SMOKE_LIBRARY_MODULES`,
+    :data:`_SMOKE_CLI_HELPER_MODULES` and :data:`_SMOKE_WHOLE_RUN_MODULES`.
     """
     modules = []
     for py_path in sorted(SMOKE_DIR.glob("*.py")):
-        if py_path.name in _SMOKE_LIBRARY_MODULES or py_path.name in _SMOKE_CLI_HELPER_MODULES:
+        if py_path.name in (
+            *_SMOKE_LIBRARY_MODULES,
+            *_SMOKE_CLI_HELPER_MODULES,
+            *_SMOKE_WHOLE_RUN_MODULES,
+        ):
             continue
         modules.append(f"scripts.smoke.{py_path.stem}")
     for py_path in sorted((REPO_ROOT / "scripts").glob("smoke_*.py")):
@@ -1880,7 +1905,7 @@ def test_every_excluded_smoke_module_is_genuinely_a_library(library: str) -> Non
     assert "LAYER" not in assigned, f"{library} declares LAYER; it is a runnable smoke script"
 
 
-@pytest.mark.parametrize("helper", _SMOKE_CLI_HELPER_MODULES)
+@pytest.mark.parametrize("helper", (*_SMOKE_CLI_HELPER_MODULES, *_SMOKE_WHOLE_RUN_MODULES))
 def test_every_excluded_module_is_a_cli_helper_and_not_a_forgotten_layer(helper: str) -> None:
     """Each CLI helper defines `main`, declares no `LAYER`, and is invoked by name in
     `verify_deployment.sh` outside the `LAYER_N_MODULES` arrays.
@@ -1993,6 +2018,7 @@ def test_reproduces_the_real_modules_that_reject_an_unconditional_token(
         "scripts.smoke.dynamodb_principal_deny",
         "scripts.smoke.store_principal_deny",
         "scripts.smoke.three_tier_chat",
+        "scripts.smoke.chat_resume",
         "scripts.smoke_text_delta_stream",
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_inbound_auth",
@@ -2436,6 +2462,7 @@ def test_dry_run_preview_reproduces_the_pre_fix_regression_when_forced_unconditi
         "scripts.smoke.dynamodb_principal_deny",
         "scripts.smoke.store_principal_deny",
         "scripts.smoke.three_tier_chat",
+        "scripts.smoke.chat_resume",
         "scripts.smoke_text_delta_stream",
         "scripts.smoke.relay_iam",
         "scripts.smoke.runtime_inbound_auth",
@@ -2839,7 +2866,11 @@ def test_a_partial_run_is_marked_partial_and_lists_what_did_not_run(
     assert isinstance(document, dict) and document["partial"] is True
     assert document["selected_modules"] == ["scripts.smoke.iam_roles"]
     assert set(document["not_run_modules"]) == _all_declared_modules() - {"scripts.smoke.iam_roles"}
-    assert [entry["resource_class"] for entry in document["results"]] == ["iam_roles"]
+    # The whole-run residue row follows the selection; its module is not a layer module.
+    assert [entry["resource_class"] for entry in document["results"]] == [
+        "iam_roles",
+        "history_cleanup",
+    ]
 
     md_text = (tmp_path / "results" / "verification-inventory.partial.run.md").read_text(
         encoding="utf-8"
@@ -3020,3 +3051,204 @@ def test_a_non_numeric_token_age_limit_is_a_usage_error(
     result = _run(script_path, _billable(outputs_file), env, tmp_path)
     assert result.returncode == 2
     assert "whole number of seconds" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Whole-run conversation-history residue check, and one-line diagnostics from inline Python.
+# ---------------------------------------------------------------------------
+
+
+def _residue_positions(call_log_text: str) -> list[int]:
+    invocations = re.findall(r"-m (\S+)", call_log_text)
+    return [i for i, m in enumerate(invocations) if m == _HISTORY_RESIDUE_MODULE]
+
+
+def test_the_history_residue_check_runs_once_after_a_layer_that_failed(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    """A failing layer stops later layers, not the residue check, which still runs last."""
+    script_path, env = stubbed
+    env = {**env, "STUB_FAIL_MODULES": "iam_roles"}
+    result = _run(script_path, _billable(outputs_file), env, tmp_path)
+    assert result.returncode == 1
+    call_log_text = Path(env["CALL_LOG"]).read_text(encoding="utf-8")
+    invocations = [
+        m for m in re.findall(r"-m (\S+)", call_log_text) if m != "scripts.smoke.smoke_token"
+    ]
+    assert invocations[-1] == _HISTORY_RESIDUE_MODULE
+    assert len(_residue_positions(call_log_text)) == 1
+
+
+def test_a_failing_residue_check_fails_the_run_and_lands_in_the_inventory(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    script_path, env = stubbed
+    env = {**env, "STUB_FAIL_MODULES": "history_cleanup"}
+    result = _run(script_path, _billable(outputs_file), env, tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAILED: scripts.smoke.history_cleanup" in result.stderr
+    assert "ONE OR MORE LAYERS FAILED" in result.stderr
+    document = json.loads(
+        (tmp_path / "results" / "verification-inventory.run.json").read_text(encoding="utf-8")
+    )
+    classes = [entry["resource_class"] for entry in document]
+    assert classes.count("history_cleanup") == 1
+    assert classes[-1] == "history_cleanup"
+
+
+def test_a_passing_residue_check_keeps_a_passing_run_green(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    """Control for the failure test above: the same run with the check passing exits 0."""
+    script_path, env = stubbed
+    result = _run(script_path, _billable(outputs_file), env, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Whole-run check: smoke conversation-history residue" in result.stdout
+
+
+def test_a_partial_run_still_runs_the_residue_check_but_does_not_list_it_as_a_layer_module(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    script_path, env = stubbed
+    result = _run(script_path, _billable(outputs_file, "--only", "eval_sfn"), env, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert len(_residue_positions(Path(env["CALL_LOG"]).read_text(encoding="utf-8"))) == 1
+    assert "ran: scripts.smoke.eval_sfn\n" in result.stderr
+    document = json.loads(
+        (tmp_path / "results" / "verification-inventory.partial.run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert _HISTORY_RESIDUE_MODULE not in document["not_run_modules"]
+
+
+def test_the_dry_run_previews_the_residue_check_apart_from_the_layers(
+    stubbed: tuple[Path, dict[str, str]], outputs_file: Path, tmp_path: Path
+) -> None:
+    script_path, env = stubbed
+    result = _run(script_path, ["--dry-run", "--outputs", str(outputs_file)], env, tmp_path)
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if _HISTORY_RESIDUE_MODULE in line]
+    assert len(lines) == 1 and lines[0].startswith("would run after the layers: "), lines
+    assert f"-m {_HISTORY_RESIDUE_MODULE} " in lines[0]
+
+
+def _inline_snippet(anchor: str) -> str:
+    """The single-quoted `-c` program that follows `anchor` in verify_deployment.sh."""
+    text = SCRIPT_PATH.read_text(encoding="utf-8")
+    after = text.split(anchor, 1)[1]
+    body = after.split("-c '", 1)[1]
+    return body.split("\n' ", 1)[0]
+
+
+_SCRUBBED_AWS_ENV: Final[dict[str, str]] = {
+    "PATH": "/usr/bin:/bin",
+    "AWS_CONFIG_FILE": "/dev/null",
+    "AWS_SHARED_CREDENTIALS_FILE": "/dev/null",
+    "AWS_EC2_METADATA_DISABLED": "true",
+}
+
+
+@pytest.mark.parametrize(
+    ("anchor", "argv", "prefix"),
+    [
+        ("provision_tenant() {", ["p", "us-east-1", "{outputs}"], "provision_tenant: "),
+        (
+            "teardown_tenant() {",
+            ["p", "us-east-1", "smoke-x", "eval-smoke-x", "{outputs}"],
+            "teardown_tenant: ",
+        ),
+        ('TABLE_PREFIX="$(', ["{outputs}"], "table prefix: "),
+    ],
+    ids=["provision", "teardown", "table-prefix"],
+)
+def test_an_inline_python_failure_prints_one_line_and_no_traceback(
+    anchor: str, argv: list[str], prefix: str, tmp_path: Path
+) -> None:
+    python_bin = REPO_ROOT / ".venv" / "bin" / "python3"
+    if not python_bin.exists():
+        pytest.skip(".venv not provisioned in this environment")
+    outputs = str(tmp_path / "does-not-exist.json")
+    result = proc_run.run(
+        [
+            str(python_bin),
+            "-c",
+            _inline_snippet(anchor),
+            *(a.format(outputs=outputs) for a in argv),
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        env={**_SCRUBBED_AWS_ENV, "HOME": str(tmp_path)},
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Traceback" not in result.stderr
+    lines = result.stderr.strip().splitlines()
+    assert len(lines) == 1 and lines[0].startswith(prefix), result.stderr
+
+
+def test_a_failing_smoke_token_mint_prints_one_line_and_no_traceback(tmp_path: Path) -> None:
+    python_bin = REPO_ROOT / ".venv" / "bin" / "python3"
+    if not python_bin.exists():
+        pytest.skip(".venv not provisioned in this environment")
+    result = proc_run.run(
+        [
+            str(python_bin),
+            "-m",
+            "scripts.smoke.smoke_token",
+            "--profile",
+            "p",
+            "--region",
+            "us-east-1",
+            "--outputs",
+            str(tmp_path / "does-not-exist.json"),
+            "mint",
+            "--run-id",
+            "smoke-x",
+            "--tenant",
+            "eval-smoke-x",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        env={**_SCRUBBED_AWS_ENV, "HOME": str(tmp_path)},
+        check=False,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+    lines = result.stderr.strip().splitlines()
+    assert len(lines) == 1 and lines[0].startswith("smoke_token mint: "), result.stderr
+
+
+def test_the_residue_module_accepts_the_orchestrators_argument_vector(tmp_path: Path) -> None:
+    """Real CLI: the vector run_module builds reaches the outputs stage and emits layer-0 JSON."""
+    python_bin = REPO_ROOT / ".venv" / "bin" / "python3"
+    if not python_bin.exists():
+        pytest.skip(".venv not provisioned in this environment")
+    result = proc_run.run(
+        [
+            str(python_bin),
+            "-m",
+            _HISTORY_RESIDUE_MODULE,
+            "--profile",
+            "p",
+            "--region",
+            "us-east-1",
+            "--outputs",
+            str(tmp_path / "does-not-exist.json"),
+            "--tenant",
+            "eval-smoke-x",
+            "--json",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        env={**_SCRUBBED_AWS_ENV, "HOME": str(tmp_path)},
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    document = json.loads(result.stdout)
+    assert (document["layer"], document["resource_class"]) == (0, "smoke_history_residue")
+    assert [c["check"] for c in document["checks"]][0] == "load_outputs"

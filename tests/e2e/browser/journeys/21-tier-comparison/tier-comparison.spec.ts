@@ -64,6 +64,8 @@ const ROW_LABELS: readonly string[] = [
   "Budget-exhausted tasks",
   "Truncated tool calls",
   "Truncated tasks",
+  "Output-truncated model calls",
+  "Output-truncated tasks",
 ];
 
 /** The row counting calls priced at long-context rates. */

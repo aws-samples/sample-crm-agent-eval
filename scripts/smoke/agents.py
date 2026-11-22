@@ -19,7 +19,6 @@ assistant's prose is never read.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import sys
 import uuid
@@ -34,14 +33,12 @@ from scripts.smoke.demo_tenant_guard import (
     writes_only_under_smoke_tenant_check,
 )
 from scripts.smoke.harness import DEFER, CheckResult, SmokeContext, exception_detail, run_main
-from scripts.smoke.three_tier_chat import (
-    HISTORY_ITEMS_DELETED_CHECK,
+from scripts.smoke.history_cleanup import (
     HistoryItemsFactory,
-    ModelTurnBudget,
-    _LiveHistoryItems,
-    budget_refused,
-    delete_history_items,
+    LiveHistoryItems,
+    delete_session_history,
 )
+from scripts.smoke.three_tier_chat import ModelTurnBudget, budget_refused
 from scripts.smoke_agent_stream import (
     LiveStreamPrincipalProvisioner,
     cloudfront_source,
@@ -52,7 +49,6 @@ from agents.events import EVENT_KINDS
 from agents.registry import tool_registry_for
 from agents.subagents import ALL_SUBAGENT_SPECS
 from agents.supervisor import DIRECT_TOOL_NAMES, SUPERVISOR_ROLE
-from crm.store.keys import history_key
 from crm.toolspec.definitions import (
     BY_NAME,
     TABLES,
@@ -575,7 +571,7 @@ def checks(
         LiveStreamPrincipalProvisioner
     ),
     runner_factory: Callable[[SmokeContext, str, str], TurnRunner] = _cloudfront_turn_runner,
-    history_items: HistoryItemsFactory = _LiveHistoryItems,
+    history_items: HistoryItemsFactory = LiveHistoryItems,
 ) -> Iterable[CheckResult]:
     """Provision a disposable principal, run one counted turn, prove `demo` untouched, clean up.
 
@@ -648,33 +644,15 @@ def checks(
                 )
             )
             results.extend(
-                _delete_turn_history(ctx, history_items, provisioner.tenant(), sent_sessions)
+                delete_session_history(
+                    ctx,
+                    history_items,
+                    [(provisioner.tenant(), sent_sessions)],
+                    resource=RESOURCE_CLASS,
+                )
             )
         results.extend(provisioner.cleanup())
     return results
-
-
-def _delete_turn_history(
-    ctx: SmokeContext,
-    items_factory: HistoryItemsFactory,
-    tenant: str,
-    sessions: Sequence[str],
-) -> Iterable[CheckResult]:
-    """Delete the history item of every session a turn was sent with, as this module's row."""
-    if not sessions:
-        return
-    try:
-        items = items_factory(ctx)
-    except Exception as exc:  # noqa: BLE001 - surfaced as a failing check, never swallowed
-        yield CheckResult(
-            resource=RESOURCE_CLASS,
-            check=HISTORY_ITEMS_DELETED_CHECK,
-            status="fail",
-            detail=f"could not address the history items: {exception_detail(exc)}",
-        )
-        return
-    deleted = delete_history_items(items, [history_key(tenant, session) for session in sessions])
-    yield dataclasses.replace(deleted, resource=RESOURCE_CLASS)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

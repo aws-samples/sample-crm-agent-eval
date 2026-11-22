@@ -605,7 +605,12 @@ def test_a_kms_encrypt_failure_fails_the_search_rather_than_dropping_the_cursor(
     class _FullPageStore:
         def query_gsi(self, *_: Any, **kwargs: Any) -> Any:
             rows = [
-                {"opportunity_id": f"opp-{n}", "tenant": _TENANT, "account_id": "acct-1"}
+                {
+                    "opportunity_id": f"opp-{n}",
+                    "tenant": _TENANT,
+                    "account_id": "acct-1",
+                    "name_lower": f"opp-{n}",
+                }
                 for n in range(int(kwargs["limit"]))
             ]
             return rows, {"opportunity_id": {"S": "opp-last"}, "tenant": {"S": _TENANT}}

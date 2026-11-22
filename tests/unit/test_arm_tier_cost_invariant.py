@@ -142,6 +142,7 @@ def _published_arm(store: Store) -> dict[str, Any]:
         price_table_version="1.3.0",
         cost_withheld=False,
         timestamp="2026-01-01T00:00:00+00:00",
+        dirty_tree=False,
     )
     matrix_result = build_matrix_result([arm.arm_result])
     (published,) = json.loads(render_json(matrix_result))["arms"]

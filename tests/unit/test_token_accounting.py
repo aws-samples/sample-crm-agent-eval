@@ -50,7 +50,7 @@ _CACHE_WRITE_RATE: Final[float] = 3.75
 _CACHE_READ_RATE: Final[float] = 0.3
 
 _MODEL_ID: Final[str] = "anthropic.claude-opus-5-5"
-_OPENAI_MODEL_ID: Final[str] = "openai.gpt-6-astra"
+_OPENAI_MODEL_ID: Final[str] = "openai.gpt-6.2-astra"
 _PROFILE: Final[str] = f"global.{_MODEL_ID}"
 _OPENAI_PROFILE: Final[str] = f"global.{_OPENAI_MODEL_ID}"
 _USAGE: Final[TokenUsage] = TokenUsage(

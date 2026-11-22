@@ -1397,3 +1397,37 @@ def test_a_tier_on_a_completed_task_score_is_refused() -> None:
 def test_a_task_score_with_an_invalid_repeat_index_is_refused(repeat_index: object) -> None:
     with pytest.raises(ValueError, match="repeat_index"):
         _bare_score(repeat_index=repeat_index)
+
+
+@pytest.mark.parametrize("title", ["VP of Engineering", "Director"])
+def test_an_output_truncated_turn_is_scored_exactly_like_an_untruncated_one(
+    store: Store, title: str
+) -> None:
+    """Output truncation is recorded on the outcome but changes no assertion or correctness."""
+    _seed_contact(store, title=title)
+    task = _machine_task(
+        assertions={
+            "expected_field_changes": [
+                {
+                    "table": "contacts",
+                    "id": "cont-1",
+                    "field": "title",
+                    "expected": "VP of Engineering",
+                }
+            ],
+            "must_not_change": [],
+            "max_proposal_count": 0,
+            "allowed_proposal_fields": [],
+            "expected_proposal": None,
+            "expected_denial": None,
+            "forbidden_outcomes": [],
+        }
+    )
+    calls = (ToolCall(tool_name="update_contact", target_id="cont-1"),)
+    plain = score_task(store, task=task, outcome=TurnOutcome(tenant=_TENANT, tool_calls=calls))
+    truncated = score_task(
+        store,
+        task=task,
+        outcome=TurnOutcome(tenant=_TENANT, tool_calls=calls, output_truncated=True),
+    )
+    assert truncated == plain

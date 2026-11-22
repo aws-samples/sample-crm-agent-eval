@@ -51,7 +51,7 @@ ANTHROPIC_LOW = _settings_item(
     "rep-a-low", _tuning(family="anthropic", model="anthropic.claude-opus-5-5", effort="low")
 )
 OPENAI_LOW = _settings_item(
-    "rep-o-low", _tuning(family="openai", model="openai.gpt-6-astra", effort="low")
+    "rep-o-low", _tuning(family="openai", model="openai.gpt-6.2-astra", effort="low")
 )
 ALREADY_MEDIUM = _settings_item(
     "rep-medium", _tuning(family="anthropic", model="anthropic.claude-opus-5-5", effort="medium")
@@ -375,7 +375,7 @@ _SHARED_REP = "rep-shared"
 
 
 def _tenant_settings_item(tenant: str, tool_effort: str) -> dict[str, object]:
-    tuning = _tuning(family="openai", model="openai.gpt-6-astra", effort="low")
+    tuning = _tuning(family="openai", model="openai.gpt-6.2-astra", effort="low")
     tiers = tuning["tiers"]
     assert isinstance(tiers, dict)
     tiers["tool"] = {**tiers["tool"], "effort": tool_effort}

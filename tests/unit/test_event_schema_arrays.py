@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Tests for the typed-array properties of the SSE frame schema (schema 3.0.0)."""
+"""Tests for the typed-array properties of the SSE frame schema (schema 3.1.0)."""
 
 from __future__ import annotations
 
@@ -61,9 +61,9 @@ _RESOLVED: ResolvedTierInfo = {
 }
 
 
-def test_schema_version_is_3_0_0() -> None:
-    """The frame contract is at 3.0.0."""
-    assert SCHEMA_VERSION == "3.0.0"
+def test_schema_version_is_3_1_0() -> None:
+    """The frame contract is at 3.1.0."""
+    assert SCHEMA_VERSION == "3.1.0"
 
 
 @pytest.mark.parametrize("name", sorted(_ARRAY_PROPERTIES))

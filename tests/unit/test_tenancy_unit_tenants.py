@@ -21,7 +21,9 @@ from crm.store.store import Store
 from eval.task_ids import LOCAL_ID_KINDS, compose_ids_in_text
 from eval.tenancy import (
     CANARY_TENANT,
+    CanaryTenantNotEmptyError,
     TenantTeardownError,
+    UnitTenantTeardownError,
     find_orphaned_runs,
     reap_tenant,
     record_run_started,
@@ -302,6 +304,75 @@ def test_teardown_unit_tenants_attempts_every_tenant_then_raises_the_first_failu
     assert raised.value.tenant == first
     assert attempted == [first, second]
     assert _count(store, second) == 0
+
+
+def test_teardown_unit_tenants_reports_every_deletion_failure_in_one_error(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two failing tenants of three raise one error naming both; the healthy one is torn down."""
+    first, second, third = unit_tenants_for_run(_RUN_ID, arm_count=1, repeats=3)
+    _put_opportunity(store, tenant=second, opportunity_id="opp-second")
+    real_delete = store.delete_tenant
+
+    def delete(tenant: str) -> dict[str, int]:
+        if tenant in {first, third}:
+            raise RuntimeError(f"simulated failure for {tenant}")
+        return real_delete(tenant)
+
+    monkeypatch.setattr(store, "delete_tenant", delete)
+    with pytest.raises(UnitTenantTeardownError) as raised:
+        teardown_unit_tenants(store, tenants=[first, second, third])
+
+    assert isinstance(raised.value, TenantTeardownError)
+    assert [failure.tenant for failure in raised.value.failures] == [first, third]
+    assert raised.value.tenant == first
+    message = str(raised.value)
+    assert first in message and third in message and second not in message
+    assert "teardown of 2 unit tenants failed" in message
+    assert _count(store, second) == 0
+
+
+def test_unit_tenant_teardown_error_refuses_to_aggregate_fewer_than_two_failures() -> None:
+    single = TenantTeardownError("eval-x", deleted=None, cause=RuntimeError("boom"))
+    with pytest.raises(ValueError, match="at least two"):
+        UnitTenantTeardownError([single])
+
+
+def test_a_canary_breach_beside_a_deletion_failure_keeps_its_type_and_notes_the_other(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canary breach is never folded into a plain deletion failure; the other is still named."""
+    first, second = unit_tenants_for_run(_RUN_ID, arm_count=1, repeats=2)
+    _put_opportunity(store, tenant=CANARY_TENANT, opportunity_id="opp-canary")
+
+    def delete(tenant: str) -> dict[str, int]:
+        if tenant == first:
+            raise RuntimeError("simulated failure")
+        return {}
+
+    monkeypatch.setattr(store, "delete_tenant", delete)
+    with pytest.raises(CanaryTenantNotEmptyError) as raised:
+        teardown_unit_tenants(store, tenants=[first, second])
+
+    notes = getattr(raised.value, "__notes__", [])
+    assert len(notes) == 1
+    assert "TenantTeardownError" in notes[0] and first in notes[0]
+
+
+def test_a_protected_tenant_beside_a_deletion_failure_is_refused_and_notes_the_other(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (unit,) = unit_tenants_for_run(_RUN_ID, arm_count=1, repeats=1)
+
+    def delete(_tenant: str) -> dict[str, int]:
+        raise RuntimeError("simulated failure")
+
+    monkeypatch.setattr(store, "delete_tenant", delete)
+    with pytest.raises(ValueError, match="refusing") as raised:
+        teardown_unit_tenants(store, tenants=[unit, DEMO_TENANT])
+
+    notes = getattr(raised.value, "__notes__", [])
+    assert len(notes) == 1 and unit in notes[0]
 
 
 def test_reap_tenant_removes_the_recorded_unit_tenants_and_marks_the_row_terminal(

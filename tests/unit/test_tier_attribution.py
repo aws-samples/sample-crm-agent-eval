@@ -19,7 +19,10 @@ from agents.tier_attribution import (
     OutcomeKind,
     TokenCounts,
     ToolCallAttribution,
+    is_final_usage,
+    provisional_attribution,
 )
+from providers.base import ProviderEvent
 from providers.capabilities import Tier
 
 
@@ -188,3 +191,47 @@ class TestToolCallAttribution:
 def test_outcome_kind_matches_supervisor_taxonomy() -> None:
     """The local OutcomeKind is exactly the supervisor's four-way delegation taxonomy."""
     assert set(get_args(OutcomeKind)) == set(get_args(SubagentOutcomeKind))
+
+
+class TestProvisionalUsageHelpers:
+    def test_output_truncated_defaults_to_false(self) -> None:
+        record = InvocationAttribution(
+            tier="tool",
+            role="research",
+            model_id="m",
+            tokens=TokenCounts(input_tokens=1, output_tokens=1),
+            cache=CacheCounts(),
+        )
+        assert record.output_truncated is False
+
+    def test_only_a_non_provisional_usage_event_is_final(self) -> None:
+        assert is_final_usage(ProviderEvent(type="usage", input_tokens=1, output_tokens=1))
+        assert not is_final_usage(
+            ProviderEvent(type="usage", input_tokens=1, output_tokens=0, provisional=True)
+        )
+        assert not is_final_usage(ProviderEvent(type="completed"))
+
+    def test_provisional_attribution_keeps_input_and_cache_with_zero_output(self) -> None:
+        event = ProviderEvent(
+            type="usage",
+            input_tokens=120,
+            output_tokens=0,
+            cache_read_tokens=30,
+            cache_write_tokens=5,
+            provisional=True,
+        )
+        record = provisional_attribution(event, tier="subagent", role="research", model_id="m")
+        assert record.tokens == TokenCounts(input_tokens=120, output_tokens=0)
+        assert record.cache == CacheCounts(read_tokens=30, write_tokens=5)
+        assert (record.tier, record.role, record.model_id) == ("subagent", "research", "m")
+        assert record.latency_ms is None
+        assert record.output_truncated is False
+
+    def test_provisional_attribution_refuses_a_final_usage_event(self) -> None:
+        with pytest.raises(ValueError, match="provisional"):
+            provisional_attribution(
+                ProviderEvent(type="usage", input_tokens=1, output_tokens=1),
+                tier="tool",
+                role="research",
+                model_id="m",
+            )

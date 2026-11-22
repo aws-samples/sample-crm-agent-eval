@@ -10,7 +10,9 @@
 # differs from the sweep default the estimate carries a caveat (`eval.runs.Estimate.effort_caveat`).
 # `source` names the sweep's matrix.json as recorded; that file is not kept in the repository.
 # Each figure is the tier's recorded input or output tokens summed over the arm's roles, divided by
-# the arm's scored task count. Every row was measured on its current tier model.
+# the arm's scored task count. Every row was measured on its current tier model except the openai
+# supervisor row, measured on GPT-6.1 Sol and carried over unchanged to openai.gpt-6.2-sol
+# until a live sweep measures it.
 
 schema_version: 1
 
@@ -24,6 +26,6 @@ per_task:
     subagent: { model_id: anthropic.claude-sonnet-5-5, input_tokens: 4651, output_tokens: 439 }
     tool: { model_id: anthropic.claude-haiku-5-5, input_tokens: 1287, output_tokens: 255 }
   openai:
-    supervisor: { model_id: openai.gpt-6.1-sol, input_tokens: 5769, output_tokens: 195 }
+    supervisor: { model_id: openai.gpt-6.2-sol, input_tokens: 5769, output_tokens: 195 }
     subagent: { model_id: openai.gpt-6.1-terra, input_tokens: 14668, output_tokens: 238 }
     tool: { model_id: openai.gpt-6-luna, input_tokens: 568, output_tokens: 165 }

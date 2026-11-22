@@ -41,7 +41,10 @@ from providers.capabilities import CapabilityMatrix, Family, Tier
 from providers.tier_tuning import TurnTuning
 
 #: Version of the :func:`serialise_turn` wire shape.
-SERIALISED_TURN_SCHEMA: Final[int] = 3
+SERIALISED_TURN_SCHEMA: Final[int] = 4
+
+#: The previous wire shape, refused by name because it carries no ``output_truncated``.
+_SCHEMA_WITHOUT_OUTPUT_TRUNCATION: Final[int] = 3
 
 
 def tool_output_reports_truncation(tool_output: Mapping[str, object]) -> bool:
@@ -161,6 +164,7 @@ class ObservingDispatch:
         budget_exhausted: bool,
         budget_exhausted_tier: Tier | None = None,
         tool_calls: Sequence[ToolCallAttribution] = (),
+        output_truncated: bool = False,
     ) -> TurnOutcome:
         """Build the turn's :class:`eval.scoring.TurnOutcome` from everything observed so far.
 
@@ -201,6 +205,7 @@ class ObservingDispatch:
             budget_exhausted_tier=budget_exhausted_tier,
             truncated=self._truncated,
             truncation_disclosed=self._truncation_disclosed,
+            output_truncated=output_truncated,
             observed_outcomes=frozenset(self._observed_outcomes),
         )
 
@@ -367,6 +372,7 @@ async def observe_turn(
             budget_exhausted=budget_exhausted,
             budget_exhausted_tier=records.budget_exhausted_tier,
             tool_calls=records.tool_calls,
+            output_truncated=any(invocation.output_truncated for invocation in records.invocations),
         ),
         tool_arguments=observing.tool_arguments,
         invocations=tuple(records.invocations),
@@ -418,6 +424,7 @@ def serialise_turn(turn: ObservedTurn) -> dict[str, Any]:
             "budget_exhausted_tier": outcome.budget_exhausted_tier,
             "truncated": outcome.truncated,
             "truncation_disclosed": outcome.truncation_disclosed,
+            "output_truncated": outcome.output_truncated,
             "observed_outcomes": sorted(outcome.observed_outcomes),
         },
         "tool_arguments": [
@@ -438,6 +445,7 @@ def serialise_turn(turn: ObservedTurn) -> dict[str, Any]:
                         "write_tokens": i.cache.write_tokens,
                     },
                     "latency_ms": i.latency_ms,
+                    "output_truncated": i.output_truncated,
                 }
                 for i in turn.invocations
             ],
@@ -523,7 +531,11 @@ class _Reader:
 
 
 def _invocation(raw: object, where: str) -> InvocationAttribution:
-    reader = _Reader(raw, where, ("tier", "role", "model_id", "tokens", "cache", "latency_ms"))
+    reader = _Reader(
+        raw,
+        where,
+        ("tier", "role", "model_id", "tokens", "cache", "latency_ms", "output_truncated"),
+    )
     tokens = _Reader(reader.value["tokens"], f"{where}.tokens", ("input_tokens", "output_tokens"))
     cache = _Reader(reader.value["cache"], f"{where}.cache", ("read_tokens", "write_tokens"))
     return InvocationAttribution(
@@ -537,6 +549,7 @@ def _invocation(raw: object, where: str) -> InvocationAttribution:
             read_tokens=cache.count("read_tokens"), write_tokens=cache.count("write_tokens")
         ),
         latency_ms=reader.optional_number("latency_ms"),
+        output_truncated=reader.boolean("output_truncated"),
     )
 
 
@@ -565,6 +578,7 @@ def _outcome(raw: object) -> TurnOutcome:
             "budget_exhausted_tier",
             "truncated",
             "truncation_disclosed",
+            "output_truncated",
             "observed_outcomes",
         ),
     )
@@ -604,6 +618,7 @@ def _outcome(raw: object) -> TurnOutcome:
         budget_exhausted_tier=cast(Tier | None, exhausted_tier),
         truncated=reader.boolean("truncated"),
         truncation_disclosed=reader.boolean("truncation_disclosed"),
+        output_truncated=reader.boolean("output_truncated"),
         observed_outcomes=frozenset(cast("list[str]", labels)),
     )
 
@@ -632,8 +647,10 @@ def deserialise_turn(payload: Mapping[str, Any]) -> ObservedTurn:
     Raises:
         ValueError: ``payload`` is not exactly the :data:`SERIALISED_TURN_SCHEMA` shape: a key is
             missing or extra, a value has the wrong type, ``outcome.budget_exhausted_tier`` names
-            no tier or is not set exactly when ``outcome.budget_exhausted`` is true, or an
-            attribution fails its own validation.
+            no tier or is not set exactly when ``outcome.budget_exhausted`` is true,
+            ``outcome.output_truncated`` disagrees with the invocations' ``output_truncated``, the
+            schema is 3 (which carries no ``output_truncated``), or an attribution fails its own
+            validation.
     """
     body = dict(payload) if isinstance(payload, Mapping) else payload
     usage_lower_bound = False
@@ -664,6 +681,11 @@ def deserialise_turn(payload: Mapping[str, Any]) -> ObservedTurn:
         ),
     )
     schema = top.value["schema"]
+    if schema == _SCHEMA_WITHOUT_OUTPUT_TRUNCATION and not isinstance(schema, bool):
+        raise ValueError(
+            f"turn.schema must be {SERIALISED_TURN_SCHEMA}, got {schema!r}: schema "
+            f"{_SCHEMA_WITHOUT_OUTPUT_TRUNCATION} carries no output_truncated"
+        )
     if isinstance(schema, bool) or schema != SERIALISED_TURN_SCHEMA:
         raise ValueError(f"turn.schema must be {SERIALISED_TURN_SCHEMA}, got {schema!r}")
     arguments = []
@@ -687,13 +709,20 @@ def deserialise_turn(payload: Mapping[str, Any]) -> ObservedTurn:
                 detail=entry.string("detail"),
             )
         )
+    outcome = _outcome(top.value["outcome"])
+    invocations = tuple(
+        _invocation(item, f"turn.records.invocations[{index}]")
+        for index, item in enumerate(records.array("invocations"))
+    )
+    if outcome.output_truncated != any(i.output_truncated for i in invocations):
+        raise ValueError(
+            "turn.outcome.output_truncated must be true exactly when some "
+            "turn.records.invocations entry is output_truncated"
+        )
     return ObservedTurn(
-        outcome=_outcome(top.value["outcome"]),
+        outcome=outcome,
         tool_arguments=tuple(arguments),
-        invocations=tuple(
-            _invocation(item, f"turn.records.invocations[{index}]")
-            for index, item in enumerate(records.array("invocations"))
-        ),
+        invocations=invocations,
         tool_calls=tuple(
             _tool_call_attribution(item, f"turn.records.tool_calls[{index}]")
             for index, item in enumerate(records.array("tool_calls"))

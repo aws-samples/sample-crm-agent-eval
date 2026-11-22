@@ -9,6 +9,7 @@ replaced by an in-process one. No model call and no AWS call.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import io
 import json
@@ -57,14 +58,18 @@ from eval.runs import (
 from eval.sfn_handlers import (
     BUNDLE_MISMATCH_ATTRIBUTE,
     FINALIZE_RESULT_KEYS,
+    PROMPT_BUNDLE_MISMATCH_DETAIL,
     START_RESULT_KEYS,
+    STEP_ERROR_DETAIL_LIMIT,
     STEP_EVENT_KEYS,
     SWEEP_TASK_RESULT_KEYS,
     TASK_REF_KEYS,
     NotRunOwner,
+    StepError,
     SweepControlConfig,
     SweepTaskConfig,
     classify_runtime_failure,
+    classify_step_error,
     session_id_for,
     sweep_control_handler,
     sweep_task_handler,
@@ -73,7 +78,11 @@ from eval.sfn_handlers import (
     turn_from_row,
 )
 from eval.tenancy import allocate_run_id, tenant_for_run, unit_tenant, unit_tenants_for_run
-from eval.turn_observation import PROMPT_BUNDLE_SHA256_KEY, serialise_turn
+from eval.turn_observation import (
+    PROMPT_BUNDLE_SHA256_KEY,
+    SERIALISED_TURN_SCHEMA,
+    serialise_turn,
+)
 from providers.tier_tuning import WIRE_SCHEMA_VERSION
 
 REGION = "us-east-1"
@@ -582,6 +591,8 @@ def test_a_turn_under_another_prompt_bundle_is_refused_and_stops_later_turns(
     assert row is not None and row["item_status"] == "failed"
     assert row[BUNDLE_MISMATCH_ATTRIBUTE] is True
     assert row[PROMPT_BUNDLE_SHA256_KEY] == "b" * 64
+    assert (row["error_code"], row["error_detail"]) == ("conflict", PROMPT_BUNDLE_MISMATCH_DETAIL)
+    assert "error" not in row
 
     sent = len(sweep.runtime.requests)
     with pytest.raises(Conflict, match="more than one prompt bundle"):
@@ -779,14 +790,16 @@ def test_a_full_shape_schema_1_body_fails_on_the_named_schema_mismatch(sweep: Sw
         response = sweep.runtime.client.post("/invocations", json=request)
         assert response.status_code == 200
         body = response.json()
-        assert body["schema"] == 3
+        assert body["schema"] == SERIALISED_TURN_SCHEMA
         body["schema"] = 1
         return {"response": io.BytesIO(json.dumps(body).encode()), "statusCode": 200}
 
     sweep.runtime.fail_with = _schema_1_body
     with pytest.raises(CrmError, match="did not complete") as raised:
         sweep.task(0, refs[0]["task_id"])
-    assert raised.value.detail == "malformed turn: turn.schema must be 3, got 1"
+    assert raised.value.detail == (
+        f"malformed turn: turn.schema must be {SERIALISED_TURN_SCHEMA}, got 1"
+    )
 
 
 def test_classification_by_status_when_no_code_is_named() -> None:
@@ -802,7 +815,7 @@ def test_classification_by_status_when_no_code_is_named() -> None:
 def test_a_failed_item_is_counted_and_fails_the_run_with_a_per_family_summary(
     sweep: Sweep,
 ) -> None:
-    """Any failed item makes the run `failed`; the summary keeps the message, not the trace."""
+    """Any failed item makes the run `failed`; the item stores a code, never the message."""
 
     seen: list[Mapping[str, Any]] = []
 
@@ -818,7 +831,10 @@ def test_a_failed_item_is_counted_and_fails_the_run_with_a_per_family_summary(
     assert f"{DEFAULT_ARM_SPECS[0].family}=1" in record.failure_summary
     assert "stackTrace" not in record.failure_summary
     first = sweep.result_row(0, seen[0]["task_id"])
-    assert first is not None and str(first["error"]).startswith("TurnTimeout:")
+    assert first is not None
+    assert (first["error_code"], first["error_detail"]) == ("turn_timeout", "TurnTimeout")
+    assert "error" not in first
+    assert record.error_code == "tasks_failed" and record.error_detail is None
     assert record.matrix_report is not None, "the done items are still aggregated"
     assert read_lock(sweep.store) is None
 
@@ -900,9 +916,9 @@ def test_a_step_error_fails_the_run(sweep: Sweep) -> None:
     )
     record = require_run(sweep.store, sweep.run_id)
     assert final["status"] == "failed"
-    assert record.failure_summary == (
-        "step failed: States.TaskFailed: seed failed; 4 task(s) never recorded"
-    )
+    assert record.failure_summary == "step failed: step_lambda_error; 4 task(s) never recorded"
+    assert (record.error_code, record.error_detail) == ("step_lambda_error", "States.TaskFailed")
+    assert "seed failed" not in json.dumps(record.to_payload())
     assert record.teardown_status == "ok"
     assert read_lock(sweep.store) is None
 
@@ -1009,7 +1025,8 @@ def test_an_unreadable_result_row_at_finalize_fails_the_run_and_frees_the_lock(
     record = require_run(sweep.store, sweep.run_id)
     assert record.status == "failed"
     assert record.failure_summary is not None
-    assert record.failure_summary.startswith("finalize could not summarise:")
+    assert record.failure_summary == "finalize could not summarise: ValidationFailed"
+    assert (record.error_code, record.error_detail) == ("finalize_failed", "ValidationFailed")
     assert read_lock(sweep.store) is None
 
 
@@ -1311,12 +1328,107 @@ def test_teardown_never_touches_demo_or_canary(sweep: Sweep) -> None:
     assert sweep.store.get_item("accounts", {"account_id": "acct-canary-0001"}) is not None
 
 
-def test_item_failed_keeps_only_the_error_message() -> None:
-    cause = json.dumps({"errorMessage": "boom", "errorType": "X", "stackTrace": ["frame"]})
-    assert sfn_handlers._error_text({"Error": "X", "Cause": cause}) == "X: boom"
-    assert sfn_handlers._error_text({"Error": "States.Timeout", "Cause": ""}) == "States.Timeout"
-    assert sfn_handlers._error_text(None) is None
-    assert len(sfn_handlers._error_text({"Error": "E", "Cause": "c" * 5000}) or "") == 1024
+def _lambda_error(error: str, message: str, error_type: str | None = None) -> dict[str, str]:
+    cause = {"errorMessage": message, "errorType": error_type or error, "stackTrace": ["frame"]}
+    return {"Error": error, "Cause": json.dumps(cause)}
+
+
+@pytest.mark.parametrize(
+    ("raw", "code", "detail"),
+    [
+        (_lambda_error("TurnTimeout", "boom"), "turn_timeout", "TurnTimeout"),
+        (_lambda_error("ValidationFailed", "boom"), "validation_failed", "ValidationFailed"),
+        (_lambda_error("NotRunOwner", "boom"), "conflict", "NotRunOwner"),
+        (_lambda_error("ServiceBusy", "boom"), "internal_error", "ServiceBusy"),
+        (
+            _lambda_error("Lambda.Unknown", "boom", "ProviderUnavailable"),
+            "provider_unavailable",
+            "Lambda.Unknown",
+        ),
+        (
+            {"Error": "provider_unavailable", "Cause": ""},
+            "provider_unavailable",
+            "provider_unavailable",
+        ),
+        ({"Error": "States.Timeout", "Cause": ""}, "step_timeout", "States.Timeout"),
+        ({"Error": "States.HeartbeatTimeout"}, "step_timeout", "States.HeartbeatTimeout"),
+        ({"Error": "Sandbox.Timedout", "Cause": "x"}, "step_timeout", "Sandbox.Timedout"),
+        ({"Error": "States.TaskFailed", "Cause": "x"}, "step_lambda_error", "States.TaskFailed"),
+        ({"Error": "Lambda.ServiceException"}, "step_lambda_error", "Lambda.ServiceException"),
+        (_lambda_error("KeyError", "boom"), "unclassified", "KeyError"),
+        ({"Error": "X", "Cause": "not json"}, "unclassified", "X"),
+        ({"Cause": "x"}, "unclassified", None),
+        ("a string", "unclassified", None),
+        (["Error"], "unclassified", None),
+    ],
+)
+def test_classify_step_error_maps_to_the_taxonomy(
+    raw: object, code: str, detail: str | None
+) -> None:
+    assert classify_step_error(raw) == StepError(code=code, detail=detail)
+
+
+def test_a_step_error_detail_is_bounded_to_the_allowlisted_charset() -> None:
+    long_name = "E" * 500
+    detail = classify_step_error({"Error": long_name}).detail
+    assert detail is not None and len(detail) == STEP_ERROR_DETAIL_LIMIT == 200
+    assert classify_step_error({"Error": "Bad <name> with spaces/and;quotes'\""}).detail == (
+        "Badnamewithspacesandquotes"
+    )
+    assert classify_step_error({"Error": "<>/ ;"}).detail is None
+
+
+def test_a_step_error_detail_never_carries_an_account_shaped_digit_run() -> None:
+    assert classify_step_error({"Error": "Err123456789012"}).detail is None
+    assert classify_step_error({"Error": "Err12345678901"}).detail == "Err12345678901"
+
+
+_LEAKY_ACCOUNT = "2109" * 3
+_LEAKY_MESSAGE = (
+    f"AccessDenied for arn:aws:lambda:us-east-1:{_LEAKY_ACCOUNT}:function:crm-eval-secret "
+    f"account {_LEAKY_ACCOUNT}"
+)
+
+
+def test_a_raw_error_message_never_reaches_the_payload_or_the_rows(
+    sweep: Sweep, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An ARN or account id in ``errorMessage`` is logged once, never stored or returned."""
+    refs = sweep.control("start")["task_refs"]
+    leaky = _lambda_error("States.TaskFailed", _LEAKY_MESSAGE, "AccessDeniedException")
+    with caplog.at_level("WARNING", logger="eval.sfn_handlers"):
+        sweep.control(
+            "item_failed",
+            arm_index=refs[0]["arm_index"],
+            repeat_index=refs[0]["repeat_index"],
+            task_id=refs[0]["task_id"],
+            error=leaky,
+        )
+        sweep.control("finalize", error=leaky, teardown_error=None)
+
+    record = require_run(sweep.store, sweep.run_id)
+    payload = json.dumps(record.to_payload())
+    row = json.dumps(sweep.result_row(refs[0]["arm_index"], refs[0]["task_id"]), default=str)
+    job_row = json.dumps(
+        sweep.store.get_item("eval_runs", {"run_id": f"job#{sweep.run_id}"}, consistent=True),
+        default=str,
+    )
+    for stored in (payload, row, job_row):
+        assert _LEAKY_ACCOUNT not in stored
+        assert "crm-eval-secret" not in stored
+        assert "AccessDenied" not in stored
+    assert "arn:aws" not in payload
+    assert record.error_code == "step_lambda_error"
+    assert json.loads(payload)["error_detail"] == "States.TaskFailed"
+    raw_logs = [
+        json.loads(entry.getMessage())
+        for entry in caplog.records
+        if "sweep_step_error" in entry.getMessage()
+    ]
+    assert len(raw_logs) == 2, "the raw text is logged once per classified step error"
+    assert all(entry["correlation_id"] == sweep.run_id for entry in raw_logs)
+    assert all(_LEAKY_MESSAGE in str(entry["reason"]) for entry in raw_logs)
+    assert all("frame" not in str(entry["reason"]) for entry in raw_logs)
 
 
 # -- event shape ---------------------------------------------------------------------------------
@@ -1667,3 +1779,56 @@ def test_a_stored_task_score_with_a_bad_per_run_key_is_refused(
     with pytest.raises(ValidationFailed) as raised:
         task_score_from_fields(_stored_task_score(**overrides))
     assert raised.value.source == source
+
+
+def test_a_prompt_bundle_mismatch_keeps_its_digests_in_the_log_only(
+    sweep: Sweep, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The mismatch row stores a code and detail; the digest comparison text is logged only."""
+    refs = sweep.control("start")["task_refs"]
+    sweep.control("seed")
+    sweep.task(refs[0]["arm_index"], refs[0]["task_id"])
+    monkeypatch.setattr("agents.prompt_bundle.prompt_bundle_sha256", lambda: "c" * 64)
+
+    with caplog.at_level("INFO", logger="eval.sfn_handlers"), pytest.raises(Conflict):
+        sweep.task(refs[1]["arm_index"], refs[1]["task_id"])
+
+    row = sweep.result_row(refs[1]["arm_index"], refs[1]["task_id"])
+    assert row is not None
+    assert not any("differs from" in str(value) for value in row.values())
+    logged = [
+        json.loads(entry.getMessage())
+        for entry in caplog.records
+        if "sweep_prompt_bundle_mismatch" in entry.getMessage()
+    ]
+    assert len(logged) == 1 and logged[0]["correlation_id"] == sweep.run_id
+    assert "differs from the run's first" in logged[0]["reason"]
+
+
+def test_every_failed_item_writer_records_an_error_code() -> None:
+    """Each ``record_item(..., item_status="failed")`` call builds its fields with
+    ``_failed_item_fields``, which always sets ``error_code``."""
+    tree = ast.parse(Path(sfn_handlers.__file__).read_text(encoding="utf-8"))
+    failed_writers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "record_item"
+        and any(
+            kw.arg == "item_status"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value == "failed"
+            for kw in node.keywords
+        )
+    ]
+    assert len(failed_writers) >= 2, "expected the item_failed and prompt-bundle writers"
+    for call in failed_writers:
+        fields = next((kw.value for kw in call.keywords if kw.arg == "fields"), None)
+        assert (
+            isinstance(fields, ast.Call)
+            and isinstance(fields.func, ast.Name)
+            and fields.func.id == "_failed_item_fields"
+        ), f"record_item at line {call.lineno} writes a failed row without _failed_item_fields"
+    built = sfn_handlers._failed_item_fields(StepError(code="conflict", detail=None), x=1)
+    assert built == {"error_code": "conflict", "x": 1}

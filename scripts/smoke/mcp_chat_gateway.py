@@ -31,8 +31,9 @@ The two answered calls are model-backed and are counted against this module's sh
 issued. In a `finally`, every `conversation#` ownership item owned by a smoke principal (each user's
 `username`, the service principal's `rep_id`) is found by a consistent scan of `reps`, deleted and
 re-read to prove it is gone (the items carry no `tenant`, so tenant teardown never sees them); a
-call that returned no conversation id, or a principal whose rep id is unknown, fails the row. Then
-users, the service principal's `reps` row and every tenant are removed.
+call that returned no conversation id, or a principal whose rep id is unknown, fails the row. Each
+answered call's conversation-history item (`history#<tenant>#<conversation_id>`) is deleted and
+re-read the same way. Then users, the service principal's `reps` row and every tenant are removed.
 
 Usage:
     python3 -m scripts.smoke.mcp_chat_gateway [--profile P] [--region R] [--outputs PATH] [--json]
@@ -63,6 +64,11 @@ from scripts.smoke.harness import (
     exception_detail,
     open_https,
     run_main,
+)
+from scripts.smoke.history_cleanup import (
+    HistoryItemsFactory,
+    LiveHistoryItems,
+    delete_session_history,
 )
 from scripts.smoke.three_tier_chat import ModelTurnBudget, budget_refused
 
@@ -601,6 +607,7 @@ def checks(
     service_provisioner_factory: ServiceProvisionerFactory | None = None,
     scoped_token_minter: ScopedTokenMinter | None = None,
     jwks_url: str | None = None,
+    history_items: HistoryItemsFactory | None = None,
 ) -> Iterator[CheckResult]:
     """Provision two users and the service principal, run the checks, and clean up.
 
@@ -630,6 +637,8 @@ def checks(
     )
     conversations: list[str] = []
     owners: list[str] = []
+    history_sessions: list[tuple[str, Sequence[str]]] = []
+    items_factory = history_items if history_items is not None else LiveHistoryItems
     user_factory = user_provisioner_factory or _default_user_provisioner
     service_factory = service_provisioner_factory or _default_service_provisioner
     budget = ModelTurnBudget(RESOURCE_CLASS)
@@ -652,6 +661,8 @@ def checks(
         yield _answer_row("user_call_answered", "user A", first)
         conversation = str((first[1] or {}).get("conversation_id") or "")
         conversations.append(conversation)
+        if CONVERSATION_ID_PATTERN.match(conversation):
+            history_sessions.append((str(user_a.tenant()), [conversation]))
 
         user_b = user_factory(ctx)
         provisioners.append(user_b)
@@ -677,11 +688,19 @@ def checks(
             yield budget_refused(budget, "client_credentials call")
             return
         service_outcome = _call_chat(call, tool_name, service_token, {"message": SMOKE_MESSAGE})
-        conversations.append(str((service_outcome[1] or {}).get("conversation_id") or ""))
+        service_conversation = str((service_outcome[1] or {}).get("conversation_id") or "")
+        conversations.append(service_conversation)
+        if CONVERSATION_ID_PATTERN.match(service_conversation):
+            history_sessions.append(
+                (str(getattr(fixture, "tenant", "") or ""), [service_conversation])
+            )
         yield _answer_row("service_call_answered", "client_credentials", service_outcome)
     finally:
         yield budget.result()
         yield _remove_conversations(ctx, conversations, owners)
+        yield from delete_session_history(
+            ctx, items_factory, history_sessions, resource=RESOURCE_CLASS
+        )
         for provisioner in provisioners:
             yield from provisioner.cleanup()
 

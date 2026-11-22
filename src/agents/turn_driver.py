@@ -51,6 +51,7 @@ from agents.supervisor import (
     TurnGuard,
     classify_tool_result,
     describe_truncation,
+    output_limit_no_answer_event,
     page_context_briefing,
     proposal_event_for,
     provider_event_to_agent_event,
@@ -61,6 +62,8 @@ from agents.tier_attribution import (
     InvocationAttribution,
     TokenCounts,
     ToolCallAttribution,
+    is_final_usage,
+    provisional_attribution,
 )
 from agents.tool_actor import TOOL_TIER, ToolActorResult, ToolDispatch, formulate_and_invoke
 from agents.turn_costing import cost_lines, is_cost_withheld, turn_cost
@@ -376,6 +379,8 @@ async def drive_turn(
         awaiting_tools = False
         completed_this_round = False
         round_usage_seen = False
+        round_provisional: ProviderEvent | None = None
+        round_truncated = False
 
         try:
             refuse_if_over_limit(
@@ -396,7 +401,7 @@ async def drive_turn(
             turn_budget,
             tier=SUPERVISOR_TIER,
             role=SUPERVISOR_ROLE,
-            is_metered=lambda event: event.type == "usage",
+            is_metered=is_final_usage,
         )
         # Groups this round's streamed text_delta frames; deterministic per session and round.
         stream_event_id = f"{session_id}:r{round_number}"
@@ -411,8 +416,13 @@ async def drive_turn(
                 continue
             if provider_event.type == "tool_result":
                 continue
+            if provider_event.type == "usage" and provider_event.provisional:
+                round_provisional = provider_event
+                continue
             if provider_event.type == "usage":
+                round_provisional = None
                 round_usage_seen = True
+                round_truncated = round_truncated or provider_event.output_truncated
                 round_input = provider_event.input_tokens or 0
                 round_output = provider_event.output_tokens or 0
                 turn_budget.record_tokens(round_input + round_output)
@@ -427,36 +437,28 @@ async def drive_turn(
                             write_tokens=provider_event.cache_write_tokens or 0,
                         ),
                         latency_ms=provider_event.latency_ms,
+                        output_truncated=provider_event.output_truncated,
                     )
                 )
                 continue
             if provider_event.type == "completed":
                 awaiting_tools = provider_event.awaiting_tools
-                if awaiting_tools and round_tool_calls:
+                if round_tool_calls and (awaiting_tools or round_truncated):
                     completed_this_round = True
                     break
                 final_text = (
                     provider_event.text if provider_event.text is not None else accumulated_text
                 )
-                if not final_text:
+                if not final_text and not round_truncated:
                     raise ValueError(
                         "completed provider event carries no text and none was accumulated"
                     )
-                # The turn's usage figure sums every tier's attribution records.
-                ui_in, ui_out, ui_cr, ui_cw = _sum_usage(records)
-                lines = cost_lines(records.invocations, withheld=cost_withheld)
-                accounting: dict[str, Any] = {
-                    "input_tokens": ui_in,
-                    "output_tokens": ui_out,
-                    "cache_read_tokens": ui_cr,
-                    "cache_write_tokens": ui_cw,
-                    "cost_lines": lines,
-                    "cost_usd": turn_cost(lines, withheld=cost_withheld),
-                    "cost_withheld": cost_withheld,
-                    "resolved_tiers": _resolved_tiers(resolved),
-                }
+                accounting = _turn_accounting(records, resolved, cost_withheld=cost_withheld)
                 yield AgentEvent(kind="usage", **accounting)
-                yield AgentEvent(kind="completed", text=final_text, **accounting)
+                if final_text:
+                    yield AgentEvent(kind="completed", text=final_text, **accounting)
+                else:
+                    yield output_limit_no_answer_event()
                 guard.note_terminal()
                 return
 
@@ -529,12 +531,22 @@ async def drive_turn(
                     round_tool_results.append({"id": call_id, "output": json.dumps(tool_output)})
 
             if agent_event.kind == "error":
+                if not round_usage_seen:
+                    _record_provisional_usage(
+                        round_provisional, records, turn_budget, resolved_supervisor
+                    )
+                    turn_budget.note_call_without_usage(
+                        tier=SUPERVISOR_TIER, role=SUPERVISOR_ROLE, cause="provider_error"
+                    )
                 guard.note_terminal()
                 return
 
             terminal = guard.terminal_event()
             if terminal is not None:
                 if not round_usage_seen:
+                    _record_provisional_usage(
+                        round_provisional, records, turn_budget, resolved_supervisor
+                    )
                     turn_budget.note_call_without_usage(
                         tier=SUPERVISOR_TIER, role=SUPERVISOR_ROLE, cause="turn_stopped"
                     )
@@ -542,6 +554,9 @@ async def drive_turn(
                         terminal = turn_budget.exhausted_event()
                 yield _noting_supervisor_exhaustion(terminal, turn_budget)
                 return
+
+        if not round_usage_seen:
+            _record_provisional_usage(round_provisional, records, turn_budget, resolved_supervisor)
 
         if turn_budget.is_deadline_expired():
             terminal = guard.terminal_event()
@@ -562,6 +577,43 @@ async def drive_turn(
         if terminal is not None:
             yield _noting_supervisor_exhaustion(terminal, turn_budget)
             return
+
+
+def _turn_accounting(
+    records: TurnRecords, resolved: Mapping[Tier, ResolvedInvocation], *, cost_withheld: bool
+) -> dict[str, Any]:
+    """Return the turn's terminal accounting fields, summed over every tier's attribution."""
+    ui_in, ui_out, ui_cr, ui_cw = _sum_usage(records)
+    lines = cost_lines(records.invocations, withheld=cost_withheld)
+    return {
+        "input_tokens": ui_in,
+        "output_tokens": ui_out,
+        "cache_read_tokens": ui_cr,
+        "cache_write_tokens": ui_cw,
+        "cost_lines": lines,
+        "cost_usd": turn_cost(lines, withheld=cost_withheld),
+        "cost_withheld": cost_withheld,
+        "resolved_tiers": _resolved_tiers(resolved),
+    }
+
+
+def _record_provisional_usage(
+    provisional: ProviderEvent | None,
+    records: TurnRecords,
+    budget: TurnBudget,
+    resolved_supervisor: ResolvedInvocation,
+) -> None:
+    """Attribute a supervisor round that ended without final usage from its provisional usage."""
+    if provisional is None:
+        return
+    invocation = provisional_attribution(
+        provisional,
+        tier=SUPERVISOR_TIER,
+        role=SUPERVISOR_ROLE,
+        model_id=resolved_supervisor.model.model_id,
+    )
+    budget.record_tokens(invocation.tokens.input_tokens)
+    records.invocations.append(invocation)
 
 
 async def _run_delegation(

@@ -10,6 +10,7 @@ import { SimpleJwksCache } from "aws-jwt-verify/jwk";
 import type { LambdaFunctionURLEvent } from "aws-lambda";
 
 import {
+  EVENT_KINDS,
   FRAME_DELIMITER,
   FRAME_PREFIX,
   SCHEMA_VERSION,
@@ -186,8 +187,30 @@ describe("a successful turn", () => {
     expect(sink.chunks).toEqual(frames);
   });
 
-  it("forwards a 3.0.0 frame carrying cost lines and resolved tiers byte for byte", async () => {
-    expect(SCHEMA_VERSION).toBe("3.0.0");
+  it("forwards a 3.1.0 replay_unavailable frame verbatim ahead of the re-run", async () => {
+    expect(SCHEMA_VERSION).toBe("3.1.0");
+    expect(EVENT_KINDS).toContain("replay_unavailable");
+    const replayUnavailable =
+      'data: {"kind": "replay_unavailable", "tool_name": null, "tool_input": null, ' +
+      '"tool_output": null, "truncated": false, "proposal_id": null, "proposal_summary": null, ' +
+      '"input_tokens": null, "output_tokens": null, "cache_read_tokens": null, ' +
+      '"cache_write_tokens": null, "text": null, "event_id": null, "partial": false, ' +
+      '"error_kind": null, "error_message": null, "partial_work": null, "cost_lines": null, ' +
+      '"cost_usd": null, "cost_withheld": null, "resolved_tiers": null}\n\n';
+    const rerun = runtimeFrame({ kind: "completed", text: "rerun" });
+    const sink = new RecordingSink();
+
+    await streamTurn(
+      eventFor(turnBody({ resume_from: 4, resume: true })),
+      sink,
+      depsFor(streamOf(`${replayUnavailable}${rerun}`)),
+    );
+
+    expect(sink.chunks).toEqual([replayUnavailable, rerun]);
+    expect(sink.body).toBe(`${replayUnavailable}${rerun}`);
+  });
+
+  it("forwards a 3.x frame carrying cost lines and resolved tiers byte for byte", async () => {
     const accounted = runtimeFrame({
       kind: "completed",
       text: "done",

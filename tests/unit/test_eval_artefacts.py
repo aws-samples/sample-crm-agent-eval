@@ -551,6 +551,8 @@ def test_a_stored_entry_with_unjoinable_lists_is_refused_as_malformed(
         "budget_exhausted_task_count": 0,
         "truncated_tool_call_count": 0,
         "truncated_task_count": 0,
+        "output_truncated_call_count": 0,
+        "output_truncated_task_count": 0,
         field: value,
     }
     summary["tiers"] = {tier: [dict(entry)] for tier in ("supervisor", "subagent", "tool")}

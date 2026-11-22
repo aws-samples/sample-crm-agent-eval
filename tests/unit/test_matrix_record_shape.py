@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Record shape 3: every writer leads with the version and every reader refuses any other record.
+"""Record shape 4: every writer leads with the version and every reader refuses any other record.
 
 The refusals are checked against a record that is otherwise readable, so each case fails for the
 one reason it names; a positive control shows the same record loads once the defect is undone.
@@ -58,8 +58,8 @@ def _legacy_payload() -> dict[str, Any]:
 # ------------------------------------------------------------------------------------ constants
 
 
-def test_the_version_is_the_integer_three_under_its_named_key() -> None:
-    assert RECORD_SHAPE_VERSION == 3
+def test_the_version_is_the_integer_four_under_its_named_key() -> None:
+    assert RECORD_SHAPE_VERSION == 4
     assert type(RECORD_SHAPE_VERSION) is int
     assert RECORD_SHAPE_VERSION_KEY == "record_shape_version"
     assert issubclass(RecordShapeRefused, ValueError)
@@ -92,8 +92,8 @@ def test_the_raw_archive_file_carries_the_version_first(tmp_path: Path) -> None:
 # ------------------------------------------------------------------------- require_record_shape
 
 
-def test_require_record_shape_accepts_version_three() -> None:
-    require_record_shape({RECORD_SHAPE_VERSION_KEY: 3}, subject="x")
+def test_require_record_shape_accepts_version_four() -> None:
+    require_record_shape({RECORD_SHAPE_VERSION_KEY: 4}, subject="x")
 
 
 @pytest.mark.parametrize(
@@ -102,12 +102,13 @@ def test_require_record_shape_accepts_version_three() -> None:
         ({}, "absent"),
         ({RECORD_SHAPE_VERSION_KEY: 1}, "1"),
         ({RECORD_SHAPE_VERSION_KEY: 2}, "2"),
+        ({RECORD_SHAPE_VERSION_KEY: 3}, "3"),
         ({RECORD_SHAPE_VERSION_KEY: None}, "None"),
-        ({RECORD_SHAPE_VERSION_KEY: "3"}, "'3'"),
-        ({RECORD_SHAPE_VERSION_KEY: 3.0}, "3.0"),
+        ({RECORD_SHAPE_VERSION_KEY: "4"}, "'4'"),
+        ({RECORD_SHAPE_VERSION_KEY: 4.0}, "4.0"),
         ({RECORD_SHAPE_VERSION_KEY: True}, "True"),
     ],
-    ids=["absent", "one", "two", "null", "string", "float", "bool"],
+    ids=["absent", "one", "two", "three", "null", "string", "float", "bool"],
 )
 def test_require_record_shape_names_the_found_and_required_version(
     record: dict[str, object], found: str
@@ -115,7 +116,7 @@ def test_require_record_shape_names_the_found_and_required_version(
     with pytest.raises(RecordShapeRefused) as excinfo:
         require_record_shape(record, subject="the subject")
     assert str(excinfo.value) == (
-        f"the subject: record shape {found}, required 3 — recorded in an earlier format; "
+        f"the subject: record shape {found}, required 4 — recorded in an earlier format; "
         "not rendered"
     )
 
@@ -123,11 +124,11 @@ def test_require_record_shape_names_the_found_and_required_version(
 # ------------------------------------------------------------------------ arm_from_report_fields
 
 
-def test_a_shape_three_arm_loads_as_the_positive_control() -> None:
+def test_a_shape_four_arm_loads_as_the_positive_control() -> None:
     assert arm_from_report_fields(_fields()) == _arm()
 
 
-@pytest.mark.parametrize("version", [None, 1, 2], ids=["absent", "one", "two"])
+@pytest.mark.parametrize("version", [None, 1, 2, 3], ids=["absent", "one", "two", "three"])
 def test_an_arm_of_another_record_shape_is_refused(version: int | None) -> None:
     fields = _fields()
     if version is None:
@@ -135,7 +136,7 @@ def test_an_arm_of_another_record_shape_is_refused(version: int | None) -> None:
     else:
         fields[RECORD_SHAPE_VERSION_KEY] = version
     found = "absent" if version is None else str(version)
-    with pytest.raises(RecordShapeRefused, match=f"raw archive: record shape {found}, required 3"):
+    with pytest.raises(RecordShapeRefused, match=f"raw archive: record shape {found}, required 4"):
         arm_from_report_fields(fields)
 
 
@@ -188,6 +189,60 @@ def test_a_non_string_prompt_caching_is_refused(value: object) -> None:
         arm_from_report_fields(fields)
 
 
+def test_the_output_cap_and_dirty_tree_follow_prompt_caching_and_round_trip() -> None:
+    fields = _fields()
+    names = list(fields["provenance"])
+    assert names[-3:] == ["prompt_caching", "output_token_cap", "dirty_tree"]
+    provenance = arm_from_report_fields(fields).provenance
+    assert (provenance.output_token_cap, provenance.dirty_tree) == (16_384, False)
+
+
+@pytest.mark.parametrize(
+    "value", [None, "16384", 16384.0, True], ids=["null", "str", "float", "bool"]
+)
+def test_a_non_integer_output_token_cap_is_refused(value: object) -> None:
+    fields = _fields()
+    fields["provenance"]["output_token_cap"] = value
+    with pytest.raises(RecordShapeRefused, match=r"provenance\.output_token_cap$"):
+        arm_from_report_fields(fields)
+
+
+@pytest.mark.parametrize("value", [0, 1, "false"], ids=["zero", "one", "string"])
+def test_a_non_boolean_dirty_tree_is_refused(value: object) -> None:
+    fields = _fields()
+    fields["provenance"]["dirty_tree"] = value
+    with pytest.raises(RecordShapeRefused, match=r"provenance\.dirty_tree$"):
+        arm_from_report_fields(fields)
+
+
+def test_a_null_dirty_tree_with_a_known_revision_is_refused() -> None:
+    fields = _fields()
+    fields["provenance"]["dirty_tree"] = None
+    with pytest.raises(ValueError, match="dirty_tree None is inconsistent"):
+        arm_from_report_fields(fields)
+
+
+def test_a_null_dirty_tree_with_an_unknown_revision_loads() -> None:
+    fields = _fields()
+    fields["provenance"].update(git_revision=matrix.UNKNOWN_GIT_REVISION, dirty_tree=None)
+    assert arm_from_report_fields(fields).provenance.dirty_tree is None
+
+
+@pytest.mark.parametrize("dirty_tree", [True, False])
+def test_a_measured_dirty_tree_with_an_unknown_revision_is_refused(dirty_tree: bool) -> None:
+    provenance = _arm().provenance
+    with pytest.raises(ValueError, match="is inconsistent with git_revision 'unknown'"):
+        dataclasses.replace(
+            provenance, git_revision=matrix.UNKNOWN_GIT_REVISION, dirty_tree=dirty_tree
+        )
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_a_non_positive_output_token_cap_is_refused_at_construction(cap: int) -> None:
+    with pytest.raises(ValueError, match="output_token_cap must be a positive int"):
+        dataclasses.replace(_arm().provenance, output_token_cap=cap)
+
+
 @pytest.mark.parametrize(
     ("tier", "key", "value"),
     [
@@ -198,10 +253,14 @@ def test_a_non_string_prompt_caching_is_refused(value: object) -> None:
         ("subagent", "budget_exhausted_task_count", None),
         ("subagent", "truncated_tool_call_count", 0),
         ("subagent", "truncated_task_count", 0),
+        ("subagent", "output_truncated_call_count", None),
+        ("subagent", "output_truncated_task_count", None),
+        ("supervisor", "output_truncated_call_count", "1"),
+        ("tool", "output_truncated_task_count", True),
     ],
 )
 def test_a_tier_task_count_of_the_wrong_type_is_refused(tier: str, key: str, value: object) -> None:
-    """Counts are integers, except the subagent truncation pair, which must be null."""
+    """Counts are integers, except the subagent tool-result truncation pair, which must be null."""
     fields = _fields()
     fields[matrix.TIER_TASK_METRICS_KEY]["by_tier"][tier][key] = value
     with pytest.raises(RecordShapeRefused) as excinfo:
@@ -211,9 +270,9 @@ def test_a_tier_task_count_of_the_wrong_type_is_refused(tier: str, key: str, val
     )
 
 
-def test_the_subagent_truncation_pair_is_null_in_the_positive_control() -> None:
+def test_only_the_subagent_tool_truncation_pair_is_null_in_the_positive_control() -> None:
     by_tier = _fields()[matrix.TIER_TASK_METRICS_KEY]["by_tier"]
-    assert [by_tier["subagent"][key] for key in TIER_TASK_COUNT_KEYS] == [1, None, None]
+    assert [by_tier["subagent"][key] for key in TIER_TASK_COUNT_KEYS] == [1, None, None, 5, 4]
     assert all(
         type(by_tier[tier][key]) is int
         for tier in ("supervisor", "tool")
@@ -237,7 +296,7 @@ def _summary() -> dict[str, Any]:
     )
 
 
-def test_a_shape_three_summary_formats_as_the_positive_control() -> None:
+def test_a_shape_four_summary_formats_as_the_positive_control() -> None:
     summary = _summary()
     assert tier_comparison_table(summary)["headers"] == [
         "Metric",
@@ -245,7 +304,7 @@ def test_a_shape_three_summary_formats_as_the_positive_control() -> None:
     ]
 
 
-@pytest.mark.parametrize("version", [None, 1, 2], ids=["absent", "one", "two"])
+@pytest.mark.parametrize("version", [None, 1, 2, 3], ids=["absent", "one", "two", "three"])
 def test_a_summary_of_another_record_shape_is_refused(version: int | None) -> None:
     summary = _summary()
     if version is None:
@@ -278,7 +337,7 @@ def test_every_arm_of_the_legacy_artifact_is_refused() -> None:
     assert arms
     for fields in arms:
         assert RECORD_SHAPE_VERSION_KEY not in fields
-        with pytest.raises(RecordShapeRefused, match="record shape absent, required 3"):
+        with pytest.raises(RecordShapeRefused, match="record shape absent, required 4"):
             arm_from_report_fields(fields)
 
 
@@ -309,11 +368,11 @@ def test_the_re_render_cli_exits_2_and_writes_nothing_for_a_legacy_archive(
     raw_dir, output_dir = tmp_path / "raw", tmp_path / "out"
     _archive_legacy_arms(raw_dir)
     assert matrix.main(["--raw-dir", str(raw_dir), "--output-dir", str(output_dir)]) == 2
-    assert "record shape absent, required 3" in capsys.readouterr().err
+    assert "record shape absent, required 4" in capsys.readouterr().err
     assert not output_dir.exists()
 
 
-def test_one_legacy_archive_beside_a_shape_three_one_still_writes_nothing(tmp_path: Path) -> None:
+def test_one_legacy_archive_beside_a_shape_four_one_still_writes_nothing(tmp_path: Path) -> None:
     raw_dir, output_dir = tmp_path / "raw", tmp_path / "out"
     _archive_legacy_arms(raw_dir)
     archive_raw_run(_arm(), raw_dir)
@@ -329,7 +388,7 @@ def test_the_re_render_cli_exits_2_and_writes_nothing_for_mismatched_prompt_bund
     second = dataclasses.replace(
         first,
         provenance=dataclasses.replace(
-            first.provenance, model_id="openai.gpt-6-1-sol", prompt_bundle_sha256="2" * 64
+            first.provenance, model_id="openai.gpt-6.2-sol", prompt_bundle_sha256="2" * 64
         ),
     )
     archive_raw_run(first, raw_dir)
@@ -358,12 +417,12 @@ def test_the_module_entry_point_exits_2_with_the_refusal(tmp_path: Path) -> None
         cwd=_REPO_ROOT,
     )
     assert result.returncode == 2, result.stderr
-    assert "record shape absent, required 3" in result.stderr
+    assert "record shape absent, required 4" in result.stderr
     assert not output_dir.exists()
 
 
-def test_the_module_entry_point_renders_a_shape_three_archive(tmp_path: Path) -> None:
-    """Control: the same invocation succeeds once the archive is record shape 3."""
+def test_the_module_entry_point_renders_a_shape_four_archive(tmp_path: Path) -> None:
+    """Control: the same invocation succeeds once the archive is record shape 4."""
     raw_dir, output_dir = tmp_path / "raw", tmp_path / "out"
     archive_raw_run(_arm(), raw_dir)
     result = proc_run.run(

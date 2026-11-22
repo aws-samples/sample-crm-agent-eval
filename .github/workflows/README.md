@@ -8,16 +8,18 @@ See also: [documentation map](../../README.md#documentation) · [development](..
 
 | Definition | Trigger | Jobs | Cost | Credential |
 |---|---|---|---|---|
-| `.github/workflows/verify.yml` | `push` to `main`/`mainline`, `pull_request` | `verify`, `frontend` | none | none |
+| `.github/workflows/verify.yml` | `push` to `main`, `pull_request` | `verify`, `frontend`, `sca` | none | none |
 | `.github/workflows/browser-journeys.yml` | `workflow_dispatch` only | `browser-journeys` | **billable** | repository secrets |
-| `.gitlab-ci.yml` | merge requests and branch pipelines | `verify`, `frontend` | none | none |
+| `.gitlab-ci.yml` | merge requests and branch pipelines | `verify`, `frontend`, `sca` | none | none |
 
-## `verify` and `frontend` jobs
+## `verify`, `frontend` and `sca` jobs
+
+Every job sets a timeout: `verify` 4 hours, `frontend` 1 hour, `sca` 30 minutes, in both definitions.
 
 `verify` runs `make verify` with the same pinned interpreter (`.python-version`), the frozen
 `requirements.txt` installed with `--no-deps`, and the same aggregate target as a local run. Before
 that install, each job's `.venv` gets `pip==${PIP_VERSION}`. DynamoDB Local runs as a service container
-with `CRM_REQUIRE_DYNAMODB_LOCAL=1`, so the integration tier runs rather than skipping. The job also
+with `CRM_REQUIRE_DYNAMODB_LOCAL=1`, and the job waits until it answers, so the integration tier runs rather than skipping. The job also
 provisions terraform, gitleaks, shellcheck, and Node `NODE_VERSION` for the relay suite. The major of
 `NODE_VERSION` must equal the relay Lambda runtime in [`infra/modules/agent_relay/variables.tf`](../../infra/modules/agent_relay/variables.tf) (see the [module README](../../infra/modules/agent_relay/README.md)). Before
 `make verify`, the job installs `rsync` and `perl`, then builds the Lambda and relay zips
@@ -25,14 +27,23 @@ provisions terraform, gitleaks, shellcheck, and Node `NODE_VERSION` for the rela
 `check_lambda_zip_imports` and `check_relay_zip` have zips to verify. It reaches no AWS endpoint and
 reads no secret.
 
-`frontend` runs the emitted-CSS gate (`CRM_REQUIRE_EMITTED_CSS=1`). In `frontend/` it then runs
-`gen:types`, the full `check_toolspec_parity.py` (including the frontend consumer that `verify`
-defers with `--skip-frontend`), and `lint`, `typecheck`, `test` and `build`.
+`frontend` installs with `npm ci --no-audit --no-fund` and runs the emitted-CSS gate
+(`CRM_REQUIRE_EMITTED_CSS=1`) and the TypeScript-executing contract tests on the frontend's pinned
+Node (`CRM_REQUIRE_TS_CONTRACTS=1`; the set is derived from every test that reads that variable). In
+`frontend/` it then runs `gen:types`, the full `check_toolspec_parity.py` (including the frontend
+consumer that `verify` defers with `--skip-frontend`), `lint`, `typecheck:no-gen -- --force`, the
+unit tests in shuffled order (`--sequence.shuffle=true`) and `build`.
+
+`sca` audits dependencies. `pip-audit`, installed from its own pinned tree in
+`ci/requirements-sca.txt`, checks `requirements.txt` with `--no-deps --disable-pip` and fails on any
+known vulnerability. `npm audit --audit-level=high` runs in `frontend/`, `src/relay/` and
+`tests/e2e/browser/` and fails on High or Critical findings only. It needs network access to the
+advisory databases and no AWS credential.
 
 `DEBIAN_FRONTEND=noninteractive` is set for every job. Every `sudo apt-get` also sets it inline,
 because `sudo` resets the environment.
 
-`.gitlab-ci.yml` defines the same two jobs, and its comments document the differences:
+`.gitlab-ci.yml` defines the same three jobs, and its comments document the differences:
 - GitLab's `verify` job requests the runner tags `arch:arm64` and `size:large`; `frontend` sets no
   tags and runs on the project's default runner. GitHub runs both jobs on `ubuntu-24.04` (x64).
 - GitLab picks the terraform, gitleaks, shellcheck and Node release assets by the runner's
@@ -65,6 +76,10 @@ properties are verified statically only until a real run.
 
 Runs `tests/e2e/browser/journeys/` (Playwright) against a **deployed dev stack**. It is separate from
 `verify.yml` because the journeys need a live stack and cost money.
+
+It installs `tests/e2e/browser/` with `npm ci --no-audit --no-fund`, then runs the lockfile's
+pinned binary, never an `npx` download: `./node_modules/.bin/playwright install --with-deps chromium`,
+then `./node_modules/.bin/playwright test journeys`. The job times out after 60 minutes.
 
 ### Dispatching it
 

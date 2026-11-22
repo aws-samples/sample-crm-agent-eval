@@ -5,13 +5,13 @@
 # Needs no AWS credential. `.gitlab-ci.yml` is the equivalent definition for a GitLab remote, and
 # tests/unit/test_ci_parity.py holds the two, and the Makefile, in agreement.
 #
-# Two jobs: `verify` (make verify, including the relay suite via its `test-relay` target) and
-# `frontend`.
+# Three jobs: `verify` (make verify, including the relay suite via its `test-relay` target),
+# `frontend`, and `sca` (pip-audit and npm audit).
 name: verify
 
 on:
   push:
-    branches: [mainline, main]
+    branches: [main]
   pull_request:
 
 # Reads the repository only; no AWS credential or OIDC role.
@@ -32,6 +32,7 @@ jobs:
   verify:
     name: Offline verify (lint, typecheck, unit, stub, integration, gates, shellcheck)
     runs-on: ubuntu-24.04
+    timeout-minutes: 240
     # DynamoDB Local service container for tests/integration. It accepts any placeholder key pair.
     services:
       dynamodb-local:
@@ -197,6 +198,12 @@ jobs:
         working-directory: tests/e2e/browser
         run: npm ci --no-audit --no-fund
 
+      # `make verify` exports CRM_REQUIRE_FRONTEND_TESTS=1, so `test-frontend` needs this project's
+      # eslint, tsc and vitest.
+      - name: Install the frontend's dependencies from the lock file only
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+
       # Prints the runner's CPU figures and derives
       # `max(PYTEST_WORKERS_FLOOR, min(nproc, cgroup quota))`. The suite mostly blocks on child
       # processes, so the worker count may exceed the core count. A `PYTEST_WORKERS` set in the
@@ -249,6 +256,18 @@ jobs:
           scripts/package_relay.sh
           .venv/bin/python3 scripts/check_relay_zip.py --require-zip
 
+      # The service container can still be starting; `make verify` needs it answering on 8000.
+      - name: Wait for DynamoDB Local
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/8000) 2>/dev/null; then
+              echo "DynamoDB Local reachable on 127.0.0.1:8000"; break
+            fi
+            [ "$i" -eq 30 ] && { echo "::error::127.0.0.1:8000 never became reachable" >&2; exit 1; }
+            sleep 1
+          done
+
       # The aggregate gate `make verify` runs locally, collecting every failure.
       - name: make verify
         run: |
@@ -258,6 +277,7 @@ jobs:
   frontend:
     name: Frontend verify (lint, typecheck, unit with shuffled order, build)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     # No `needs:`; reports independently of the `verify` job.
 
     defaults:
@@ -314,7 +334,7 @@ jobs:
 
       # package-lock.json is the sole install authority.
       - name: Install from the lock file only
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       # The emitted-css gate reads .tsx source and compiles the Tailwind config; `npm ci` is its
       # only prerequisite.
@@ -326,6 +346,11 @@ jobs:
       - name: TypeScript-executing contracts (the frontend's pinned Node)
         working-directory: .
         run: .venv/bin/python -m pytest tests/integration/test_envelope_groups_contract.py tests/integration/test_eval_envelopes_contract.py
+
+      # The prompt-cap contract imports the relay's SDK through the frontend's dependencies only.
+      - name: Prompt-cap contract (the frontend's pinned Node)
+        working-directory: .
+        run: .venv/bin/python -m pytest tests/integration/test_prompt_cap_contract.py
 
       # The bundled relay and the real Runtime handle the same reconnect bodies.
       - name: SPA-relay-Runtime reconnect contract (the frontend's pinned Node)
@@ -373,3 +398,61 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # Software composition analysis: pip-audit over the project lock, from its own pinned tree in
+  # ci/requirements-sca.txt, failing on any known vulnerability; npm audit over every npm project's
+  # lockfile, failing at severity high or above.
+  sca:
+    name: Dependency audit (pip-audit, npm audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read pinned interpreter version
+        id: pin
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "${{ steps.pin.outputs.version }}"
+
+      # frontend/.nvmrc is the repository's Node pin; npm audit reads only the lockfiles.
+      - name: Read pinned Node version
+        id: nvm
+        run: echo "version=$(cat frontend/.nvmrc)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up pinned Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "${{ steps.nvm.outputs.version }}"
+          package-manager-cache: false
+
+      # The venv holds pip-audit's pinned tree only; the project lock is audited, never installed.
+      - name: Install pip-audit from its pinned tree
+        run: |
+          set -euo pipefail
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --no-input "pip==${PIP_VERSION}"
+          installed="$(.venv/bin/python -m pip --version | cut -d' ' -f2)"
+          [ "$installed" = "${PIP_VERSION}" ] || {
+            echo "::error::pinned pip ${PIP_VERSION} but the venv has ${installed}" >&2; exit 1; }
+          .venv/bin/pip install --no-input --no-deps -r ci/requirements-sca.txt
+
+      - name: pip-audit over the project lock
+        run: .venv/bin/pip-audit --no-deps --disable-pip --progress-spinner off -r requirements.txt
+
+      - name: npm audit (frontend)
+        working-directory: frontend
+        run: npm audit --audit-level=high
+
+      - name: npm audit (relay)
+        working-directory: src/relay
+        run: npm audit --audit-level=high
+
+      - name: npm audit (browser journeys)
+        working-directory: tests/e2e/browser
+        run: npm audit --audit-level=high

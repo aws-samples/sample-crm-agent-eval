@@ -1810,3 +1810,202 @@ describe("useAgentStream: heartbeat frames are liveness only", () => {
     expect(result.current.transcript.map((e) => e.event.kind)).toEqual(["tool_call", "completed"]);
   });
 });
+
+describe("useAgentStream: a resume the server cannot replay", () => {
+  /** A response that streams `chunks`, then fails the read as a dropped connection. */
+  function droppingResponse(chunks: string[]): Response {
+    const encoder = new TextEncoder();
+    const pending = [...chunks];
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = pending.shift();
+        if (next === undefined) {
+          controller.error(new Error("connection dropped"));
+          return;
+        }
+        controller.enqueue(encoder.encode(next));
+      },
+    });
+    return { ok: true, status: 200, body: stream } as unknown as Response;
+  }
+
+  const REPLAY_UNAVAILABLE = { kind: "replay_unavailable" };
+
+  /** A fetch that answers each call with the next response, recording each request body. */
+  function scripted(responses: Array<() => Response>): {
+    fetchImpl: typeof fetch;
+    bodies: Array<Record<string, unknown>>;
+  } {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn((_url: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(init?.body as string));
+      const next = responses.shift();
+      if (next === undefined) throw new Error("unexpected extra request");
+      return Promise.resolve(next());
+    }) as unknown as typeof fetch;
+    return { fetchImpl, bodies };
+  }
+
+  it("discards the dropped attempt and keeps only the re-run after the signal", async () => {
+    const { fetchImpl, bodies } = scripted([
+      () =>
+        droppingResponse([
+          frame({ kind: "tool_call", tool_name: "get_account", tool_input: {} }),
+          frame({ kind: "text_delta", text: "Partial", event_id: "a-1", partial: true }),
+        ]),
+      () =>
+        sseResponse([
+          frame(REPLAY_UNAVAILABLE),
+          frame({ kind: "tool_call", tool_name: "get_account", tool_input: {} }),
+          frame({ kind: "completed", text: "Fresh answer." }),
+        ]),
+    ]);
+    const { result } = renderHook(() =>
+      useAgentStream({ ...baseOptions, fetchImpl, maxReconnectAttempts: 2 }),
+    );
+
+    await act(async () => {
+      await result.current.sendPrompt("hello");
+    });
+    await waitFor(() => expect(result.current.turnEnded).toBe(true), { timeout: 5000 });
+
+    expect(bodies.map((body) => [body.resume, body.resume_from])).toEqual([
+      [undefined, 0],
+      [true, 2],
+    ]);
+    expect(result.current.transcript.map((entry) => entry.event.kind)).toEqual([
+      "replay_unavailable",
+      "tool_call",
+      "completed",
+    ]);
+    expect(result.current.transcript[0].unrecognised).toBe(false);
+    expect(result.current.transcript.some((entry) => entry.event.text === "Partial")).toBe(false);
+    expect(result.current.replayUnavailable).toBe(true);
+  });
+
+  it("does not count the signal towards resume_from, which the server never recorded", async () => {
+    const { fetchImpl, bodies } = scripted([
+      () => droppingResponse([frame({ kind: "tool_call", tool_name: "a", tool_input: {} })]),
+      () =>
+        droppingResponse([
+          frame(REPLAY_UNAVAILABLE),
+          frame({ kind: "tool_call", tool_name: "b", tool_input: {} }),
+        ]),
+      () => sseResponse([frame({ kind: "completed", text: "Done." })]),
+    ]);
+    const { result } = renderHook(() =>
+      useAgentStream({ ...baseOptions, fetchImpl, maxReconnectAttempts: 3 }),
+    );
+
+    await act(async () => {
+      await result.current.sendPrompt("hello");
+    });
+    await waitFor(() => expect(result.current.turnEnded).toBe(true), { timeout: 10000 });
+
+    expect(bodies.map((body) => body.resume_from)).toEqual([0, 1, 2]);
+    expect(result.current.transcript.map((entry) => entry.event.tool_name ?? entry.event.kind)).toEqual([
+      "replay_unavailable",
+      "b",
+      "completed",
+    ]);
+  }, 15000);
+
+  it("handles a signal that answers a resume sent before any frame arrived", async () => {
+    const { fetchImpl, bodies } = scripted([
+      () => droppingResponse([]),
+      () => sseResponse([frame(REPLAY_UNAVAILABLE), frame({ kind: "completed", text: "Fresh." })]),
+    ]);
+    const { result } = renderHook(() =>
+      useAgentStream({ ...baseOptions, fetchImpl, maxReconnectAttempts: 2 }),
+    );
+
+    await act(async () => {
+      await result.current.sendPrompt("hello");
+    });
+    await waitFor(() => expect(result.current.turnEnded).toBe(true), { timeout: 5000 });
+
+    expect(bodies.map((body) => [body.resume, body.resume_from])).toEqual([
+      [undefined, 0],
+      [true, 0],
+    ]);
+    expect(result.current.transcript.map((entry) => entry.event.kind)).toEqual([
+      "replay_unavailable",
+      "completed",
+    ]);
+    expect(result.current.replayUnavailable).toBe(true);
+  });
+
+  it("ignores the signal on a turn that is not a resume", async () => {
+    const { fetchImpl, bodies } = scripted([
+      () =>
+        sseResponse([
+          frame({ kind: "tool_call", tool_name: "a", tool_input: {} }),
+          frame({ kind: "completed", text: "First." }),
+        ]),
+      () => sseResponse([frame(REPLAY_UNAVAILABLE), frame({ kind: "completed", text: "Second." })]),
+    ]);
+    const { result } = renderHook(() => useAgentStream({ ...baseOptions, fetchImpl }));
+
+    await act(async () => {
+      await result.current.sendPrompt("first");
+    });
+    await waitFor(() => expect(result.current.turnEnded).toBe(true));
+    const sessionId = result.current.sessionId;
+    await act(async () => {
+      await result.current.sendPrompt("second", { continueSessionId: sessionId });
+    });
+    await waitFor(() => expect(result.current.transcript[result.current.transcript.length - 1]?.event.text).toBe("Second."));
+
+    expect(bodies[1].resume).toBeUndefined();
+    expect(result.current.transcript.map((entry) => entry.event.kind)).toEqual(["completed"]);
+    expect(result.current.replayUnavailable).toBe(false);
+  });
+
+  it("ignores the signal when it is not the first frame of a resume", async () => {
+    const { fetchImpl } = scripted([
+      () => droppingResponse([frame({ kind: "tool_call", tool_name: "a", tool_input: {} })]),
+      () =>
+        sseResponse([
+          frame({ kind: "tool_result", tool_output: { items: [] } }),
+          frame(REPLAY_UNAVAILABLE),
+          frame({ kind: "completed", text: "Replayed." }),
+        ]),
+    ]);
+    const { result } = renderHook(() =>
+      useAgentStream({ ...baseOptions, fetchImpl, maxReconnectAttempts: 2 }),
+    );
+
+    await act(async () => {
+      await result.current.sendPrompt("hello");
+    });
+    await waitFor(() => expect(result.current.turnEnded).toBe(true), { timeout: 5000 });
+
+    expect(result.current.transcript.map((entry) => entry.event.kind)).toEqual([
+      "tool_call",
+      "tool_result",
+      "completed",
+    ]);
+    expect(result.current.replayUnavailable).toBe(false);
+  });
+
+  it("clears the signal on the next prompt", async () => {
+    const { fetchImpl } = scripted([
+      () => droppingResponse([]),
+      () => sseResponse([frame(REPLAY_UNAVAILABLE), frame({ kind: "completed", text: "Fresh." })]),
+      () => sseResponse([frame({ kind: "completed", text: "Next." })]),
+    ]);
+    const { result } = renderHook(() =>
+      useAgentStream({ ...baseOptions, fetchImpl, maxReconnectAttempts: 2 }),
+    );
+
+    await act(async () => {
+      await result.current.sendPrompt("hello");
+    });
+    await waitFor(() => expect(result.current.replayUnavailable).toBe(true), { timeout: 5000 });
+    await act(async () => {
+      await result.current.sendPrompt("next");
+    });
+    await waitFor(() => expect(result.current.transcript[result.current.transcript.length - 1]?.event.text).toBe("Next."));
+    expect(result.current.replayUnavailable).toBe(false);
+  });
+});

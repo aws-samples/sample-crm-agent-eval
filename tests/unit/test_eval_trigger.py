@@ -418,6 +418,8 @@ _ROW_LABELS = [
     "Budget-exhausted tasks",
     "Truncated tool calls",
     "Truncated tasks",
+    "Output-truncated model calls",
+    "Output-truncated tasks",
 ]
 
 
@@ -445,6 +447,8 @@ def _summary() -> dict[str, object]:
         "budget_exhausted_task_count": 0,
         "truncated_tool_call_count": 0,
         "truncated_task_count": 0,
+        "output_truncated_call_count": 0,
+        "output_truncated_task_count": 0,
     }
     return {
         RECORD_SHAPE_VERSION_KEY: RECORD_SHAPE_VERSION,

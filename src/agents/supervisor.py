@@ -61,6 +61,7 @@ SubagentOutcomeKind = Literal["data", "no_match", "denied", "tool_failure"]
 #: underlying index was exhausted or the caller's ``limit`` was satisfied.
 _SEARCH_TRUNCATED_KEY: Final[str] = TOOL_OUTPUT_TRUNCATED_KEY
 _SEARCH_EXAMINED_COUNT_KEY: Final[str] = "examined_count"
+_NEXT_CURSOR_KEY: Final[str] = "next_cursor"
 
 #: Error codes classified as ``"denied"``, each mapped to the scope named when the payload omits one.
 _DENIAL_DEFAULT_SCOPE: Final[Mapping[str, str]] = {
@@ -167,11 +168,13 @@ def describe_truncation(tool_output: dict[str, object], *, event_truncated: bool
     ``truncated`` with its ``examined_count``, from :data:`crm.search.EXAMINATION_BUDGET`), and the
     byte ceiling (``event_truncated``, or a ``truncated`` flag without ``examined_count``, as
     :func:`agents.events.bound_tool_output` writes). Either alone produces a notice; the search
-    signal takes precedence.
+    signal takes precedence. A ``truncated`` page that carries a ``next_cursor`` and was not trimmed
+    by the byte ceiling (``event_truncated`` false) is continuable, and its notice says more records
+    follow through the cursor rather than that records were dropped.
 
     Args:
-        tool_output: The tool result payload, possibly carrying ``truncated`` and
-            ``examined_count`` at either its top level or under a nested ``body``.
+        tool_output: The tool result payload, possibly carrying ``truncated``, ``examined_count``
+            and ``next_cursor`` at either its top level or under a nested ``body``.
         event_truncated: Whether the enclosing :class:`agents.events.AgentEvent` reported
             ``truncated=True`` — the byte-ceiling signal, independent of the search-specific one.
 
@@ -183,10 +186,22 @@ def describe_truncation(tool_output: dict[str, object], *, event_truncated: bool
 
     flagged = bool(payload.get(_SEARCH_TRUNCATED_KEY))
     examined = payload.get(_SEARCH_EXAMINED_COUNT_KEY)
+    next_cursor = payload.get(_NEXT_CURSOR_KEY)
+    continuable = not event_truncated and isinstance(next_cursor, str) and bool(next_cursor)
     if flagged and examined is not None:
+        if continuable:
+            return (
+                f"This page holds part of the results after examining {examined} records; "
+                "more records follow, so continue with its next_cursor."
+            )
         return (
             f"Search stopped early after examining {examined} records; "
             "not every matching record may be included."
+        )
+    if continuable and flagged:
+        return (
+            "This page holds part of the results; more records follow, so continue with its "
+            "next_cursor."
         )
     if event_truncated or flagged:
         return "The tool result was too large to include in full and was truncated."
@@ -532,6 +547,19 @@ class SupervisorTurn:
 #: ``completed`` event; consumers detect it with :func:`is_cancellation_event`.
 CANCELLATION_TEXT_PREFIX: Final[str] = "[cancelled]"
 
+#: The ``model_failure`` message ending a turn whose model call stopped at the output-token cap
+#: before producing any answer text.
+OUTPUT_LIMIT_NO_ANSWER_MESSAGE: Final[str] = (
+    "The model reached its output-token limit before producing an answer."
+)
+
+
+def output_limit_no_answer_event() -> AgentEvent:
+    """Return the terminal ``model_failure`` event for a truncated call that produced no text."""
+    return AgentEvent(
+        kind="error", error_kind="model_failure", error_message=OUTPUT_LIMIT_NO_ANSWER_MESSAGE
+    )
+
 
 def is_cancellation_event(event: AgentEvent) -> bool:
     """Return whether ``event`` is the terminal event of a cancelled turn.
@@ -635,7 +663,11 @@ class TurnGuard:
 
 
 def provider_event_to_agent_event(
-    event: ProviderEvent, *, accumulated_text: str = "", stream_event_id: str | None = None
+    event: ProviderEvent,
+    *,
+    accumulated_text: str = "",
+    stream_event_id: str | None = None,
+    output_truncated: bool = False,
 ) -> AgentEvent | None:
     """Map one normalised :class:`providers.base.ProviderEvent` onto the closed agent event set.
 
@@ -654,14 +686,17 @@ def provider_event_to_agent_event(
             a ``text_delta`` maps to a ``partial=True`` frame carrying it rather than to ``None``.
             ``None`` keeps the fold-into-``completed`` behaviour. Ignored for every other event
             type.
+        output_truncated: Whether the call's final ``usage`` reported a stop at the output-token
+            cap. A ``completed`` with no text then maps to :func:`output_limit_no_answer_event`
+            instead of raising. Ignored for every other event type.
 
     Returns:
         The corresponding :class:`AgentEvent`; ``None`` for a ``text_delta`` only when
         ``stream_event_id`` is ``None`` (folded into a caller-assembled ``completed`` instead).
 
     Raises:
-        ValueError: If ``event.type`` is ``"completed"`` and neither ``event.text`` nor
-            ``accumulated_text`` carries any reply text; if a ``text_delta`` with a
+        ValueError: If ``event.type`` is ``"completed"``, ``output_truncated`` is false, and neither
+            ``event.text`` nor ``accumulated_text`` carries any reply text; if a ``text_delta`` with a
             ``stream_event_id`` carries no ``text``; or if the event is otherwise malformed for its
             declared type.
     """
@@ -695,6 +730,8 @@ def provider_event_to_agent_event(
     if event.type == "completed":
         text = event.text if event.text is not None else accumulated_text
         if not text:
+            if output_truncated:
+                return output_limit_no_answer_event()
             raise ValueError("completed provider event carries no text and none was accumulated")
         return AgentEvent(
             kind="completed",
@@ -749,6 +786,8 @@ __all__ = [
     "is_cancellation_event",
     "page_context_briefing",
     "proposal_event_for",
+    "OUTPUT_LIMIT_NO_ANSWER_MESSAGE",
+    "output_limit_no_answer_event",
     "provider_event_to_agent_event",
     "subagent_tool_schemas",
     "synthesize_reply",

@@ -153,7 +153,7 @@ describe("effort labels are annotated as non-comparable across families", () => 
   const NON_COMPARABILITY = /family-specific label, not a shared scale/i;
 
   it("annotates the effort label inside every arm's own section, not once for the page", async () => {
-    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6-astra"];
+    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6.2-astra"];
     await renderCompletedRun(modelIds.map((modelId) => buildArm({ modelId })));
 
     for (const modelId of modelIds) {
@@ -524,7 +524,7 @@ describe("a prose outcome renders as unscored", () => {
 describe("the markup satisfies journey 08's selectors", () => {
   // Pins the selectors `tests/e2e/browser/journeys/08-eval-dashboard.spec.ts` uses.
   it("exposes one region per arm named exactly by its model id, plus the artifacts region", async () => {
-    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6-astra"];
+    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6.2-astra"];
     await renderCompletedRun(modelIds.map((modelId) => buildArm({ modelId })));
 
     for (const modelId of modelIds) {
@@ -592,7 +592,7 @@ describe("no annotation introduces a comparative claim", () => {
 
   it("keeps every arm's annotations free of comparative language", async () => {
     // Its positive control asserts the annotation copy rendered into the scanned section.
-    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6-astra"];
+    const modelIds = ["anthropic.claude-opus-5-5", "openai.gpt-6.2-astra"];
     await renderCompletedRun(modelIds.map((modelId) => buildArm({ modelId })));
 
     for (const modelId of modelIds) {

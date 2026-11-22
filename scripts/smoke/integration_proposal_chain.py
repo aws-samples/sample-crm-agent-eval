@@ -27,6 +27,11 @@ Assertions:
   as canonical bytes; the second must be refused with `conflict`, leaving the row and the audit
   record's own `reversed_at` untouched.
 
+* **an aged pending proposal is refused with `proposal_stale`** - a proposal whose `created_at` is
+  backdated (directly in DynamoDB) past `crm.proposals.PROPOSAL_MAX_PENDING_AGE` must be refused
+  `409` with `error.code == "proposal_stale"`, leaving the target unchanged, the proposal pending and
+  no audit record; it can still be rejected. A fresh proposal on a second target approves.
+
 `reject_proposal` is exercised on a third target: a reject leaves the target byte-identical, is
 terminal against a second reject, and makes a subsequent approval impossible.
 
@@ -71,7 +76,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Protocol
 
 from scripts.smoke.api_routes import TENANT_CLAIM, _tenant_refusal, verified_token_claims
@@ -92,6 +97,7 @@ from scripts.smoke.integration_ui_api_ddb import in_book_accounts
 from crm.audit import build_audit_record
 from crm.authz import DEMO_TENANT, Identity
 from crm.envelope import CLAIM_BOOK, CLAIM_REP_ID
+from crm.proposals import PROPOSAL_MAX_PENDING_AGE
 from crm.store.keys import derive, derived_attribute_names, tenant_prefixed
 from crm.store.store import Store
 from crm.toolspec.definitions import BY_NAME
@@ -692,6 +698,7 @@ def _run_chain(
     """Run the five independent legs of the chain against independent target records."""
     yield from _approval_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
     yield from _stale_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
+    yield from _aged_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
     yield from _reject_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
     yield from _delete_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
     yield from _payload_allowlist_leg(ctx=ctx, caller=caller, domain=domain, identity=identity)
@@ -797,6 +804,19 @@ _STALE_LEG_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("stale_approval", "proposal_still_pending"),
     ("stale_approval", "refusal_wrote_no_audit_record"),
 )
+
+_AGED_LEG_CHECKS: Final[tuple[tuple[str, str], ...]] = (
+    ("aged_approval", "refused_with_proposal_stale"),
+    ("aged_approval", "target_unchanged_by_the_refusal"),
+    ("aged_approval", "proposal_still_pending"),
+    ("aged_approval", "refusal_wrote_no_audit_record"),
+    ("aged_approval", "aged_proposal_still_rejectable"),
+    ("aged_approval", "fresh_proposal_approves"),
+    ("aged_approval", "fresh_target_committed"),
+)
+
+#: How far past the approval window the aged leg backdates its proposal's `created_at`.
+_AGED_MARGIN: Final[timedelta] = timedelta(days=1)
 
 _REJECT_LEG_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("reject", "proposal_row_is_rejected"),
@@ -1541,6 +1561,198 @@ def _stale_leg(  # noqa: C901 - one cohesive probe over shared state
             f"audit rows for the stale target: {len(audits_before)} before the refused approval, "
             f"{len(audits_after)} after"
         ),
+    )
+
+
+def _refused_with_proposal_stale(
+    result: HttpResult, *, resource: str, check: str, what: str
+) -> CheckResult:
+    """Assert ``result`` is a refusal carrying `ProposalStale`'s own 409/`proposal_stale` pair."""
+    return _refused_with(
+        result,
+        resource=resource,
+        check=check,
+        what=what,
+        member="ProposalStale",
+        expected_status=409,
+        expected_code="proposal_stale",
+    )
+
+
+def _backdate_proposal(ctx: SmokeContext, proposal_id: str) -> str:
+    """Set the proposal's `created_at` past the approval window, as the operator; return it."""
+    aged = (datetime.now(UTC) - PROPOSAL_MAX_PENDING_AGE - _AGED_MARGIN).isoformat()
+    _store(ctx).update_item(
+        _PROPOSALS_TABLE,
+        {"proposal_id": proposal_id},
+        set_values={"created_at": aged},
+        condition=None,
+    )
+    return aged
+
+
+def _aged_leg(  # noqa: PLR0911 - one cohesive probe over shared state
+    *, ctx: SmokeContext, caller: HttpCaller, domain: str, identity: SmokeIdentity
+) -> Iterable[CheckResult]:
+    """Approve a proposal aged past the window (refused), then a fresh one (approved).
+
+    Runs against two targets of its own. The aged proposal is rejected at the end, which the window
+    still allows; tenant teardown removes both targets and both proposals.
+    """
+    tenant = identity.tenant
+    target_id, why = _create_target(
+        caller=caller,
+        domain=domain,
+        identity=identity,
+        step="aged-leg-target",
+        name="Layer 5 proposal-chain aged-proposal target",
+    )
+    if target_id is None:
+        yield CheckResult(resource="aged_approval", check="setup_target", status="fail", detail=why)
+        yield from _skip_leg(_AGED_LEG_CHECKS, f"target could not be created: {why}")
+        return
+    proposal_id, why = _submit(
+        caller=caller,
+        domain=domain,
+        identity=identity,
+        step="aged-leg-submit",
+        target_id=target_id,
+        reason="Layer 5 smoke: aged-proposal probe",
+    )
+    if proposal_id is None:
+        yield CheckResult(
+            resource="aged_approval", check="setup_proposal", status="fail", detail=why
+        )
+        yield from _skip_leg(_AGED_LEG_CHECKS, f"submit_proposal failed: {why}")
+        return
+    try:
+        aged_at = _backdate_proposal(ctx, proposal_id)
+    except Exception as exc:  # noqa: BLE001 - a failing check, never a crash
+        yield CheckResult(
+            resource="aged_approval",
+            check="setup_backdate",
+            status="fail",
+            detail=f"could not backdate the proposal: {exception_detail(exc)}",
+        )
+        yield from _skip_leg(_AGED_LEG_CHECKS, "the proposal could not be backdated")
+        return
+    yield CheckResult(
+        resource="aged_approval",
+        check="setup_backdate",
+        status="pass",
+        detail=f"proposal {proposal_id!r} created_at set to {aged_at} as the operator",
+    )
+
+    before = _read_opportunity(ctx, target_id)
+    audits_before = _audit_ids_for_target(ctx, tenant=tenant, target_id=target_id)
+    yield _refused_with_proposal_stale(
+        _call_tool(
+            caller,
+            domain,
+            BY_NAME["approve_proposal"].name,
+            identity.token,
+            {
+                "proposal_id": proposal_id,
+                "transaction_key": _make_transaction_key(tenant, "aged-leg-approve"),
+            },
+        ),
+        resource="aged_approval",
+        check="refused_with_proposal_stale",
+        what="approving a proposal older than the approval window",
+    )
+    yield _unchanged_check(
+        resource="aged_approval",
+        check="target_unchanged_by_the_refusal",
+        before=before,
+        after=_read_opportunity(ctx, target_id),
+        what="aged target read back either side of the refused approval",
+    )
+    pending = _read_proposal(ctx, proposal_id)
+    pending_status = None if pending is None else pending.get("status")
+    yield CheckResult(
+        resource="aged_approval",
+        check="proposal_still_pending",
+        status="pass" if pending_status == "pending" else "fail",
+        detail=f"proposals row status={pending_status!r} after the refusal, expected 'pending'",
+    )
+    audits_after = _audit_ids_for_target(ctx, tenant=tenant, target_id=target_id)
+    yield CheckResult(
+        resource="aged_approval",
+        check="refusal_wrote_no_audit_record",
+        status="pass" if audits_after == audits_before else "fail",
+        detail=(
+            f"audit rows for the aged target: {len(audits_before)} before the refused approval, "
+            f"{len(audits_after)} after"
+        ),
+    )
+    reject_call, why = _ok_call(
+        caller,
+        domain,
+        BY_NAME["reject_proposal"].name,
+        identity,
+        {
+            "proposal_id": proposal_id,
+            "reason": "Layer 5 smoke: aged proposal rejected",
+            "transaction_key": _make_transaction_key(tenant, "aged-leg-reject"),
+        },
+    )
+    yield CheckResult(
+        resource="aged_approval",
+        check="aged_proposal_still_rejectable",
+        status="pass" if reject_call is not None else "fail",
+        detail="reject_proposal on the aged proposal returned 200"
+        if reject_call is not None
+        else f"reject_proposal on the aged proposal failed: {why}",
+    )
+
+    fresh_target, why = _create_target(
+        caller=caller,
+        domain=domain,
+        identity=identity,
+        step="aged-leg-fresh-target",
+        name="Layer 5 proposal-chain fresh-proposal target",
+    )
+    fresh_proposal = None
+    if fresh_target is not None:
+        fresh_proposal, why = _submit(
+            caller=caller,
+            domain=domain,
+            identity=identity,
+            step="aged-leg-fresh-submit",
+            target_id=fresh_target,
+            reason="Layer 5 smoke: fresh-proposal control",
+        )
+    if fresh_target is None or fresh_proposal is None:
+        yield from _skip_leg(
+            _leg_from(_AGED_LEG_CHECKS, "aged_approval", "fresh_proposal_approves"),
+            f"the fresh control could not be set up: {why}",
+        )
+        return
+    approve_call, why = _ok_call(
+        caller,
+        domain,
+        BY_NAME["approve_proposal"].name,
+        identity,
+        {
+            "proposal_id": fresh_proposal,
+            "transaction_key": _make_transaction_key(tenant, "aged-leg-fresh-approve"),
+        },
+    )
+    yield CheckResult(
+        resource="aged_approval",
+        check="fresh_proposal_approves",
+        status="pass" if approve_call is not None else "fail",
+        detail="approve_proposal on a fresh proposal returned 200"
+        if approve_call is not None
+        else f"approve_proposal on a fresh proposal failed: {why}",
+    )
+    committed = _read_opportunity(ctx, fresh_target)
+    stage = None if committed is None else committed.get("stage")
+    yield CheckResult(
+        resource="aged_approval",
+        check="fresh_target_committed",
+        status="pass" if stage == _PROPOSED_STAGE else "fail",
+        detail=f"fresh target stage={stage!r} after approval, expected {_PROPOSED_STAGE!r}",
     )
 
 

@@ -375,3 +375,44 @@ def _registered_tool(name: str) -> RegisteredTool:
     from agents.supervisor import SUPERVISOR_ROLE
 
     return next(tool for tool in tool_registry_for(SUPERVISOR_ROLE) if tool.name == name)
+
+
+def test_an_eval_turn_whose_supervisor_stops_truncated_without_text_is_recorded() -> None:
+    """Under the eval budget the turn ends without raising and keeps the truncated call."""
+    records = TurnRecords()
+    provider = _TruncatedTextlessProvider()
+
+    async def _run() -> list[AgentEvent]:
+        return [
+            event
+            async for event in drive_turn(
+                prompt="summarise acme",
+                session_id="eval-truncated",
+                providers=lambda _family: provider,
+                matrix=load_capability_matrix(),
+                tuning=session_turn_tuning(Tuning(source="test", family="openai", effort=None)),
+                budget=EVAL_BUDGET,
+                dispatch=lambda _tool, _input: {"statusCode": 200, "body": {}},
+                records=records,
+            )
+        ]
+
+    events = asyncio.run(_run())
+    assert events[-1].kind == "error" and events[-1].error_kind == "model_failure"
+    assert [inv.output_truncated for inv in records.invocations] == [True]
+    assert records.invocations[0].tokens.output_tokens == 16_384
+
+
+class _TruncatedTextlessProvider(ModelProvider):
+    """One OpenAI-shaped round that stops at the output cap with no output text."""
+
+    async def stream(
+        self,
+        invocation: ResolvedInvocation,
+        messages: list[dict[str, object]],
+        tools: list[dict[str, object]],
+    ) -> AsyncIterator[ProviderEvent]:
+        yield ProviderEvent(
+            type="usage", input_tokens=30, output_tokens=16_384, output_truncated=True
+        )
+        yield ProviderEvent(type="completed", awaiting_tools=False)

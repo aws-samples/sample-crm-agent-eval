@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 ANTHROPIC_SUPERVISOR = "anthropic.claude-sonnet-5-5"
 ANTHROPIC_SUBAGENT = "anthropic.claude-sonnet-5-5"
-OPENAI_SUPERVISOR = "openai.gpt-6.1-sol"
+OPENAI_SUPERVISOR = "openai.gpt-6.2-sol"
 
 
 @pytest.fixture(scope="module")

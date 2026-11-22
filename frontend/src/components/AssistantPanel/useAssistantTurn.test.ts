@@ -371,3 +371,20 @@ describe("the disclosure is stable across re-renders with unchanged input", () =
     expect(result.current.disclosure).toBe(first);
   });
 });
+
+describe("a re-run after replay_unavailable", () => {
+  it("is disclosed from the re-run's own result, the only one its transcript holds", () => {
+    const transcript = [
+      entry({ kind: "replay_unavailable" }, "k0"),
+      entry(toolResult({ items: [{ id: "a" }, { id: "b" }, { id: "c" }] }), "k1"),
+    ];
+    expect(transcriptRowCount(transcript)).toEqual({ count: 3 });
+    expect(
+      deriveDisclosure({ pageContext: LIST_CONTEXT, viewRowCount: 3, transcript }),
+    ).toEqual({ kind: "none" });
+  });
+
+  it("counts no rows from the signal itself", () => {
+    expect(transcriptRowCount([entry({ kind: "replay_unavailable" })])).toBeUndefined();
+  });
+});

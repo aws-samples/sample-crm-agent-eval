@@ -129,12 +129,17 @@ variable "runtime_source_vpce_deny_enabled" {
     `InvokeAgentRuntime` from every principal not arriving through the bedrock-agentcore VPC endpoint
     (with `aws:ViaAWSService = false` exempting internal service calls).
 
-    Defaults to false. Enable it only once the relay's calls are shown to carry `aws:SourceVpce`;
-    otherwise every chat turn is denied. Set `-var runtime_source_vpce_deny_enabled=true` (or in a
-    gitignored `*.auto.tfvars`) as a separate apply after stage 1 is verified.
+    Defaults to true. A fresh stack is brought up in two stages, because enabling the Deny before the
+    relay's calls are shown to carry `aws:SourceVpce` denies every chat turn:
+    1. Set `runtime_source_vpce_deny_enabled = false` in the gitignored `infra/terraform.tfvars` (or an
+       `infra/*.auto.tfvars`), apply, and verify the report-only rows. Declare stage 1 in a variable
+       file, not with `-var` or `TF_VAR_`: the network-posture smoke reads the variable files only, so a
+       stage-1 stack declared any other way fails its Deny row instead of deferring.
+    2. Remove that assignment and apply again.
+    See `docs/runbook.md`, "Fresh stack: two-stage SourceVpce bring-up".
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "vpc_cidr_block" {

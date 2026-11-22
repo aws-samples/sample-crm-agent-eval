@@ -61,8 +61,8 @@ function rawMatrix() {
         tier: "tool",
         effort: { supported: false, values: [], default: null, capped_at_when_thinking_disabled: null },
       },
-      "openai.gpt-6-astra": {
-        model_id: "openai.gpt-6-astra",
+      "openai.gpt-6.2-astra": {
+        model_id: "openai.gpt-6.2-astra",
         family: "openai",
         tier: "supervisor",
         effort: {
@@ -72,8 +72,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: null,
         },
       },
-      "openai.gpt-6.1-sol": {
-        model_id: "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-sol": {
+        model_id: "openai.gpt-6.2-sol",
         family: "openai",
         tier: "subagent",
         effort: {
@@ -102,8 +102,8 @@ function rawMatrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: { effort: "low" } },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: { effort: "low" } },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: { effort: "medium" } },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: { effort: "low" } },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: { effort: "medium" } },
         tool: { model_id: "openai.gpt-6-luna", tuning: { effort: "low" } },
       },
     },
@@ -150,7 +150,7 @@ describe("validateTierSelection — family and model", () => {
   });
 
   it("rejects a model of the other family, naming the model control", () => {
-    const err = rejection("supervisor", select({ family: "anthropic", model: "openai.gpt-6-astra" }));
+    const err = rejection("supervisor", select({ family: "anthropic", model: "openai.gpt-6.2-astra" }));
     expect(err.control).toBe(TUNING_CONTROL_MODEL);
     expect(err.message).toMatch(/openai model; this tier runs the anthropic family/);
   });
@@ -197,9 +197,9 @@ describe("validateTierSelection — effort", () => {
   });
 
   it("defaults an unset effort on the other family's configured model to that tier's effort", () => {
-    // GPT-6 Astra's default is medium; the openai supervisor tier configures low.
+    // GPT-6.2 Astra's default is medium; the openai supervisor tier configures low.
     const resolved = validateTierSelection(matrix(), "supervisor", select({ family: "openai" }));
-    expect(resolved.model.modelId).toBe("openai.gpt-6-astra");
+    expect(resolved.model.modelId).toBe("openai.gpt-6.2-astra");
     expect(resolved.effort).toBe("low");
   });
 
@@ -224,7 +224,7 @@ describe("validateTierSelection — effort", () => {
   it("checks family before model before effort, like the server", () => {
     const err = rejection(
       "supervisor",
-      select({ family: "anthropic", model: "openai.gpt-6-astra", effort: "bogus" }),
+      select({ family: "anthropic", model: "openai.gpt-6.2-astra", effort: "bogus" }),
     );
     expect(err.control).toBe(TUNING_CONTROL_MODEL);
   });

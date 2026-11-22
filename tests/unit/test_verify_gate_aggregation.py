@@ -359,7 +359,8 @@ EXPECTED_OFFLINE_PARTIALS: dict[str, str] = {
         "undeclared partial is a persistent red with nobody to close it."
     ),
     "check_plan_security_baseline": (
-        "1 control defers, and it is structural: `s3_access_log_delivery_grant` on "
+        "2 control defers, both structural: `waf_deferral_current`, because no web ACL is authored "
+        "and the security baseline records WAF as DEFER (unmet); and `s3_access_log_delivery_grant` on "
         "`modules/eval_artifacts`, whose logging target is a module VARIABLE, so the link from that "
         "source to its destination bucket is not resolvable from the module's own source. The "
         "destination's delivery grant IS asserted; the link is not, and `deferred` is what says so. "

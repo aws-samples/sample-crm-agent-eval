@@ -64,10 +64,15 @@ def _scratch_repo(tmp_path: Path, files: dict[str, bytes]) -> Path:
     return repo
 
 
+def _digest_subject() -> list[str]:
+    """The real tree's tracked `infra/**/*.tf` plus `EXPECTED_READ_INPUTS`, sorted."""
+    return sorted(set(_tracked_tf(REPO_ROOT)) | set(EXPECTED_READ_INPUTS))
+
+
 def _copy_of_real_infra(tmp_path: Path) -> Path:
-    """A one-commit repository holding only the real tree's tracked `infra/**/*.tf`."""
+    """A one-commit repository holding only the real tree's digest subject (`_digest_subject`)."""
     return _scratch_repo(
-        tmp_path, {path: (REPO_ROOT / path).read_bytes() for path in _tracked_tf(REPO_ROOT)}
+        tmp_path, {path: (REPO_ROOT / path).read_bytes() for path in _digest_subject()}
     )
 
 
@@ -105,11 +110,11 @@ def test_the_real_tree_digest_matches_an_independent_recomputation() -> None:
     paths = _tracked_tf(REPO_ROOT)
     assert any("/" in path.removeprefix("infra/") for path in paths), "no nested module .tf"
     assert any("/" not in path.removeprefix("infra/") for path in paths), "no root-level .tf"
-    assert plan_fixtures.infra_digest(REPO_ROOT) == _reference_digest(REPO_ROOT, paths)
+    assert plan_fixtures.infra_digest(REPO_ROOT) == _reference_digest(REPO_ROOT, _digest_subject())
 
 
 def test_the_digest_reads_no_history(tmp_path: Path) -> None:
-    """A one-commit repository with the same tracked .tf content has the same digest."""
+    """A one-commit repository with the same tracked digest subject has the same digest."""
     assert plan_fixtures.infra_digest(_copy_of_real_infra(tmp_path)) == plan_fixtures.infra_digest(
         REPO_ROOT
     )
@@ -247,13 +252,150 @@ def test_the_remediation_names_the_digest_and_no_commit() -> None:
     assert "captured_from_commit" not in gate._ASSERTED_PROVENANCE_FIELDS
 
 
-def test_the_copy_helper_copies_only_tracked_tf(tmp_path: Path) -> None:
-    """Control on the fixture's resource subject: the scratch copy holds exactly the tracked .tf."""
+def test_the_copy_helper_copies_only_the_digest_subject(tmp_path: Path) -> None:
+    """Control on the fixture's resource subject: the copy holds exactly the .tf and read inputs."""
     repo = _copy_of_real_infra(tmp_path)
     copied = sorted(
         str(path.relative_to(repo))
         for path in repo.rglob("*")
         if path.is_file() and ".git" not in path.parts
     )
-    assert copied == _tracked_tf(REPO_ROOT)
+    assert copied == _digest_subject()
     shutil.rmtree(repo)
+
+
+# ---------------------------------------------------------------------------
+# terraform_read_inputs: tracked files Terraform reads, behind include_read_inputs.
+# ---------------------------------------------------------------------------
+
+#: Every tracked file the real tree's `.tf` read through a literal `${path.module}/...` path.
+EXPECTED_READ_INPUTS = [
+    "config/model_capabilities.yaml",
+    "frontend/index.html",
+    "infra/modules/frontend_cdn/functions/api_path_rewrite.js",
+    "infra/modules/frontend_cdn/functions/spa_history_fallback.js",
+    "infra/regions.json",
+    "infra/templates/eval_sweep.asl.json",
+]
+
+
+def test_the_real_tree_read_inputs_are_the_expected_set() -> None:
+    assert plan_fixtures.terraform_read_inputs(REPO_ROOT) == EXPECTED_READ_INPUTS
+
+
+def test_the_read_inputs_include_files_outside_infra() -> None:
+    outside = [
+        p for p in plan_fixtures.terraform_read_inputs(REPO_ROOT) if not p.startswith("infra/")
+    ]
+    assert outside == ["config/model_capabilities.yaml", "frontend/index.html"]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        'file("${path.module}/data/x.json")',
+        'jsondecode(file("${path.module}/data/x.json"))',
+        'templatefile("${path.module}/data/x.json", {})',
+        'filebase64sha256("${path.module}/data/x.json")',
+        'filesha256("${path.module}/data/x.json")',
+        'filemd5("${path.module}/data/x.json")',
+    ],
+)
+def test_each_file_function_with_a_literal_path_is_a_read_input(tmp_path: Path, call: str) -> None:
+    repo = _scratch_repo(
+        tmp_path,
+        {"infra/main.tf": f"locals {{ x = {call} }}\n".encode(), "infra/data/x.json": b"{}"},
+    )
+    assert plan_fixtures.terraform_read_inputs(repo) == ["infra/data/x.json"]
+
+
+def test_a_parent_relative_path_resolves_against_the_tf_directory(tmp_path: Path) -> None:
+    repo = _scratch_repo(
+        tmp_path,
+        {
+            "infra/modules/m/main.tf": b'locals { x = file("${path.module}/../../../config/c.yaml") }\n',
+            "config/c.yaml": b"a: 1\n",
+        },
+    )
+    assert plan_fixtures.terraform_read_inputs(repo) == ["config/c.yaml"]
+
+
+def test_a_non_literal_path_is_not_a_read_input(tmp_path: Path) -> None:
+    repo = _scratch_repo(
+        tmp_path,
+        {"infra/main.tf": b"locals { x = filebase64sha256(var.zip) }\n", "infra/a.zip": b"z"},
+    )
+    assert plan_fixtures.terraform_read_inputs(repo) == []
+
+
+def test_an_untracked_literal_target_raises(tmp_path: Path) -> None:
+    repo = _scratch_repo(
+        tmp_path, {"infra/main.tf": b'locals { x = file("${path.module}/gone.json") }\n'}
+    )
+    (repo / "infra" / "gone.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a tracked file"):
+        plan_fixtures.terraform_read_inputs(repo)
+
+
+def test_a_target_outside_the_repository_raises(tmp_path: Path) -> None:
+    repo = _scratch_repo(
+        tmp_path, {"infra/main.tf": b'locals { x = file("${path.module}/../../etc/x") }\n'}
+    )
+    with pytest.raises(ValueError, match="outside"):
+        plan_fixtures.terraform_read_inputs(repo)
+
+
+def _repo_with_regions(tmp_path: Path) -> Path:
+    return _scratch_repo(
+        tmp_path,
+        {
+            "infra/main.tf": b'locals { r = jsondecode(file("${path.module}/regions.json")) }\n',
+            "infra/regions.json": b'{"regions": {"us-east-1": {}}}\n',
+        },
+    )
+
+
+def test_changing_regions_json_changes_the_read_inclusive_digest(tmp_path: Path) -> None:
+    repo = _repo_with_regions(tmp_path)
+    before = plan_fixtures.infra_digest(repo, include_read_inputs=True)
+    (repo / "infra" / "regions.json").write_bytes(b'{"regions": {"us-west-2": {}}}\n')
+    assert plan_fixtures.infra_digest(repo, include_read_inputs=True) != before
+
+
+def test_the_default_digest_covers_the_read_inputs(tmp_path: Path) -> None:
+    repo = _repo_with_regions(tmp_path)
+    before = plan_fixtures.infra_digest(repo)
+    assert before == _reference_digest(repo, ["infra/main.tf", "infra/regions.json"])
+    (repo / "infra" / "regions.json").write_bytes(b'{"regions": {"us-west-2": {}}}\n')
+    assert plan_fixtures.infra_digest(repo) != before
+
+
+def test_the_tf_only_digest_ignores_the_read_inputs(tmp_path: Path) -> None:
+    repo = _repo_with_regions(tmp_path)
+    before = plan_fixtures.infra_digest(repo, include_read_inputs=False)
+    assert before == _reference_digest(repo, ["infra/main.tf"])
+    (repo / "infra" / "regions.json").write_bytes(b'{"regions": {"us-west-2": {}}}\n')
+    assert plan_fixtures.infra_digest(repo, include_read_inputs=False) == before
+
+
+@pytest.mark.parametrize("read_input", ["infra/regions.json", "frontend/index.html"])
+def test_a_one_byte_read_input_mutation_reds_plan_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_input: str
+) -> None:
+    repo = _copy_of_real_infra(tmp_path)
+    plan = _plan_with_digest(tmp_path, plan_fixtures.infra_digest(repo))
+    monkeypatch.setattr(gate, "REPO_ROOT", repo)
+    control = gate.plan_staleness_finding(plan)
+    assert control is not None and control.status == "pass", "unmutated copy must pass"
+
+    target = repo / read_input
+    target.write_bytes(target.read_bytes() + b"\n")
+    finding = gate.plan_staleness_finding(plan)
+    assert finding is not None
+    assert finding.status == "deferred"
+
+
+def test_the_read_inclusive_digest_is_the_specified_hash_over_both_sets(tmp_path: Path) -> None:
+    repo = _repo_with_regions(tmp_path)
+    expected = _reference_digest(repo, ["infra/main.tf", "infra/regions.json"])
+    assert plan_fixtures.infra_digest(repo, include_read_inputs=True) == expected

@@ -49,6 +49,20 @@ class _FakeProvisioner:
         )
 
 
+class _FakeHistoryItems:
+    """`HistoryItems` holding nothing; every delete is of an absent item."""
+
+    def get(self, rep_id: str) -> None:
+        return None
+
+    def delete(self, rep_id: str) -> None:
+        return None
+
+
+def _no_history(_ctx: object) -> _FakeHistoryItems:
+    return _FakeHistoryItems()
+
+
 def _run(
     measurement: ArrivalMeasurement, *, prov: _FakeProvisioner | None = None
 ) -> dict[str, str]:
@@ -59,6 +73,7 @@ def _run(
             ctx,
             provisioner=provisioner,  # type: ignore[arg-type]
             measure=lambda *_: measurement,
+            history_items=_no_history,
         )
     )
     return {c.check: c.status for c in results}
@@ -92,7 +107,7 @@ def test_constructed_session_id_meets_the_invoke_agent_runtime_length_rule() -> 
         return _measurement([("text_delta", 0.1), ("completed", 0.3)])
 
     ctx = context_for_test(outputs={}, clients={})
-    list(checks(ctx, provisioner=_FakeProvisioner(), measure=measure))  # type: ignore[arg-type]
+    list(checks(ctx, provisioner=_FakeProvisioner(), measure=measure, history_items=_no_history))  # type: ignore[arg-type]
 
     assert captured  # the run actually issued a turn
     for session_id in captured:
@@ -136,7 +151,14 @@ def _run_concurrent(
         return turn_for(session_id)
 
     ctx = context_for_test(outputs={}, clients={})
-    rows = list(checks(ctx, provisioner=_FakeProvisioner(), measure=measure))  # type: ignore[arg-type]
+    rows = list(
+        checks(
+            ctx,
+            provisioner=_FakeProvisioner(),  # type: ignore[arg-type]
+            measure=measure,
+            history_items=_no_history,
+        )
+    )
     return {r.check: r for r in rows}, sessions
 
 
@@ -150,6 +172,7 @@ def test_concurrent_sessions_run_together_and_get_distinct_event_ids() -> None:
         "provision_smoke_user",
         "concurrent_sessions_completed",
         "concurrent_sessions_distinct_event_ids",
+        "history_items_deleted",
         "cleaned_up",
     }
     assert all(

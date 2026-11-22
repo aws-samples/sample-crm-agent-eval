@@ -38,6 +38,7 @@ jobs:
   browser-journeys:
     name: T4 browser journeys (deployed dev stack)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
 
     env:
       # Derived from the dispatch input.
@@ -78,11 +79,12 @@ jobs:
       # The lockfile is the sole install authority; @playwright/test is exact-pinned.
       - name: Install the journey package from its lockfile only
         working-directory: tests/e2e/browser
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
+      # The lockfile-pinned local binary; a registry-resolved runner could fetch a different version.
       - name: Install the Chromium build for the pinned Playwright version
         working-directory: tests/e2e/browser
-        run: npx --yes playwright install --with-deps chromium
+        run: ./node_modules/.bin/playwright install --with-deps chromium
 
       # playwright.config.ts reads CRM_TF_OUTPUTS_JSON as a path. The document is never echoed.
       - name: Materialise the stack outputs document
@@ -105,7 +107,7 @@ jobs:
         env:
           CRM_DEMO_USER_EMAIL: "${{ secrets.CRM_DEMO_USER_EMAIL }}"
           CRM_DEMO_USER_PASSWORD: "${{ secrets.CRM_DEMO_USER_PASSWORD }}"
-        run: npx --yes playwright test journeys
+        run: ./node_modules/.bin/playwright test journeys
 
       - name: Upload traces and screenshots
         if: ${{ failure() }}

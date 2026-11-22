@@ -33,11 +33,11 @@ def _arm(mode: str, model_id: str = "us.anthropic.claude-opus-5-v1:0") -> ArmRes
 
 
 def _stub_matrix() -> MatrixResult:
-    return build_matrix_result([_arm("stub"), _arm("stub", "openai.gpt-6-1-sol")])
+    return build_matrix_result([_arm("stub"), _arm("stub", "openai.gpt-6.2-sol")])
 
 
 def _live_matrix() -> MatrixResult:
-    return build_matrix_result([_arm("live"), _arm("live", "openai.gpt-6-1-sol")])
+    return build_matrix_result([_arm("live"), _arm("live", "openai.gpt-6.2-sol")])
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ def test_a_live_matrix_is_written_into_the_tracked_dir(tracked_results: Path) ->
 def test_a_mixed_stub_and_live_matrix_is_written_into_the_tracked_dir(
     tracked_results: Path,
 ) -> None:
-    mixed = build_matrix_result([_arm("stub"), _arm("live", "openai.gpt-6-1-sol")])
+    mixed = build_matrix_result([_arm("stub"), _arm("live", "openai.gpt-6.2-sol")])
     write_matrix_artifacts(mixed, tracked_results)
     assert (tracked_results / "matrix.md").is_file()
 

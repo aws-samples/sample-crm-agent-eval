@@ -8,6 +8,11 @@ default resolution path.
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,16 +20,22 @@ from typing import Any
 
 import pytest
 from fixtures.generate import generate_dataset, seed_tenant
+from scripts import proc_run
 
 from crm.authz import DEMO_TENANT
 from crm.store.provisioning import create_all_tables
 from crm.store.schema import TABLE_NAMES
 from crm.store.store import Store
-from eval.harness import DEFAULT_ARM_SPECS, run_sweep
+from eval.harness import DEFAULT_ARM_SPECS, partial_manifest_path, run_sweep
 from eval.matrix import RECORD_SHAPE_VERSION, RECORD_SHAPE_VERSION_KEY
 from eval.reprice import PRE_AGGREGATION_DIRNAME
 from eval.sweep_units import UNIT_REPEAT_INDEX_KEY, UNIT_TASK_ID_KEY
-from eval.tenancy import TenantTeardownError, teardown_tenant
+from eval.tenancy import (
+    RUN_STATUS_TORN_DOWN,
+    TenantTeardownError,
+    teardown_tenant,
+    unit_tenants_for_run,
+)
 
 #: Unique per process, so concurrent xdist workers never share a table.
 _TABLE_PREFIX = f"sweep-{uuid.uuid4().hex[:12]}-"
@@ -179,3 +190,74 @@ def test_teardown_tenant_directly_removes_only_the_named_tenants_rows(
     remaining_b, _ = sweep_store.query_tenant_scan("accounts", tenant=tenant_b)
     assert remaining_a == []
     assert len(remaining_b) == len(corpus_b.accounts)
+
+
+# -- A polite kill mid-sweep orphans no tenant ----------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+#: Bounds the wait for the first unit to finish and for the killed process to exit.
+_SIGNAL_TEST_DEADLINE_SECONDS = 240.0
+
+
+@pytest.mark.parametrize(
+    ("signum", "code"), [(signal.SIGTERM, 143), (signal.SIGHUP, 129)], ids=["SIGTERM", "SIGHUP"]
+)
+def test_a_signal_mid_sweep_tears_every_unit_tenant_down_on_the_real_engine(
+    sweep_store: Store, dynamodb_local_client: Any, tmp_path: Path, signum: int, code: int
+) -> None:
+    """A real CLI process signalled after its first unit finished exits with the signal's code,
+    marks its catalog row torn down, leaves no row under any unit tenant, and writes partial
+    results instead of a matrix."""
+    run_id = uuid.uuid4().hex
+    output_dir = tmp_path / "out"
+    first_unit = output_dir / "partial" / "units" / run_id / "arm-0-repeat-0.json"
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
+    environment["PYTHONPATH"] = os.pathsep.join([str(_REPO_ROOT / "src"), str(_REPO_ROOT)])
+    command = [
+        sys.executable,
+        "-m",
+        "eval.harness",
+        "--endpoint-url",
+        str(dynamodb_local_client.meta.endpoint_url),
+        "--table-prefix",
+        _TABLE_PREFIX,
+        "--output-dir",
+        str(output_dir),
+        "--run-id",
+        run_id,
+    ]
+    process = proc_run.popen(
+        command,
+        cwd=_REPO_ROOT,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + _SIGNAL_TEST_DEADLINE_SECONDS
+        while not first_unit.exists():
+            assert process.poll() is None, f"the sweep exited early: {process.communicate()}"
+            assert time.monotonic() < deadline, "the first unit never finished"
+            time.sleep(0.2)
+        process.send_signal(signum)
+        _stdout, stderr = process.communicate(timeout=_SIGNAL_TEST_DEADLINE_SECONDS)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
+
+    assert process.returncode == code, stderr
+    assert "Traceback" not in stderr
+    row = sweep_store.get_item("eval_runs", {"run_id": run_id}, consistent=True)
+    assert row is not None and row["status"] == RUN_STATUS_TORN_DOWN, row
+    for unit_tenant in unit_tenants_for_run(run_id, arm_count=len(DEFAULT_ARM_SPECS), repeats=1):
+        for table in ("accounts", "opportunities", "contacts"):
+            remaining, _ = sweep_store.query_tenant_scan(table, tenant=unit_tenant)
+            assert remaining == [], (unit_tenant, table)
+    manifest = json.loads(partial_manifest_path(output_dir).read_text(encoding="utf-8"))
+    assert manifest["run_id"] == run_id
+    assert manifest["reason"] == f"signal:{signal.Signals(signum).name}"
+    assert manifest["teardown"] == "ok"
+    assert [unit["arm_index"] for unit in manifest["completed_units"]] == [0]
+    assert not (output_dir / "matrix.md").exists()

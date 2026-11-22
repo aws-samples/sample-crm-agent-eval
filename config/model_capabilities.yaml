@@ -29,7 +29,7 @@ effort_scale_comparability:
       anthropic.claude-sonnet-5-5:
         rungs: [low, medium, high]
         default: high
-      openai.gpt-6.1-sol:
+      openai.gpt-6.2-sol:
         rungs: [none, low, medium, high, xhigh, max]
         default: medium
     subagent:
@@ -50,7 +50,7 @@ effort_scale_comparability:
     An identical effort label across families is pinned for reproducibility and is not a
     claim of equivalent reasoning budget. Supervisor: `medium` is the second rung of a three-rung
     scale on anthropic.claude-sonnet-5-5 and the third rung of a six-rung scale (inferred) on
-    openai.gpt-6.1-sol. Subagent: `low` is the lowest rung of a three-rung scale on
+    openai.gpt-6.2-sol. Subagent: `low` is the lowest rung of a three-rung scale on
     anthropic.claude-sonnet-5-5 and the second rung of a six-rung scale (inferred), above `none`,
     on openai.gpt-6.1-terra. Tool: `low` is the lowest rung of a five-rung scale on
     anthropic.claude-haiku-5-5 and the second rung of a six-rung scale, above `none`, on
@@ -152,33 +152,39 @@ models:
       launched: "2026-10-07"
       eol_no_sooner_than: "2027-10-07"
 
-  openai.gpt-6-astra:
+  openai.gpt-6.2-astra:
     family: openai
     tier: supervisor
-    inference_profile: global.openai.gpt-6-astra
+    inference_profile: global.openai.gpt-6.2-astra
     api_path: responses
+    # Context window and output limit from the GPT-6.2 Astra model card, read 2026-11-20.
     context_window_tokens: 1050000
     max_output_tokens: 128000
     effort:
       supported: true
-      # INFERRED. No AWS source lists Astra's effort levels or default; both are carried over from
-      # GPT-6 Sol/Luna and GPT-5.6. The path is inferred to be reasoning.effort.
+      # INFERRED. No AWS source lists GPT-6.2 Astra's effort levels or default; both are carried
+      # over from GPT-6 Astra, GPT-6 Sol/Luna and GPT-5.6. The path is inferred to be
+      # reasoning.effort.
       values: [none, low, medium, high, xhigh, max]
       default: medium
       confidence: inferred
+    # INFERRED from GPT-6.2 Sol; the GPT-6.2 Astra model card gives no checkpoint minimum.
     prompt_cache_min_checkpoint_tokens: 1024
 
-  openai.gpt-6.1-sol:
+  openai.gpt-6.2-sol:
     family: openai
     tier: supervisor
-    inference_profile: global.openai.gpt-6.1-sol
+    inference_profile: global.openai.gpt-6.2-sol
     api_path: responses
-    context_window_tokens: 1000000
-    max_output_tokens: 131072
+    # Context window, output limit and the 1,024-token cacheable-prefix minimum from the GPT-6.2
+    # Sol model card, read 2026-11-20.
+    context_window_tokens: 1050000
+    max_output_tokens: 128000
     effort:
       supported: true
-      # INFERRED. No AWS source lists GPT-6.1 Sol's effort levels or default; both are carried
-      # over from GPT-6 Sol/Luna and GPT-5.6. The tier's `medium` is in every carried-over set.
+      # INFERRED. No AWS source lists GPT-6.2 Sol's effort levels or default; both are carried
+      # over from GPT-6.1 Sol, GPT-6 Sol/Luna and GPT-5.6. The tier's `medium` is in every
+      # carried-over set.
       values: [none, low, medium, high, xhigh, max]
       default: medium
       confidence: inferred
@@ -227,8 +233,8 @@ provenance:
     finding: >-
       All six model IDs present and their inference profiles ACTIVE in us-east-1 on 2026-10-09:
       global.anthropic.claude-opus-5-5, global.anthropic.claude-sonnet-5-5,
-      global.anthropic.claude-haiku-5-5, global.openai.gpt-6-astra, global.openai.gpt-6.1-sol and
-      global.openai.gpt-6-luna. Every profile is `global.`: `us.anthropic.claude-sonnet-5-5` does
+      global.anthropic.claude-haiku-5-5, the GPT-6 Astra and GPT-6.1 Sol profiles then configured,
+      and global.openai.gpt-6-luna. Every profile is `global.`: `us.anthropic.claude-sonnet-5-5` does
       not exist (measured ResourceNotFoundException), so the owner chose `global.` for every
       tier. Global profiles route to the region-less foundation-model ARN, i.e. anywhere in the
       world, so an "inference stays within US regions" residency property does not hold for any
@@ -238,10 +244,15 @@ provenance:
     The anthropic tier defaults are Claude Sonnet 5.5 (supervisor and subagent) and Claude Haiku
     5.5 (tool). Claude Opus 5.5 stays in the matrix as a selectable, non-default anthropic model;
     its `tier` is its home tier, and no tier in config/models.yaml assigns it. The openai tier
-    defaults are GPT-6.1 Sol (supervisor), GPT-6.1 Terra (subagent) and GPT-6 Luna
-    (tool). GPT-6 Astra likewise stays a selectable, non-default openai model; its `tier`
+    defaults are GPT-6.2 Sol (supervisor), GPT-6.1 Terra (subagent) and GPT-6 Luna
+    (tool). GPT-6.2 Astra likewise stays a selectable, non-default openai model; its `tier`
     is its home tier, and no tier in config/models.yaml assigns it. global.openai.gpt-6.1-terra
     was not part of the 2026-10-09 check above; a live call reached it on 2026-10-27.
+    GPT-6.2 Sol and GPT-6.2 Astra replaced GPT-6.1 Sol and GPT-6 Astra on 2026-11-20, after a
+    live check that day in the region named above found openai.gpt-6.2-sol and
+    openai.gpt-6.2-astra ACTIVE with ACTIVE
+    `global.` inference profiles, and one Responses API call through each `global.` profile
+    returned `completed`.
   sources:
     - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-5-5.html
     - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html
@@ -249,7 +260,7 @@ provenance:
     - https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-adaptive-thinking.html
     - https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
     - https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-thinking-block-binding.html
-    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html
-    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-sol.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-2-astra.html
+    - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-2-sol.html
     - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-1-terra.html
     - https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-luna.html

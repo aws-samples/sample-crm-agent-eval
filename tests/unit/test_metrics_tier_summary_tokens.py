@@ -19,7 +19,7 @@ from eval.metrics import (
 )
 
 _ANTHROPIC = "anthropic.claude-sonnet-5-5"
-_OPENAI = "openai.gpt-6.1-sol"
+_OPENAI = "openai.gpt-6.2-sol"
 
 
 def _call(

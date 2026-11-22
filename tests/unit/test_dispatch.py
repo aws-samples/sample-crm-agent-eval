@@ -29,6 +29,7 @@ from starlette.testclient import TestClient
 import agents.runtime_server as runtime_server
 import crm.dispatch as dispatch
 from agents.runtime_server import HEARTBEAT_INTERVAL_SECONDS
+from agents.supervisor import classify_tool_result
 from crm.envelope import AGENT_IDENTITY_KEY, CLAIM_REP_ID, CLAIM_TENANT
 from providers.base import ModelProvider, ProviderEvent, ResolvedInvocation
 from tests.unit.test_timeout_chain import INFRA, _block, _code, _number, _origin_read_timeout
@@ -252,33 +253,6 @@ def timed_out_lambda(monkeypatch: pytest.MonkeyPatch) -> _RaisingInvoker:
     return invoker
 
 
-def test_a_timed_out_delegated_tool_call_classifies_as_tool_failure(
-    timed_out_lambda: _RaisingInvoker,
-) -> None:
-    """Through the Runtime's delegation mode: `tool_failure`, no reported data, an honest reply."""
-    response = TestClient(runtime_server.app).post(
-        "/invocations",
-        json={
-            "mode": "delegation",
-            "tool_name": "get_account",
-            "tool_input": {"account_id": "acc-1"},
-            AGENT_IDENTITY_KEY: {
-                "claims": dict(_CLAIMS),
-                "session_id": "sess-timeout",
-                "principal_type": "user",
-            },
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert timed_out_lambda.calls == 1
-    assert body["outcome"]["kind"] == "tool_failure"
-    assert body["reported_result"] is None
-    assert body["reply_text"] == (
-        "That request could not be completed: The request could not be completed."
-    )
-
-
 class _GetAccountThenAnswer(ModelProvider):
     """Calls `get_account` directly, then answers with fixed text."""
 
@@ -308,6 +282,43 @@ class _GetAccountThenAnswer(ModelProvider):
         yield ProviderEvent(type="text_delta", text="I could not reach that record.")
         yield ProviderEvent(type="usage", input_tokens=1, output_tokens=1)
         yield ProviderEvent(type="completed", awaiting_tools=False)
+
+
+def test_a_timed_out_tool_call_in_a_chat_turn_classifies_as_tool_failure_with_no_data(
+    timed_out_lambda: _RaisingInvoker, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timed-out result classifies as `tool_failure`, and no frame carries account data."""
+    provider = _GetAccountThenAnswer()
+    monkeypatch.setattr(runtime_server, "_model_provider", lambda *_a: provider)
+    with TestClient(runtime_server.app).stream(
+        "POST",
+        "/invocations",
+        json={
+            "prompt": "How is Acme?",
+            "session_id": "sess-timeout",
+            AGENT_IDENTITY_KEY: {
+                "claims": dict(_CLAIMS),
+                "session_id": "sess-timeout",
+                "principal_type": "user",
+            },
+        },
+    ) as response:
+        assert response.status_code == 200
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in "".join(response.iter_text()).splitlines()
+            if line.startswith("data: ")
+        ]
+
+    assert timed_out_lambda.calls == 1
+    tool_results = [frame for frame in frames if frame["kind"] == "tool_result"]
+    assert len(tool_results) == 1
+    tool_output = tool_results[0]["tool_output"]
+    outcome = classify_tool_result(tool_output)
+    assert outcome.kind == "tool_failure"
+    assert outcome.data is None
+    assert "body" not in tool_output
+    assert not any("account" in json.dumps(frame.get("tool_output") or {}) for frame in frames)
 
 
 def test_a_timed_out_tool_call_in_a_chat_turn_is_a_tool_result_error_not_a_model_failure(

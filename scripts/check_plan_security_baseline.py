@@ -5885,6 +5885,50 @@ def check_cloudfront_oac(plan: Plan) -> list[Finding]:
     return findings
 
 
+#: The `docs/security-baseline.md` row a web ACL is tracked under, and the class it must carry.
+WAF_CONTROL_CELL = "WAF"
+WAF_DEFER_CLASS_PREFIX = "DEFER (unmet)"
+WAF_SPEC_ROW = "WAF: web ACL on the public entry points (DEFER while none is authored)"
+
+
+def check_waf_deferral_current(plan: Plan) -> list[Finding]:
+    """The WAF DEFER row still describes the plan: no web ACL, association, or distribution ACL id.
+
+    Reports `deferred` (never `pass`) while no web ACL is planned, and `fail` once one is, so the
+    DEFER row is replaced by an assertion rather than left describing a stack that changed.
+    """
+    planned = [
+        r["address"]
+        for r in plan.by_type("aws_wafv2_web_acl") + plan.by_type("aws_wafv2_web_acl_association")
+    ]
+    planned += [
+        r["address"]
+        for r in plan.by_type("aws_cloudfront_distribution")
+        if plan.after(r).get("web_acl_id") or plan.after_unknown(r).get("web_acl_id")
+    ]
+    if planned:
+        return [
+            Finding(
+                "waf_deferral_current",
+                address,
+                "fail",
+                "a web ACL is now planned, so the security-baseline WAF DEFER row is stale: "
+                "replace it with an assertion over the planned web ACL",
+            )
+            for address in planned
+        ]
+    return [
+        Finding(
+            "waf_deferral_current",
+            "(no web ACL in plan)",
+            "deferred",
+            "no aws_wafv2_web_acl, no aws_wafv2_web_acl_association and no CloudFront web_acl_id: "
+            "the CloudFront distribution and the REST API stage have no WAF. Recorded DEFER (unmet) "
+            "in docs/security-baseline.md, never a pass",
+        )
+    ]
+
+
 def check_cloudfront_behaviours(plan: Plan) -> list[Finding]:
     findings = []
     for r in plan.by_type("aws_cloudfront_distribution"):
@@ -7274,6 +7318,10 @@ EXPECTED_RESOURCE_COUNTS: dict[str, ExpectedCount] = {
 
 #: Resource types whose absence is asserted, each with the reason.
 ABSENCE_ASSERTED_TYPES: dict[str, str] = {
+    "aws_wafv2_web_acl": "check_waf_deferral_current reports the WAF row deferred iff the plan "
+    "creates no web ACL; one appearing fails it until the DEFER row becomes an assertion.",
+    "aws_wafv2_web_acl_association": "As aws_wafv2_web_acl: an association is the REST API "
+    "stage's half of a web ACL, absent while the WAF row is DEFER.",
     "aws_iam_access_key": "check_bedrock_no_static_credentials passes iff the plan creates no "
     "static IAM access key at all; a floor would demand one.",
     # Adopted network types the vpc module must not create.
@@ -7901,6 +7949,12 @@ CONTROLS: list[ControlSpec] = [
         "Transport: CloudFront behaviours",
         check_cloudfront_behaviours,
     ),
+    ControlSpec(
+        "waf_deferral_current",
+        "cloudfront",
+        WAF_SPEC_ROW,
+        check_waf_deferral_current,
+    ),
     ControlSpec("cognito_mfa", "cognito", "Cognito: MFA", check_cognito_mfa),
     ControlSpec(
         "cognito_password_policy",
@@ -8149,7 +8203,7 @@ PLAN_TIME_INEXPRESSIBLE: list[dict[str, str]] = [
         "spec_row": "Runtime inbound auth = IAM (asserted from the deployed resource, not from "
         "the Terraform source)",
         "reason": "The provider models IAM inbound auth as the ABSENCE of an authorizer block, not "
-        "as a value: `aws_bedrockagentcore_agent_runtime` in hashicorp/aws 6.72.0 has no "
+        "as a value: `aws_bedrockagentcore_agent_runtime` in the pinned hashicorp/aws has no "
         "IAM enum and its only authorizer sub-block is `custom_jwt_authorizer` (verified "
         "against `terraform providers schema -json`). So source or plan "
         "inspection cannot distinguish `IAM` from a runtime whose authorizer block was "
@@ -8418,6 +8472,11 @@ def derive_spec_10_control_names() -> list[tuple[str, str]]:
 
     Several rows share one `Control` name, so every row is returned rather than one per name.
     """
+    return [(control, requirement) for control, requirement, _ in derive_baseline_rows_with_class()]
+
+
+def derive_baseline_rows_with_class() -> list[tuple[str, str, str]]:
+    """Every `docs/security-baseline.md` table row as `(Control, Requirement, Class)`, markup removed."""
     lines = SECURITY_BASELINE_PATH.read_text(encoding="utf-8").splitlines()
     try:
         start = lines.index(SECURITY_BASELINE_HEADER)
@@ -8425,7 +8484,7 @@ def derive_spec_10_control_names() -> list[tuple[str, str]]:
         raise ValueError(
             f"{SECURITY_BASELINE_PATH}: could not locate the {SECURITY_BASELINE_HEADER!r} table"
         ) from None
-    rows: list[tuple[str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     for line in lines[start + 1 :]:
         if not line.startswith("|"):
             break
@@ -8434,9 +8493,10 @@ def derive_spec_10_control_names() -> list[tuple[str, str]]:
             continue
         control = re.sub(r"`", "", cells[0]).strip()
         requirement = re.sub(r"`|\*\*", "", cells[1]).strip()
+        row_class = re.sub(r"`|\*\*", "", cells[-1]).strip()
         if not control:
             continue
-        rows.append((control, requirement))
+        rows.append((control, requirement, row_class))
     return rows
 
 
@@ -8538,7 +8598,25 @@ def run_self_check() -> list[Finding]:
         "Source: no *.tf.json under infra/, so every source-reading control sees all of it",
     }
 
+    waf_rows = [
+        (control, requirement, row_class)
+        for control, requirement, row_class in derive_baseline_rows_with_class()
+        if control == WAF_CONTROL_CELL
+    ]
+    if len(waf_rows) == 1:
+        control_row_map[f"{waf_rows[0][0]} | {waf_rows[0][1]}"] = WAF_SPEC_ROW
+
     findings = []
+    waf_ok = len(waf_rows) == 1 and waf_rows[0][2].startswith(WAF_DEFER_CLASS_PREFIX)
+    findings.append(
+        Finding(
+            "self_check",
+            f"(standing DEFER row) {WAF_CONTROL_CELL}",
+            "pass" if waf_ok else "fail",
+            f"rows with Control={WAF_CONTROL_CELL!r}: {len(waf_rows)} (expected 1), class "
+            f"{[c for _, _, c in waf_rows]!r} must start with {WAF_DEFER_CLASS_PREFIX!r}",
+        )
+    )
     for row in spec_10_rows:
         mapped_control_row = control_row_map.get(row)
         has_control = (
@@ -8703,14 +8781,15 @@ def plan_staleness_finding(plan_path: Path) -> Finding | None:
             "plan_freshness",
             plan_path.name,
             "pass",
-            f"{INFRA_DIGEST_KEY} {recorded} equals the working tree's tracked infra/**/*.tf "
-            "digest, so every plan-derived control above validated the CURRENT infra/.",
+            f"{INFRA_DIGEST_KEY} {recorded} equals the working tree's infra digest (tracked "
+            "infra/**/*.tf and the tracked files they read), so every plan-derived control above "
+            "validated the CURRENT infra/.",
         )
 
     return deferred(
-        f"{INFRA_DIGEST_KEY} {recorded} differs from the working tree's tracked infra/**/*.tf "
-        f"digest {current} — so every plan-derived control above validated that SNAPSHOT and not "
-        "the current infra/."
+        f"{INFRA_DIGEST_KEY} {recorded} differs from the working tree's infra digest (tracked "
+        f"infra/**/*.tf and the tracked files they read) {current} — so every plan-derived "
+        "control above validated that SNAPSHOT and not the current infra/."
     )
 
 

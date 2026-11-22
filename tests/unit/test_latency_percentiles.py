@@ -184,6 +184,10 @@ class _ScriptedProvider(ModelProvider):
             yield event
 
 
+async def _no_sleep(_seconds: float) -> None:
+    return None
+
+
 async def _drain(provider: ThrottleRetryingProvider, invocation: ResolvedInvocation) -> None:
     async for _event in provider.stream(invocation, [], []):
         pass
@@ -220,7 +224,7 @@ def test_only_the_successful_attempts_latency_reaches_the_caller() -> None:
     usage = ProviderEvent(type="usage", input_tokens=10, output_tokens=5, latency_ms=7.0)
     ok = ProviderEvent(type="completed", input_tokens=10, output_tokens=5, awaiting_tools=False)
     scripted = _ScriptedProvider([[throttle], [usage, ok]])
-    provider = ThrottleRetryingProvider(scripted, backoff_seconds=0.0, sleep=lambda _s: None)
+    provider = ThrottleRetryingProvider(scripted, backoff_seconds=0.0, sleep=_no_sleep)
 
     events = asyncio.run(_collect(provider, resolved))
 

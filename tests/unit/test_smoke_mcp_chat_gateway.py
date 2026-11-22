@@ -128,6 +128,9 @@ class _FakeUser:
     def provision(self) -> str:
         return self.token
 
+    def tenant(self) -> str:
+        return {_USER_A: "eval-smoke-a", _USER_B: "eval-smoke-b"}.get(self.token, "eval-smoke-x")
+
     def cleanup(self) -> Iterable[CheckResult]:
         self.cleaned = True
         yield CheckResult(resource="smoke_user", check="user_removed", status="pass", detail="")
@@ -139,11 +142,33 @@ class _FakeService:
         self.cleaned = False
 
     def provision(self) -> Any:
-        return type("Fixture", (), {"token": self.token, "rep_id": "service"})()
+        return type(
+            "Fixture", (), {"token": self.token, "rep_id": "service", "tenant": _SERVICE_TENANT}
+        )()
 
     def cleanup(self) -> Iterable[CheckResult]:
         self.cleaned = True
         yield CheckResult(resource="service", check="service_removed", status="pass", detail="")
+
+
+_SERVICE_TENANT = "eval-smoke-svc"
+
+
+class _FakeHistoryItems:
+    """`HistoryItems` over a set of keys; `sticky` keys survive `delete`."""
+
+    def __init__(self, keys: Iterable[str] = (), *, sticky: bool = False) -> None:
+        self.keys = set(keys)
+        self.sticky = sticky
+        self.deleted: list[str] = []
+
+    def get(self, rep_id: str) -> Any:
+        return {"rep_id": rep_id} if rep_id in self.keys else None
+
+    def delete(self, rep_id: str) -> None:
+        self.deleted.append(rep_id)
+        if not self.sticky:
+            self.keys.discard(rep_id)
 
 
 class _FakeGateway1:
@@ -210,6 +235,7 @@ def _run(
     invoke_only_token: str = _INVOKE_ONLY,
     dynamo: _FakeDynamo | None = None,
     outputs: dict[str, Any] | None = None,
+    history: _FakeHistoryItems | None = None,
 ) -> tuple[dict[str, CheckResult], list[Any]]:
     users = iter(user_tokens)
     made: list[Any] = []
@@ -244,6 +270,7 @@ def _run(
             service_provisioner_factory=service_factory,
             scoped_token_minter=minter,
             jwks_url=test_key.jwks_url(),
+            history_items=lambda _ctx: history if history is not None else _FakeHistoryItems(),
         )
     )
     assert minted in ([], ["gateway/invoke"])
@@ -268,6 +295,7 @@ def test_a_compliant_gateway_passes_every_row_and_cleans_up() -> None:
         "service_call_answered": "pass",
         "model_backed_turns_within_envelope": "pass",
         "conversation_items_removed": "pass",
+        "history_items_deleted": "pass",
         "user_removed": "pass",
         "service_removed": "pass",
     }
@@ -514,6 +542,34 @@ def test_an_absent_gateway1_output_fails_its_row_without_crashing() -> None:
     }
     assert rows["gateway1_refuses_chat_user_token"].status == "fail"
     assert "agentcore_gateway_url" in rows["gateway1_refuses_chat_user_token"].detail
+
+
+def _answered_conversation(row: CheckResult) -> str:
+    match = re.search(r"conversation_id='(conv-[0-9a-f]{32})'", row.detail)
+    assert match, row.detail
+    return match.group(1)
+
+
+def test_each_answered_calls_history_item_is_deleted_under_its_callers_tenant() -> None:
+    """The Runtime keys history by the caller's tenant and the conversation id; both are removed."""
+    history = _FakeHistoryItems()
+    rows, _ = _run(_FakeGateway(), history=history)
+    expected = {
+        f"history#eval-smoke-a#{_answered_conversation(rows['user_call_answered'])}",
+        f"history#{_SERVICE_TENANT}#{_answered_conversation(rows['service_call_answered'])}",
+    }
+    assert set(history.deleted) == expected
+    assert rows["history_items_deleted"].status == "pass"
+
+
+def test_a_history_item_surviving_its_delete_fails_the_history_row() -> None:
+    class _Undeletable(_FakeHistoryItems):
+        def get(self, rep_id: str) -> Any:
+            return {"rep_id": rep_id}
+
+    rows, _ = _run(_FakeGateway(), history=_Undeletable())
+    assert rows["history_items_deleted"].status == "fail"
+    assert "2 still present" in rows["history_items_deleted"].detail
 
 
 def test_both_conversation_items_are_deleted_and_reread_consistently() -> None:

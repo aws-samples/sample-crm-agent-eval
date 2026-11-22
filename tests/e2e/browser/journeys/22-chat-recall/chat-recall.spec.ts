@@ -7,8 +7,9 @@
  * Turn 2, in the same conversation, asks for the code word, and its answer must contain it. Both
  * requests are read at the network boundary. Turn 2 must reuse turn 1's `session_id` with a
  * positive `resume_from`, and its answer must differ from turn 1's, so a replay of turn 1 cannot
- * pass. Turn 3 states a second code word, and turn 4 must recall both. After "New conversation", the
- * first question gets a fresh `session_id` and an answer that does not contain the code word.
+ * pass. No turn here is a reconnect, so no request carries `resume`. Turn 3 states a second code
+ * word, and turn 4 must recall both. After "New conversation", the first question gets a fresh
+ * `session_id` and an answer that does not contain the code word.
  * Every request is the SPA's own; nothing is overridden.
  *
  * User: the demo user (`CRM_DEMO_USER_EMAIL`). Each turn calls a real model and is billed as any
@@ -32,6 +33,7 @@ interface TurnRequestBody {
   readonly prompt: string;
   readonly session_id: string;
   readonly resume_from: number | undefined;
+  readonly resume: unknown;
 }
 
 function isTurnRequest(request: Request): boolean {
@@ -44,6 +46,7 @@ function turnBody(request: Request): TurnRequestBody {
     prompt: String(body.prompt ?? ""),
     session_id: String(body.session_id ?? ""),
     resume_from: typeof body.resume_from === "number" ? body.resume_from : undefined,
+    resume: body.resume,
   };
 }
 
@@ -58,6 +61,7 @@ async function sendTurn(page: Page, prompt: string): Promise<{ body: TurnRequest
   await page.getByTestId("assistant-prompt").fill(prompt);
   await page.getByTestId("assistant-send").click();
   const body = turnBody(await requested);
+  expect(body.resume, "a plain follow-up is not a reconnect and carries no resume").toBeUndefined();
   await expect(answers).toHaveCount(before + 1, { timeout: TURN_TIMEOUT_MS });
   await expect(page.getByTestId("turn-state-pill").last()).toHaveAttribute("data-status", "completed", {
     timeout: TURN_TIMEOUT_MS,

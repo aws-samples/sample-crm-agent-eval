@@ -26,7 +26,12 @@ from botocore.credentials import Credentials
 from crm.errors import ValidationFailed
 from eval.live import is_retryable_error
 from providers import prompt_caching
-from providers.anthropic_adapter import BEDROCK_ANTHROPIC_VERSION, AnthropicAdapter, build_request
+from providers.anthropic_adapter import (
+    BEDROCK_ANTHROPIC_VERSION,
+    MALFORMED_TOOL_INPUT_MESSAGE,
+    AnthropicAdapter,
+    build_request,
+)
 from providers.base import (
     ProviderEvent,
     ResolvedInvocation,
@@ -35,7 +40,8 @@ from providers.base import (
     validate_tuning,
 )
 from providers.capabilities import load_capability_matrix
-from providers.openai_adapter import OpenAIAdapter
+from providers.openai_adapter import OpenAIAdapter, provider_error_message
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.sdk_transport import CredentialPolicyError
 from tests.integration._aws_eventstream import (
     encode_chunk_event,
@@ -68,6 +74,17 @@ Step = httpx2.Response | Exception
 async def _collect(adapter_stream: AsyncIterator[ProviderEvent]) -> list[ProviderEvent]:
     """Drain an adapter's async event stream into a list for assertion."""
     return [event async for event in adapter_stream]
+
+
+def _final_usage(events: list[ProviderEvent]) -> ProviderEvent:
+    """Return the one non-provisional ``usage`` event in ``events``."""
+    (usage,) = [e for e in events if e.type == "usage" and not e.provisional]
+    return usage
+
+
+def _final_usage_absent(events: list[ProviderEvent]) -> bool:
+    """Return whether ``events`` carry no ``usage`` event other than provisional ones."""
+    return all(e.provisional for e in events if e.type == "usage")
 
 
 def _run(adapter_stream: AsyncIterator[ProviderEvent]) -> list[ProviderEvent]:
@@ -410,7 +427,8 @@ def test_anthropic_in_band_exception_is_one_error_the_wrapper_retries(
     matrix: Any, fixture: str, prefix: str
 ) -> None:
     events, wire = _stream_anthropic(matrix, "supervisor", _fixture_response(fixture))
-    assert [e.type for e in events] == ["text_delta", "error"]
+    assert [e.type for e in events] == ["usage", "text_delta", "error"]
+    assert events[0].provisional
     assert events[-1].retried_attempts == ()
     message = events[-1].error_message or ""
     assert message.startswith(prefix)
@@ -502,8 +520,10 @@ def test_anthropic_usage_event_carries_the_sdk_retried_attempts(
     events, wire = _stream_anthropic(
         matrix, "supervisor", first, _fixture_response(fixture_name("opus55", "success"))
     )
-    usage = next(e for e in events if e.type == "usage")
-    assert usage.retried_attempts == (expected,)
+    provisional, final = [e for e in events if e.type == "usage"]
+    assert provisional.provisional and not final.provisional
+    assert final.retried_attempts == (expected,)
+    assert provisional.retried_attempts == ()
     assert events[-1].type == "completed"
     assert len(wire.requests) == 2
 
@@ -547,7 +567,7 @@ def test_anthropic_latency_runs_from_the_successful_attempt_to_the_end_of_the_st
             _resolve(matrix, "anthropic", "supervisor"), [{"role": "user", "content": "hi"}], []
         )
     )
-    usage = next(e for e in events if e.type == "usage")
+    usage = _final_usage(events)
     assert usage.latency_ms == pytest.approx(len(frames) * 1000.0)
     assert usage.retried_attempts == (RetriedAttempt(503, None),)
 
@@ -625,7 +645,7 @@ def test_anthropic_deadline_bounds_the_stream_body_and_closes_it(matrix: Any) ->
     )
     assert events[-1].type == "error"
     assert events[-1].error_message == _DEADLINE_MESSAGE
-    assert "usage" not in {e.type for e in events}
+    assert _final_usage_absent(events)
     assert events[-1].retried_attempts == ()
     assert closed == [True]
 
@@ -770,9 +790,12 @@ def test_anthropic_cache_tokens_map_read_and_creation_to_distinct_seam_fields(
             )
         ),
     )
-    usage = next(e for e in events if e.type == "usage")
+    usage = _final_usage(events)
     assert (usage.input_tokens, usage.output_tokens) == (50, 5)
     assert (usage.cache_read_tokens, usage.cache_write_tokens) == (7, 11)
+    provisional = events[0]
+    assert provisional.type == "usage" and provisional.provisional
+    assert (provisional.cache_read_tokens, provisional.cache_write_tokens) == (7, 11)
 
 
 def test_anthropic_recorder_is_unbound_while_the_stream_is_suspended(matrix: Any) -> None:
@@ -791,7 +814,7 @@ def test_anthropic_recorder_is_unbound_while_the_stream_is_suspended(matrix: Any
         return first, bound
 
     first, bound = asyncio.run(consume_then_finalize_elsewhere())
-    assert first.type == "text_delta"
+    assert first.type == "usage" and first.provisional
     assert bound is None
 
 
@@ -829,7 +852,7 @@ def test_anthropic_transport_failure_mid_stream_is_one_error_event_not_a_raise(
     )
     assert events[-1].type == "error"
     assert [e.type for e in events].count("error") == 1
-    assert "usage" not in {e.type for e in events}
+    assert _final_usage_absent(events)
     message = events[-1].error_message or ""
     assert message == f"{type(exc).__name__}: The model provider request failed."
     assert not is_retryable_error(message)
@@ -1267,3 +1290,119 @@ def test_every_configured_model_publishes_a_cache_minimum(matrix: Any) -> None:
         for tier in ("supervisor", "subagent", "tool"):
             model_id = matrix.model_for(family, tier).model_id
             assert prompt_caching.min_prefix_tokens(model_id) == expected, model_id
+
+
+# --- Output cap, provisional usage, max_tokens stops, malformed tool input --------------
+
+
+def _recorded_tool_use_events() -> list[dict[str, Any]]:
+    """The recorded supervisor-model tool_use stream's decoded events, as mutable copies."""
+    fixture = load_wire_fixture(fixture_name("opus55", "tool_use"))
+    return [json.loads(json.dumps(f["event"])) for f in fixture["decoded_events"]]
+
+
+def _with_stop_reason(events: list[dict[str, Any]], stop_reason: str) -> list[dict[str, Any]]:
+    """Return ``events`` with the ``message_delta`` stop reason replaced."""
+    for event in events:
+        if event["type"] == "message_delta":
+            event["delta"]["stop_reason"] = stop_reason
+    return events
+
+
+def _without_last_json_delta(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return ``events`` minus the final ``input_json_delta``, leaving the tool input unparsable."""
+    last = max(
+        i
+        for i, e in enumerate(events)
+        if e["type"] == "content_block_delta" and e["delta"]["type"] == "input_json_delta"
+    )
+    return events[:last] + events[last + 1 :]
+
+
+def _recorded_input_tokens(events: list[dict[str, Any]]) -> int:
+    start = next(e for e in events if e["type"] == "message_start")
+    return int(start["message"]["usage"]["input_tokens"])
+
+
+@pytest.mark.parametrize("tier", ANTHROPIC_TIERS)
+def test_anthropic_request_sends_the_shared_output_cap(matrix: Any, tier: str) -> None:
+    _, wire = _stream_anthropic(matrix, tier, _fixture_response(fixture_name("opus55", "success")))
+    assert wire.body()["max_tokens"] == TURN_OUTPUT_TOKEN_CAP
+
+
+@pytest.mark.parametrize("stem", CURRENT_RECORDINGS)
+@pytest.mark.parametrize("kind", ["success", "tool_use"])
+def test_anthropic_recorded_stream_emits_provisional_then_final_usage(
+    matrix: Any, stem: str, kind: str
+) -> None:
+    fixture = load_wire_fixture(fixture_name(stem, kind))
+    recorded = [f["event"] for f in fixture["decoded_events"]]
+    events, _ = _stream_anthropic_model(
+        matrix, ANTHROPIC_MODELS[stem], _fixture_response(fixture_name(stem, kind))
+    )
+    usages = [e for e in events if e.type == "usage"]
+    assert [u.provisional for u in usages] == [True, False]
+    provisional, final = usages
+    assert events[0] is provisional
+    assert (provisional.input_tokens, provisional.output_tokens) == (
+        _recorded_input_tokens(recorded),
+        0,
+    )
+    assert provisional.latency_ms is None
+    assert final.input_tokens == provisional.input_tokens
+    assert final.output_tokens is not None and final.output_tokens > 0
+    assert not final.output_truncated
+    assert not provisional.output_truncated
+
+
+def test_anthropic_max_tokens_stop_on_text_marks_the_final_usage_truncated(matrix: Any) -> None:
+    events, _ = _stream_anthropic(
+        matrix,
+        "supervisor",
+        _stream_body(
+            _with_stop_reason(
+                _message_events({"input_tokens": 9, "output_tokens": 1}), "max_tokens"
+            )
+        ),
+    )
+    assert [e.type for e in events] == ["usage", "text_delta", "usage", "completed"]
+    final = _final_usage(events)
+    assert final.output_truncated
+    assert not final.provisional
+    assert events[-1].awaiting_tools is False
+
+
+def test_anthropic_max_tokens_stop_discards_an_unparsable_tool_use_block(matrix: Any) -> None:
+    raw = _with_stop_reason(_without_last_json_delta(_recorded_tool_use_events()), "max_tokens")
+    events, _ = _stream_anthropic(matrix, "supervisor", _stream_body(raw))
+
+    assert [e.type for e in events] == ["usage", "usage", "completed"]
+    assert _final_usage(events).output_truncated
+    assert events[-1].awaiting_tools is False
+
+
+def test_anthropic_max_tokens_stop_keeps_a_complete_tool_use_block(matrix: Any) -> None:
+    raw = _with_stop_reason(_recorded_tool_use_events(), "max_tokens")
+    events, _ = _stream_anthropic(matrix, "supervisor", _stream_body(raw))
+
+    calls = [e for e in events if e.type == "tool_call"]
+    assert [(c.tool_name, c.tool_input) for c in calls] == [("get_account", {"account_id": "a-1"})]
+    assert _final_usage(events).output_truncated
+    assert events[-1].awaiting_tools is False
+
+
+@pytest.mark.parametrize("stop_reason", ["tool_use", "end_turn"])
+def test_anthropic_unparsable_tool_input_off_max_tokens_is_the_openai_taxonomy_error(
+    matrix: Any, stop_reason: str
+) -> None:
+    raw = _with_stop_reason(_without_last_json_delta(_recorded_tool_use_events()), stop_reason)
+    events, _ = _stream_anthropic(matrix, "supervisor", _stream_body(raw))
+
+    assert [e.type for e in events] == ["usage", "error"]
+    assert events[0].provisional
+    message = events[-1].error_message or ""
+    assert message == MALFORMED_TOOL_INPUT_MESSAGE
+    assert message == provider_error_message(json.JSONDecodeError("x", "", 0))
+    assert "account" not in message
+    assert not is_retryable_error(message)
+    assert events[-1].retried_attempts == ()

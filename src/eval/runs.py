@@ -94,6 +94,15 @@ JOB_ROW_STATUS: Final[str] = "job"
 _JOB_ROW_PREFIX: Final[str] = "job#"
 _LIVE_QUOTA_ROW_PREFIX: Final[str] = "livequota#"
 _MAX_FAILURE_SUMMARY: Final[int] = 1024
+
+#: The error code a failed run carries when its row stores no classified code.
+UNCLASSIFIED_ERROR_CODE: Final[str] = "unclassified"
+
+#: The error code of a run reconciled after its execution ended without finalizing.
+EXECUTION_UNFINALIZED_ERROR_CODE: Final[str] = "execution_unfinalized"
+
+#: The error code of a run failed because an administrator released its sweep lock.
+LOCK_RELEASED_ERROR_CODE: Final[str] = "lock_released"
 _CURSOR_KEYS: Final[frozenset[str]] = frozenset({"run_id", "status", "started_at"})
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
@@ -205,6 +214,8 @@ class RunRecord:
     estimate_basis: str | None = None
     teardown_status: TeardownStatus | None = None
     failure_summary: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
     matrix_report: dict[str, Any] | None = None
     artifact_links: dict[str, Any] | None = None
 
@@ -225,6 +236,9 @@ class RunRecord:
         payload omits ``matrix``, ``tier_comparison_table`` and ``artifacts``, carries
         ``record_format: "earlier"``, and one ``eval_record_format_earlier`` line is logged per run id
         per process (see :func:`_log_earlier_record_format`).
+
+        A failed run carries ``error_code`` and, when recorded, ``error_detail``; ``error`` is the
+        stored failure summary.
         """
         payload: dict[str, Any] = {
             "run_id": self.run_id,
@@ -251,6 +265,8 @@ class RunRecord:
             "estimate_basis": self.estimate_basis,
             "teardown_status": self.teardown_status,
             "error": self.failure_summary,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
         }
         if _is_earlier_record_format(self.matrix_report):
             _log_earlier_record_format(self.run_id)
@@ -407,14 +423,28 @@ def _read_json_object(raw: object, row_id: str, field: str) -> dict[str, Any] | 
     return parsed
 
 
+def _read_failure(row: Mapping[str, object]) -> tuple[str | None, str | None, str | None]:
+    """The row's ``(failure_summary, error_code, error_detail)``.
+
+    A row holding failure text but no ``error_code`` is a legacy row: it reads as
+    :data:`UNCLASSIFIED_ERROR_CODE` with no summary and no detail.
+    """
+    summary = _read_str(row.get("failure_summary")) or _read_str(row.get("error"))
+    code = _read_str(row.get("error_code"))
+    if code is None:
+        return None, (UNCLASSIFIED_ERROR_CODE if summary is not None else None), None
+    return summary, code, _read_str(row.get("error_detail"))
+
+
 def record_from_item(row: Mapping[str, object]) -> RunRecord:
-    """Build a :class:`RunRecord` from a stored job row, mapping legacy statuses.
+    """Build a :class:`RunRecord` from a stored job row, mapping legacy statuses and errors.
 
     Raises:
         ValidationFailed: A status, mode, count, amount or JSON attribute is present but unreadable.
     """
     row_id = str(row.get("run_id", ""))
     run_id = run_id_of_job_row(row_id)
+    failure_summary, error_code, error_detail = _read_failure(row)
     return RunRecord(
         run_id=run_id,
         tenant=str(row.get("tenant") or f"eval-{run_id}"),
@@ -437,7 +467,9 @@ def record_from_item(row: Mapping[str, object]) -> RunRecord:
         estimate_usd=_read_amount(row.get("estimate_usd"), row_id, "estimate_usd"),
         estimate_basis=_read_str(row.get("estimate_basis")),
         teardown_status=_read_teardown(row.get("teardown_status"), row_id),
-        failure_summary=_read_str(row.get("failure_summary")) or _read_str(row.get("error")),
+        failure_summary=failure_summary,
+        error_code=error_code,
+        error_detail=error_detail,
         matrix_report=_read_json_object(row.get("matrix_report"), row_id, "matrix_report"),
         artifact_links=_read_json_object(row.get("artifact_links"), row_id, "artifact_links"),
     )
@@ -805,20 +837,30 @@ def mark_failed(
     *,
     run_id: str,
     failure_summary: str,
+    error_code: str = UNCLASSIFIED_ERROR_CODE,
+    error_detail: str | None = None,
     teardown_status: TeardownStatus = "unknown",
     now: datetime | None = None,
 ) -> RunRecord:
-    """Mark a non-terminal run ``failed``; a run already terminal is returned unchanged."""
+    """Mark a non-terminal run ``failed``; a run already terminal is returned unchanged.
+
+    ``error_code`` and ``error_detail`` are stored beside the summary; neither may carry raw
+    upstream error text. ``error_detail`` is omitted when ``None``.
+    """
+    set_values: dict[str, object] = {
+        "job_status": "failed",
+        "finished_at": _now(now).isoformat(),
+        "teardown_status": teardown_status,
+        "failure_summary": _truncate(failure_summary),
+        "error_code": error_code,
+    }
+    if error_detail is not None:
+        set_values["error_detail"] = error_detail
     try:
         row = store.update_item(
             EVAL_RUNS_TABLE,
             {"run_id": job_row_id(run_id)},
-            set_values={
-                "job_status": "failed",
-                "finished_at": _now(now).isoformat(),
-                "teardown_status": teardown_status,
-                "failure_summary": _truncate(failure_summary),
-            },
+            set_values=set_values,
             condition=_NOT_TERMINAL_CONDITION,
             names={"#status": "job_status"},
             values=dict(_NOT_TERMINAL_VALUES),
@@ -1043,7 +1085,13 @@ def reconcile(
             {"event": "eval_run_reconciled", "correlation_id": record.run_id, "reason": reason}
         )
     )
-    reconciled = mark_failed(store, run_id=record.run_id, failure_summary=reason, now=resolved_now)
+    reconciled = mark_failed(
+        store,
+        run_id=record.run_id,
+        failure_summary=reason,
+        error_code=EXECUTION_UNFINALIZED_ERROR_CODE,
+        now=resolved_now,
+    )
     lock = read_lock(store)
     if lock is not None and lock.holder_run_id == record.run_id:
         release_lock(store, run_id=record.run_id)
@@ -1120,6 +1168,7 @@ def unlock(
             store,
             run_id=holder.run_id,
             failure_summary=f"An administrator (rep {identity.rep_id}) released the sweep lock.",
+            error_code=LOCK_RELEASED_ERROR_CODE,
             now=resolved_now,
         )
     return {"released": released, "holder_run_id": remaining.holder_run_id}
@@ -1495,6 +1544,7 @@ __all__ = [
     "ESTIMATE_EFFORT_CAVEAT",
     "EVAL_RESULTS_TABLE",
     "EVAL_RUNS_TABLE",
+    "EXECUTION_UNFINALIZED_ERROR_CODE",
     "ITEM_STATUSES",
     "JOB_MODES",
     "JOB_ROW_STATUS",
@@ -1502,10 +1552,12 @@ __all__ = [
     "LEGACY_STATUS_MAP",
     "LIST_PAGE_SIZE",
     "LIVE_SWEEPS_PER_UTC_DAY",
+    "LOCK_RELEASED_ERROR_CODE",
     "MAX_SWEEP_REPEATS",
     "SFN_FAILURE_STATUSES",
     "STALE_QUEUED_SECONDS",
     "TERMINAL_JOB_STATUSES",
+    "UNCLASSIFIED_ERROR_CODE",
     "Disposition",
     "Estimate",
     "EvalMode",

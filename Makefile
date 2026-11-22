@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-.PHONY: typecheck lint format-check test test-stub test-integration test-relay test-journeys-static check-cost-withheld verify-gates verify-shellcheck verify verify-deploy
+.PHONY: typecheck lint format-check test test-stub test-integration test-relay test-frontend test-journeys-static check-cost-withheld verify-gates verify-shellcheck verify verify-deploy
 
 typecheck:
 	.venv/bin/mypy src scripts tests
@@ -51,6 +51,28 @@ test-relay:
 	  exit 0; \
 	fi; \
 	cd src/relay && npm run --silent typecheck && npm run --silent test
+
+# The frontend's lint, typecheck (which regenerates the toolspec and SSE types first) and vitest
+# suite. Skips when npm or frontend/node_modules is absent, and fails instead under
+# CRM_REQUIRE_FRONTEND_TESTS=1 (which `verify` exports). The production build runs in CI's frontend
+# job, not here.
+test-frontend:
+	@if ! command -v npm >/dev/null 2>&1; then \
+	  reason="npm is not on PATH"; \
+	elif [ ! -d frontend/node_modules ]; then \
+	  reason="frontend/node_modules is absent — run: cd frontend && npm ci"; \
+	else \
+	  reason=""; \
+	fi; \
+	if [ -n "$$reason" ]; then \
+	  if [ "$$CRM_REQUIRE_FRONTEND_TESTS" = "1" ]; then \
+	    echo "FAIL test-frontend: $$reason" >&2; \
+	    exit 1; \
+	  fi; \
+	  echo "[SKIP] test-frontend: $$reason; verified nothing"; \
+	  exit 0; \
+	fi; \
+	cd frontend && npm run --silent lint && npm run --silent typecheck && npm run --silent test
 
 # The browser journeys' two static gates: `tsc --noEmit` (types) and `playwright test --list`
 # (collection; no browser, no deployed stack). Skips when npm or tests/e2e/browser/node_modules is
@@ -122,8 +144,10 @@ verify: export CRM_REQUIRE_TERRAFORM = 1
 verify: export CRM_REQUIRE_RELAY_TESTS = 1
 # The browser journeys' static gates; needs `tests/e2e/browser/node_modules` (`npm ci` there).
 verify: export CRM_REQUIRE_JOURNEY_STATIC = 1
+# The frontend's lint, typecheck and vitest suite; needs `frontend/node_modules` (`npm ci` there).
+verify: export CRM_REQUIRE_FRONTEND_TESTS = 1
 verify:
-	$(MAKE) -k lint format-check typecheck test test-stub test-integration test-relay test-journeys-static check-cost-withheld verify-gates verify-shellcheck
+	$(MAKE) -k lint format-check typecheck test test-stub test-integration test-relay test-frontend test-journeys-static check-cost-withheld verify-gates verify-shellcheck
 
 # Layers 4-6 against a live deployment via scripts/verify_deployment.sh. Requires AWS credentials
 # and incurs cost. The script refuses to run without --i-understand-this-is-billable (or --dry-run),

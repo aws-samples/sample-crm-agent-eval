@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
-"""The optional, untracked `.gitleaks.toml` rule set, for tests that assert on it.
+"""The gitleaks rule sets, for tests that assert on them.
 
-`.gitleaks.toml` is local-only: present, gitleaks loads it; absent, gitleaks uses its built-in
-rules. Tests about the local rule set call `require_local_rule_set()`, which skips when the file is
-absent and fails instead under `CRM_REQUIRE_GITLEAKS_CONFIG=1`.
+The untracked `.gitleaks.toml` is local-only and wins when present; otherwise the tracked
+`config/gitleaks.toml` applies. Tests about the local rule set call `require_local_rule_set()`,
+which skips when the file is absent and fails instead under `CRM_REQUIRE_GITLEAKS_CONFIG=1`.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_RULE_SET = REPO_ROOT / ".gitleaks.toml"
+TRACKED_RULE_SET = REPO_ROOT / "config" / "gitleaks.toml"
 
 REQUIRE_GITLEAKS_CONFIG_ENV_VAR = "CRM_REQUIRE_GITLEAKS_CONFIG"
 
@@ -30,8 +31,15 @@ def require_local_rule_set() -> Path:
 
 
 def install_local_rule_set(root: Path) -> None:
-    """Copy the local rule set into `root` when it exists; otherwise `root` uses built-in rules."""
+    """Copy the local rule set into `root` when it exists; otherwise `root` keeps its own rules."""
     if LOCAL_RULE_SET.is_file():
         (root / ".gitleaks.toml").write_text(
             LOCAL_RULE_SET.read_text(encoding="utf-8"), encoding="utf-8"
         )
+
+
+def install_tracked_rule_set(root: Path) -> None:
+    """Copy the tracked rule set into `root` at the same relative path."""
+    target = root / "config" / "gitleaks.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(TRACKED_RULE_SET.read_text(encoding="utf-8"), encoding="utf-8")

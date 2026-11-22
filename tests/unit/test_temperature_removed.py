@@ -129,6 +129,12 @@ PINNED_ROOTS: Final[tuple[str, ...]] = ("src/", "scripts/", "config/")
 RETIRED_ID_ALLOWLIST: Final[Mapping[str, Category]] = {
     "scripts/smoke/runtime_bedrock_iam.py": Category.RETIRED_PROFILE_CONSTANT,
     "tests/fixtures/eval/legacy_matrix_artifact.json": Category.RECORDED_OR_LEGACY_FIXTURE,
+    "tests/integration/fixtures/bedrock/openai_responses_astra_success.json": (
+        Category.RECORDED_OR_LEGACY_FIXTURE
+    ),
+    "tests/integration/fixtures/bedrock/openai_responses_astra_tool_use.json": (
+        Category.RECORDED_OR_LEGACY_FIXTURE
+    ),
 }
 
 

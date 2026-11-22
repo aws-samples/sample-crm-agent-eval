@@ -28,6 +28,8 @@ import {
   NEW_CONVERSATION_TESTID,
   PROMPT_LABEL,
   PROMPT_TESTID,
+  REPLAY_UNAVAILABLE_TESTID,
+  REPLAY_UNAVAILABLE_TEXT,
   SEND_TESTID,
   STOP_TESTID,
   STREAM_FAILURE_TEXT,
@@ -1227,6 +1229,122 @@ describe("received content survives an unavailable runtime config", () => {
  * Every class this component renders is compiled through the project's Tailwind config and required
  * to emit a rule, as in `Panel.test.tsx`.
  */
+describe("a resume the Runtime could not replay restarts the answer", () => {
+  /** A turn response that streams `frames`, then tears as a dropped connection. */
+  function tearingResponse(frames: string[]): Response {
+    const encoder = new TextEncoder();
+    const pending = [...frames];
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const next = pending.shift();
+        if (next === undefined) {
+          controller.error(new Error("connection dropped"));
+          return;
+        }
+        controller.enqueue(encoder.encode(next));
+      },
+    });
+    return { ok: true, status: 200, body: stream } as unknown as Response;
+  }
+
+  /** Answer successive turn POSTs with successive responses. */
+  function turnSequence(responses: Array<() => Response>): () => Response {
+    return () => {
+      const next = responses.shift();
+      if (next === undefined) throw new Error("unexpected extra turn request");
+      return next();
+    };
+  }
+
+  const DROPPED_ATTEMPT = [
+    frame({ kind: "tool_call", tool_name: "get_account", tool_input: {} }),
+    frame({ kind: "text_delta", text: "Half an answer", event_id: "d1", partial: true }),
+  ];
+
+  it("discards the dropped partial answer, renders the re-run and says why", async () => {
+    const user = userEvent.setup();
+    stubFetch({
+      turn: turnSequence([
+        () => tearingResponse(DROPPED_ATTEMPT),
+        () =>
+          sseResponse([
+            frame({ kind: "replay_unavailable" }),
+            frame({ kind: "text_delta", text: "A fresh ", event_id: "d2", partial: true }),
+            frame({ kind: "completed", text: "A fresh answer." }),
+          ]),
+      ]),
+    });
+    await renderConversation();
+
+    await user.type(screen.getByTestId(PROMPT_TESTID), "summarise");
+    await user.click(screen.getByTestId(SEND_TESTID));
+
+    const note = await screen.findByTestId(REPLAY_UNAVAILABLE_TESTID, {}, { timeout: 5000 });
+    expect(note).toHaveAttribute("role", "status");
+    expect(note).toHaveTextContent(REPLAY_UNAVAILABLE_TEXT);
+    await waitFor(() => expect(screen.getByTestId(MARKDOWN_ANSWER_TESTID)).toHaveTextContent("A fresh answer."));
+    expect(turnBodies().map((body) => body["resume"])).toEqual([undefined, true]);
+
+    const transcript = screen.getByTestId(TRANSCRIPT_TESTID);
+    expect(within(transcript).getAllByTestId(TURN_BUBBLE_TESTID)).toHaveLength(1);
+    expect(transcript).not.toHaveTextContent("Half an answer");
+    expect(transcript).not.toHaveTextContent("replay_unavailable");
+    // The dropped attempt's tool call is gone too: the re-run made none.
+    expect(within(transcript).queryAllByTestId("trace-step")).toHaveLength(0);
+  }, 15_000);
+
+  it("shows no note, and keeps the answer, when the frame arrives outside a resume", async () => {
+    const user = userEvent.setup();
+    stubFetch({
+      turn: () =>
+        sseResponse([
+          frame({ kind: "replay_unavailable" }),
+          frame({ kind: "completed", text: "An ordinary answer." }),
+        ]),
+    });
+    await renderConversation();
+
+    await user.type(screen.getByTestId(PROMPT_TESTID), "hello");
+    await user.click(screen.getByTestId(SEND_TESTID));
+
+    await waitFor(() =>
+      expect(screen.getByTestId(MARKDOWN_ANSWER_TESTID)).toHaveTextContent("An ordinary answer."),
+    );
+    expect(screen.queryByTestId(REPLAY_UNAVAILABLE_TESTID)).not.toBeInTheDocument();
+    expect(screen.getByTestId(TRANSCRIPT_TESTID)).not.toHaveTextContent("replay_unavailable");
+  });
+
+  it("clears the note when the next message is sent, and keeps the earlier turn's re-run", async () => {
+    const user = userEvent.setup();
+    stubFetch({
+      turn: turnSequence([
+        () => tearingResponse(DROPPED_ATTEMPT),
+        () =>
+          sseResponse([
+            frame({ kind: "replay_unavailable" }),
+            frame({ kind: "completed", text: "First answer." }),
+          ]),
+        () => sseResponse([frame({ kind: "completed", text: "Second answer." })]),
+      ]),
+    });
+    await renderConversation();
+
+    await user.type(screen.getByTestId(PROMPT_TESTID), "first");
+    await user.click(screen.getByTestId(SEND_TESTID));
+    await screen.findByTestId(REPLAY_UNAVAILABLE_TESTID, {}, { timeout: 5000 });
+    await waitFor(() => expect(screen.getByTestId(PROMPT_TESTID)).toHaveValue(""));
+
+    await user.type(screen.getByTestId(PROMPT_TESTID), "second");
+    await user.click(screen.getByTestId(SEND_TESTID));
+    await waitFor(() => expect(screen.getAllByTestId(MARKDOWN_ANSWER_TESTID)).toHaveLength(2));
+
+    expect(screen.queryByTestId(REPLAY_UNAVAILABLE_TESTID)).not.toBeInTheDocument();
+    const answers = screen.getAllByTestId(MARKDOWN_ANSWER_TESTID).map((node) => node.textContent);
+    expect(answers).toEqual(["First answer.", "Second answer."]);
+    expect(screen.getByTestId(TRANSCRIPT_TESTID)).not.toHaveTextContent("Half an answer");
+  }, 15_000);
+});
+
 describe("no silently inert utility class", () => {
   it("emits a rule for every class the conversation carries", async () => {
     const { container } = await renderConversation();

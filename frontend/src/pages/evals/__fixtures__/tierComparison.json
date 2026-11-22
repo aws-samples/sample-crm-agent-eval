@@ -14,7 +14,7 @@
             [
               "Model",
               "anthropic.claude-sonnet-5-5",
-              "openai.gpt-6-1-sol"
+              "openai.gpt-6.2-sol"
             ],
             [
               "Effort",
@@ -110,6 +110,16 @@
               "Truncated tasks",
               "0",
               "0"
+            ],
+            [
+              "Output-truncated model calls",
+              "1",
+              "1"
+            ],
+            [
+              "Output-truncated tasks",
+              "1",
+              "1"
             ]
           ]
         },
@@ -216,6 +226,16 @@
               "Truncated tasks",
               "not applicable",
               "not applicable"
+            ],
+            [
+              "Output-truncated model calls",
+              "2",
+              "2"
+            ],
+            [
+              "Output-truncated tasks",
+              "1",
+              "1"
             ]
           ]
         },
@@ -322,12 +342,22 @@
               "Truncated tasks",
               "2",
               "2"
+            ],
+            [
+              "Output-truncated model calls",
+              "3",
+              "3"
+            ],
+            [
+              "Output-truncated tasks",
+              "1",
+              "1"
             ]
           ]
         }
       ],
       "notes": [
-        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both truncation rows are not applicable there.",
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both tool-result truncation rows are not applicable there. Output-truncated model calls counts the tier's model calls that stopped at the shared per-call output token cap before finishing; Output-truncated tasks counts the task runs with at least one such call at the tier. A task whose calls were cut off at two tiers counts once in each tier's row, and a task that was both output-truncated and budget-exhausted counts in both rows. These rows apply at every tier and are distinct from the tool-result truncation rows above.",
         "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
         "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
         "Total input tokens sums, per model call, the whole prompt the call sent, counted the same way for both families: the provider's reported input plus cache read and cache write tokens for Anthropic, whose reported input excludes them, and the reported input for OpenAI, whose reported input includes them, or that call's cache read plus cache write tokens where they exceed it. Cache read tokens and Cache write tokens sum the tier's tokens served from and written to the prompt cache. Uncached input tokens is Total input tokens minus Cache read tokens minus Cache write tokens, so in every column Total input tokens = Cache read tokens + Cache write tokens + Uncached input tokens exactly. Total output tokens sums the tier's output tokens, reasoning tokens included. The per-model tables below keep each family's own reported input count (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",
@@ -426,6 +456,14 @@
             [
               "Truncated tasks",
               "0"
+            ],
+            [
+              "Output-truncated model calls",
+              "1"
+            ],
+            [
+              "Output-truncated tasks",
+              "1"
             ]
           ]
         },
@@ -512,6 +550,14 @@
             [
               "Truncated tasks",
               "not applicable"
+            ],
+            [
+              "Output-truncated model calls",
+              "2"
+            ],
+            [
+              "Output-truncated tasks",
+              "1"
             ]
           ]
         },
@@ -598,12 +644,20 @@
             [
               "Truncated tasks",
               "2"
+            ],
+            [
+              "Output-truncated model calls",
+              "3"
+            ],
+            [
+              "Output-truncated tasks",
+              "1"
             ]
           ]
         }
       ],
       "notes": [
-        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both truncation rows are not applicable there.",
+        "Model lists the tier's configured model and every model that spent tokens at the tier; Effort lists the efforts the tier's turns ran at, with unsupported for a model that takes no effort setting. Task completion rate is rate (met/applicable) over the arm's tasks applicable at the tier, where n is the applicable task count: at Supervisor a task's correctness is 1.0, at Subagent the observed delegation outcome equals the expected one, and at ToolCall an expected tool was called with schema-valid arguments. Task accuracy is the arm's mean_correctness at Supervisor and the completion rate at Subagent and ToolCall. Task completion over repeats is rate (completed/applicable) over the arm's tasks applicable at the tier in any repeat, where a task counts when its tier expectation was met in a strict majority of its applicable repeats, and N is the per-task repeat count. Cost per completed task divides the tier's total cost by its completed task count, so spend on tasks that did not complete is included; Cost per applicable task divides the same total by the tier's applicable task count (n of Task completion rate), so the two rows are equal when every applicable task completed, and it reads — when no task was applicable. Latency per completed task sums the tier's measured call latencies within each completed task and takes the nearest-rank percentile over those tasks; a completed task with no measured call at the tier contributes no sample, and n counts the contributing tasks. Model invocations sums the tier's included invocations; Long-context invocations counts those priced at the model's long-context rates, and reads — for a run recorded before that count existed. Self-corrected retries counts the tier's tool calls whose tool_failure result was followed, later in the same task, by a call to the same tool from the same role that returned data or no_match; such a call does not set the task's delegation outcome. ToolCall makes one call per invocation, so that row is not applicable there. Budget-exhausted tasks counts the task runs whose turn budget ran out at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, the Supervisor's own direct calls at Supervisor and every call made inside a delegation at ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no tool call itself, so both tool-result truncation rows are not applicable there. Output-truncated model calls counts the tier's model calls that stopped at the shared per-call output token cap before finishing; Output-truncated tasks counts the task runs with at least one such call at the tier. A task whose calls were cut off at two tiers counts once in each tier's row, and a task that was both output-truncated and budget-exhausted counts in both rows. These rows apply at every tier and are distinct from the tool-result truncation rows above.",
         "Columns are the sweep's arms in run order, not sorted by any result, and no difference or ratio between columns is computed.",
         "Effort labels are not equivalent across families: each family declares its own effort scale (config/model_capabilities.yaml, effort_scale_comparability); see `effort` under \"Reading these figures\".",
         "Total input tokens sums, per model call, the whole prompt the call sent, counted the same way for both families: the provider's reported input plus cache read and cache write tokens for Anthropic, whose reported input excludes them, and the reported input for OpenAI, whose reported input includes them, or that call's cache read plus cache write tokens where they exceed it. Cache read tokens and Cache write tokens sum the tier's tokens served from and written to the prompt cache. Uncached input tokens is Total input tokens minus Cache read tokens minus Cache write tokens, so in every column Total input tokens = Cache read tokens + Cache write tokens + Uncached input tokens exactly. Total output tokens sums the tier's output tokens, reasoning tokens included. The per-model tables below keep each family's own reported input count (token_accounting_disclosure, src/eval/matrix.py); see `input_tokens` comparability under \"Reading these figures\".",

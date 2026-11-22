@@ -884,7 +884,7 @@ def test_the_expected_table_is_exactly_what_the_module_can_emit() -> None:
                     emitted.add(local[keyword.value.id])
 
     expected = {check for _, check in _EXPECTED_CHECKS}
-    external = {"demo_tenant_untouched", "writes_only_under_smoke_tenant"}
+    external = {"demo_tenant_untouched", "writes_only_under_smoke_tenant", "history_items_deleted"}
     # `round_trip_completed` is the provisioning-failure row, not part of a complete run.
     assert emitted - expected == {"round_trip_completed"}
     assert expected - emitted == external
@@ -945,3 +945,101 @@ def test_a_provisioning_failure_still_publishes_every_expected_row(
     deferred = _find(results, "commits_the_change")
     assert deferred.status == "defer"
     assert "round_trip_completed" in deferred.detail
+
+
+class _FakeHistoryItems:
+    def __init__(self, *, undeletable: bool = False) -> None:
+        self.undeletable = undeletable
+        self.deleted: list[str] = []
+
+    def get(self, rep_id: str) -> Any:
+        return {"rep_id": rep_id} if self.undeletable else None
+
+    def delete(self, rep_id: str) -> None:
+        self.deleted.append(rep_id)
+
+
+def _run_live_checks(
+    monkeypatch: pytest.MonkeyPatch, history: _FakeHistoryItems, *, turns: int
+) -> list[CheckResult]:
+    """Drive `checks` with a fake principal and seams; `turns` chat turns reach `call_runtime`."""
+    import scripts.smoke_proposal_card as module
+
+    class _Provisioner:
+        def __init__(self, _ctx: object, *, jwks_url: str | None = None) -> None:
+            del jwks_url
+
+        def store(self) -> object:
+            return object()
+
+        def provision(self) -> Principal:
+            return _PRINCIPAL
+
+        def tenant(self) -> str:
+            return _TENANT
+
+        def cleanup(self) -> list[CheckResult]:
+            return []
+
+    def _seams(**kwargs: Any) -> list[CheckResult]:
+        for index in range(turns):
+            payload: dict[str, Any] = {"prompt": "p", "resume_from": 0}
+            if index == 0:
+                payload["session_id"] = "smoke-proposal-card-s0"
+            kwargs["call_runtime"](payload)
+        return []
+
+    sent: list[Mapping[str, Any]] = []
+    monkeypatch.setattr(module, "LiveProposalCardPrincipal", _Provisioner)
+    monkeypatch.setattr(module, "store_row_reader", lambda _store: None)
+    monkeypatch.setattr(module, "read_tenant_snapshot", lambda _reader, _tenant: {})
+    monkeypatch.setattr(
+        module,
+        "demo_tenant_untouched_check",
+        lambda **_kwargs: CheckResult(
+            resource="proposal_card", check="demo_tenant_untouched", status="pass"
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "writes_only_under_smoke_tenant_check",
+        lambda **_kwargs: CheckResult(
+            resource="proposal_card", check="writes_only_under_smoke_tenant", status="pass"
+        ),
+    )
+
+    def runtime(payload: Mapping[str, Any]) -> tuple[int, str]:
+        sent.append(payload)
+        return 200, ""
+
+    monkeypatch.setattr(module, "live_runtime_caller", lambda _ctx, _token: runtime)
+    monkeypatch.setattr(module, "live_api_caller", lambda *_args: None)
+    monkeypatch.setattr(module, "checks_with_seams", _seams)
+    ctx = context_for_test(outputs={"cloudfront_domain_name": "d.example"})
+    results = list(module.checks(ctx, history_items=lambda _ctx: history))
+    assert [p["session_id"] for p in sent] == [
+        s.removeprefix(f"history#{_TENANT}#") for s in history.deleted
+    ]
+    return results
+
+
+def test_every_chat_turns_history_item_is_deleted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A turn's session id, including one the caller generated, is deleted under the tenant."""
+    history = _FakeHistoryItems()
+    results = _run_live_checks(monkeypatch, history, turns=2)
+    assert history.deleted[0] == f"history#{_TENANT}#smoke-proposal-card-s0"
+    assert len(history.deleted) == 2
+    assert _find(results, "history_items_deleted").status == "pass"
+
+
+def test_a_history_item_that_survives_fails_the_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    history = _FakeHistoryItems(undeletable=True)
+    results = _run_live_checks(monkeypatch, history, turns=1)
+    assert _find(results, "history_items_deleted").status == "fail"
+
+
+def test_no_turn_sent_defers_the_history_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    history = _FakeHistoryItems()
+    results = _run_live_checks(monkeypatch, history, turns=0)
+    assert history.deleted == []
+    assert _find(results, "history_items_deleted").status == "defer"

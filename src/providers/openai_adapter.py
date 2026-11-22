@@ -9,8 +9,9 @@ Routes the OpenAI models through ``openai.AsyncBedrockOpenAI.responses.create(st
 per running event loop. Each call runs under :func:`~providers.sdk_transport.model_call_deadline`,
 a 120s wall-clock budget covering the open, every SDK retry and the stream.
 
-Requests address the resolved model's inference profile in the body's ``model`` field and set
-``reasoning.effort``; no sampling parameter is sent.
+Requests address the resolved model's inference profile in the body's ``model`` field, set
+``reasoning.effort`` and cap output at :data:`~providers.output_limits.TURN_OUTPUT_TOKEN_CAP`
+(``max_output_tokens``); no sampling parameter is sent.
 
 The Responses stream is normalised into the same :class:`~providers.base.ProviderEvent` stream the
 Anthropic adapter emits, ending in exactly one ``completed`` or ``error`` event. Error messages are
@@ -48,6 +49,7 @@ from providers.base import (
     ResolvedInvocation,
     guard_invocation_family,
 )
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.prompt_caching import OPENAI_PROMPT_CACHE_OPTIONS, breakpoint_index
 from providers.sdk_transport import (
     MODEL_CALL_DEADLINE_SECONDS,
@@ -71,6 +73,9 @@ from providers.sdk_transport import (
 _EMPTY_STREAM_MESSAGE: Final[str] = (
     "The model provider returned a stream containing no recognisable Responses API events."
 )
+
+#: The ``response.incomplete`` reason that means the call stopped at the output-token cap.
+_OUTPUT_CAP_REASON: Final[str] = "max_output_tokens"
 
 #: The fallback message for an in-band failure that carries no message of its own.
 _IN_BAND_FALLBACK_MESSAGE: Final[str] = "Model stream error."
@@ -282,6 +287,7 @@ class OpenAIAdapter(ModelProvider):
             "model": invocation.model.inference_profile,
             "input": items,
             "stream": True,
+            "max_output_tokens": TURN_OUTPUT_TOKEN_CAP,
             "prompt_cache_options": dict(OPENAI_PROMPT_CACHE_OPTIONS),
         }
         if invocation.effort is not None:
@@ -303,14 +309,21 @@ class OpenAIAdapter(ModelProvider):
         """Normalise the SDK's typed Responses events into :class:`ProviderEvent` values.
 
         A stream is recognisable when it carried a text delta, a completed ``function_call`` item,
-        or ``response.completed``; one that carried none ends in an ``error`` event. Any exception
+        ``response.completed`` or ``response.incomplete``; one that carried none ends in an
+        ``error`` event. ``response.incomplete`` with reason ``max_output_tokens`` ends in a
+        ``usage`` with the response's counts and ``output_truncated=True``, then a ``completed``
+        with ``awaiting_tools=False``, and any ``function_call`` item marked ``incomplete`` is dropped
+        unparsed. In any other stream an ``incomplete`` item is emitted after the loop as usual.
+        Any other incomplete reason ends in an ``error`` event ``incomplete: <reason>``. Any exception
         raised while iterating (an in-band ``error`` frame, a malformed frame, malformed tool
         arguments, a dropped connection) ends the stream in one ``error`` event whose message holds
         no frame content.
         """
         usage: dict[str, int] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
         saw_tool_call = False
+        truncated = False
         recognised = False
+        partial_calls: list[Any] = []
         try:
             async for event in response_stream:
                 if event.type == "response.output_text.delta":
@@ -319,18 +332,25 @@ class OpenAIAdapter(ModelProvider):
                 elif (
                     event.type == "response.output_item.done" and event.item.type == "function_call"
                 ):
-                    item = event.item
-                    tool_input = json.loads(item.arguments) if item.arguments else {}
+                    if event.item.status == "incomplete":
+                        partial_calls.append(event.item)
+                        continue
                     recognised = True
                     saw_tool_call = True
-                    yield ProviderEvent(
-                        type="tool_call",
-                        tool_name=item.name,
-                        tool_input=tool_input,
-                        tool_id=item.call_id,
-                    )
+                    yield _tool_call_event(event.item)
                 elif event.type == "response.completed":
                     recognised = True
+                    usage.update(_usage_counts(getattr(event.response, "usage", None)))
+                elif event.type == "response.incomplete":
+                    details = getattr(event.response, "incomplete_details", None)
+                    reason = getattr(details, "reason", None)
+                    if reason != _OUTPUT_CAP_REASON:
+                        yield ProviderEvent(
+                            type="error", error_message=f"incomplete: {reason or 'unknown'}"
+                        )
+                        return
+                    recognised = True
+                    truncated = True
                     usage.update(_usage_counts(getattr(event.response, "usage", None)))
                 elif event.type == "error":
                     yield ProviderEvent(
@@ -346,6 +366,11 @@ class OpenAIAdapter(ModelProvider):
                     message = failure.message if failure is not None else None
                     yield ProviderEvent(type="error", error_message=_in_band_message(code, message))
                     return
+            if not truncated:
+                for item in partial_calls:
+                    recognised = True
+                    saw_tool_call = True
+                    yield _tool_call_event(item)
         except ModelCallDeadlineError:
             raise
         except Exception as exc:  # noqa: BLE001 - normalised into the seam's error event
@@ -361,13 +386,22 @@ class OpenAIAdapter(ModelProvider):
             output_tokens=usage["output"],
             cache_read_tokens=usage["cache_read"],
             cache_write_tokens=usage["cache_write"],
+            output_truncated=truncated,
         )
         yield ProviderEvent(
             type="completed",
             input_tokens=usage["input"],
             output_tokens=usage["output"],
-            awaiting_tools=saw_tool_call,
+            awaiting_tools=saw_tool_call and not truncated,
         )
+
+
+def _tool_call_event(item: Any) -> ProviderEvent:
+    """Return the ``tool_call`` event for a ``function_call`` item; malformed arguments raise."""
+    tool_input = json.loads(item.arguments) if item.arguments else {}
+    return ProviderEvent(
+        type="tool_call", tool_name=item.name, tool_input=tool_input, tool_id=item.call_id
+    )
 
 
 def _usage_counts(reported: Any) -> dict[str, int]:

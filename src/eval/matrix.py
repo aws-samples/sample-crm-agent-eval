@@ -53,7 +53,11 @@ class StubMatrixOverwriteRefused(RuntimeError):  # noqa: N818
 RECORD_SHAPE_VERSION_KEY: Final[str] = "record_shape_version"
 
 #: The record shape this module writes and the only one its readers accept.
-RECORD_SHAPE_VERSION: Final[int] = 3
+RECORD_SHAPE_VERSION: Final[int] = 4
+
+
+#: The ``git_revision`` recorded when no git checkout was available to read.
+UNKNOWN_GIT_REVISION: Final[str] = "unknown"
 
 
 class RecordShapeRefused(ValueError):  # noqa: N818
@@ -109,6 +113,15 @@ class RunProvenance:
             task unit.
         prompt_caching: The prompt-caching method this arm's family ran with
             (``providers.prompt_caching.CACHING[<family>]``). Required, keyword-only.
+        output_token_cap: The per-call output token cap every model call of this arm was sent.
+            Required, keyword-only.
+        dirty_tree: Whether ``git status`` showed tracked-file changes at sweep start, or ``None``
+            when no checkout was available to measure. Required, keyword-only; ``None`` only with
+            ``git_revision == "unknown"``.
+
+    Raises:
+        ValueError: ``dirty_tree`` is ``None`` while ``git_revision`` is known, or a bool while it
+            is ``"unknown"``; or ``output_token_cap`` is not a positive integer.
     """
 
     mode: str
@@ -122,6 +135,22 @@ class RunProvenance:
     answer_style_sha256: str
     prompt_bundle_sha256: str | None = None
     prompt_caching: str = field(kw_only=True)
+    output_token_cap: int = field(kw_only=True)
+    dirty_tree: bool | None = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Refuse a provenance whose ``dirty_tree`` disagrees with ``git_revision``."""
+        if type(self.output_token_cap) is not int or self.output_token_cap <= 0:
+            raise ValueError(
+                f"output_token_cap must be a positive int, got {self.output_token_cap!r}"
+            )
+        unmeasured = self.git_revision == UNKNOWN_GIT_REVISION
+        if (self.dirty_tree is None) != unmeasured:
+            raise ValueError(
+                f"dirty_tree {self.dirty_tree!r} is inconsistent with git_revision "
+                f"{self.git_revision!r}: it is None exactly when the revision is "
+                f"{UNKNOWN_GIT_REVISION!r}"
+            )
 
     def to_report_fields(self) -> dict[str, object]:
         """Render this provenance as a flat, JSON-safe mapping in a fixed key order."""
@@ -137,6 +166,8 @@ class RunProvenance:
             "answer_style_sha256": self.answer_style_sha256,
             "prompt_bundle_sha256": self.prompt_bundle_sha256,
             "prompt_caching": self.prompt_caching,
+            "output_token_cap": self.output_token_cap,
+            "dirty_tree": self.dirty_tree,
         }
 
 
@@ -807,7 +838,7 @@ REPEAT_COMPLETION_KEY: Final[str] = "completion_over_repeats"
 #: Fields of a completion-over-repeats figure (:meth:`eval.metrics.RepeatCompletion.to_report_fields`).
 _REPEAT_COMPLETION_FIELDS: Final[tuple[str, ...]] = ("completed", "applicable", "repeats", "rate")
 
-#: Integer token totals every ``tier_summary`` entry of a record shape 3 arm carries, in report
+#: Integer token totals every ``tier_summary`` entry of a record shape 4 arm carries, in report
 #: order, copied into the tier comparison entry after ``input_tokens``.
 TIER_SUMMARY_TOKEN_KEYS: Final[tuple[str, ...]] = (
     "total_prompt_tokens",
@@ -818,12 +849,14 @@ TIER_SUMMARY_TOKEN_KEYS: Final[tuple[str, ...]] = (
 #: Key of a tier comparison entry's uncached input figure, derived by :func:`uncached_input_tokens`.
 UNCACHED_INPUT_TOKENS_KEY: Final[str] = "uncached_input_tokens"
 
-#: Per-tier task counters every ``tier_task_metrics.by_tier`` entry of a record shape 3 arm
+#: Per-tier task counters every ``tier_task_metrics.by_tier`` entry of a record shape 4 arm
 #: carries, copied into the tier comparison entry after ``retry_count``.
 TIER_TASK_COUNT_KEYS: Final[tuple[str, ...]] = (
     "budget_exhausted_task_count",
     "truncated_tool_call_count",
     "truncated_task_count",
+    "output_truncated_call_count",
+    "output_truncated_task_count",
 )
 
 #: :data:`TIER_TASK_COUNT_KEYS` that are ``None`` at the subagent tier, which issues no tool call.
@@ -859,7 +892,13 @@ _TIER_COMPARISON_DEFINITIONS_NOTE: Final[str] = (
     "at the tier. Truncated tool calls counts the tier's tool calls whose result was truncated, "
     "the Supervisor's own direct calls at Supervisor and every call made inside a delegation at "
     "ToolCall; Truncated tasks counts the task runs with at least one such call. Subagent makes no "
-    "tool call itself, so both truncation rows are not applicable there."
+    "tool call itself, so both tool-result truncation rows are not applicable there. "
+    "Output-truncated model "
+    "calls counts the tier's model calls that stopped at the shared per-call output token cap "
+    "before finishing; Output-truncated tasks counts the task runs with at least one such call at "
+    "the tier. A task whose calls were cut off at two tiers counts once in each tier's row, and a "
+    "task that was both output-truncated and budget-exhausted counts in both rows. These rows "
+    "apply at every tier and are distinct from the tool-result truncation rows above."
 )
 
 #: Note: columns keep run order and are never compared.
@@ -1146,6 +1185,8 @@ _PROVENANCE_FIELDS: tuple[str, ...] = (
     "answer_style_sha256",
     "prompt_bundle_sha256",
     "prompt_caching",
+    "output_token_cap",
+    "dirty_tree",
 )
 
 #: Fixed column order for each arm's model-metrics block in ``matrix.md``, cost fields last.
@@ -1724,6 +1765,8 @@ _TASK_COUNT_ROWS: Final[tuple[tuple[str, str], ...]] = (
     ("Budget-exhausted tasks", "budget_exhausted_task_count"),
     ("Truncated tool calls", "truncated_tool_call_count"),
     ("Truncated tasks", "truncated_task_count"),
+    ("Output-truncated model calls", "output_truncated_call_count"),
+    ("Output-truncated tasks", "output_truncated_task_count"),
 )
 
 
@@ -1830,7 +1873,7 @@ def _require_entry_lists(tier: str, entry: Mapping[str, object]) -> None:
         raise ValueError(f"tier comparison summary tier {tier!r} has a non-string effort")
 
 
-#: Tier comparison entry keys a record shape 3 summary must carry.
+#: Tier comparison entry keys a record shape 4 summary must carry.
 _REQUIRED_ENTRY_KEYS: Final[tuple[str, ...]] = (
     "cost_per_applicable_task",
     *TIER_SUMMARY_TOKEN_KEYS,
@@ -2202,7 +2245,8 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
 
     Raises:
         RecordShapeRefused: ``fields`` is not record shape :data:`RECORD_SHAPE_VERSION`, or a
-            required provenance field (``prompt_caching`` a string), ``tier_summary`` tier or
+            required provenance field (``prompt_caching`` a string, ``output_token_cap`` an int,
+            ``dirty_tree`` a bool or ``None``), ``tier_summary`` tier or
             ``tier_task_metrics`` tier is absent, a ``tier_summary`` entry lacks an integer
             :data:`TIER_SUMMARY_TOKEN_KEYS` figure, or a ``tier_task_metrics.by_tier`` entry lacks
             a :data:`TIER_TASK_COUNT_KEYS` count of the right type.
@@ -2226,6 +2270,12 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
     prompt_caching = provenance_fields["prompt_caching"]
     if not isinstance(prompt_caching, str):
         raise _missing_field(subject, "provenance.prompt_caching")
+    output_token_cap = provenance_fields["output_token_cap"]
+    if type(output_token_cap) is not int:
+        raise _missing_field(subject, "provenance.output_token_cap")
+    dirty_tree = provenance_fields["dirty_tree"]
+    if dirty_tree is not None and type(dirty_tree) is not bool:
+        raise _missing_field(subject, "provenance.dirty_tree")
     provenance = RunProvenance(
         mode=str(provenance_fields["mode"]),
         timestamp=str(provenance_fields["timestamp"]),
@@ -2238,6 +2288,8 @@ def arm_from_report_fields(fields: Mapping[str, object]) -> ArmResult:
         answer_style_sha256=str(provenance_fields["answer_style_sha256"]),
         prompt_bundle_sha256=None if bundle_digest is None else str(bundle_digest),
         prompt_caching=prompt_caching,
+        output_token_cap=output_token_cap,
+        dirty_tree=dirty_tree,
     )
     task_scores = fields.get("task_scores")
     if not isinstance(task_scores, list):

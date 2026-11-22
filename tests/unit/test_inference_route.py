@@ -47,7 +47,7 @@ def test_matching_model_id_is_accepted() -> None:
     [
         "",
         MODEL,
-        "openai.gpt-6.1-sol",
+        "openai.gpt-6.2-sol",
         "uk.anthropic.claude-haiku-5-5",
         "US.anthropic.claude-haiku-5-5",
         "global",

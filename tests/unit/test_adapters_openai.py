@@ -31,6 +31,7 @@ from providers.base import (
 )
 from providers.capabilities import CapabilityMatrix, load_capability_matrix
 from providers.openai_adapter import OpenAIAdapter, provider_error_message
+from providers.output_limits import TURN_OUTPUT_TOKEN_CAP
 from providers.sdk_transport import CredentialPolicyError
 from tests.integration._aws_eventstream import load_wire_fixture, wire_body
 
@@ -229,10 +230,11 @@ def test_the_supervisor_request_goes_to_bedrock_runtime_responses_with_reasoning
     assert str(request.url) == _RESPONSES_URL
     assert request.method == "POST"
     assert _body(request) == {
-        "model": "global.openai.gpt-6.1-sol",
+        "model": "global.openai.gpt-6.2-sol",
         "input": [{"role": "user", "content": "hi"}],
         "stream": True,
         "reasoning": {"effort": "max"},
+        "max_output_tokens": 16_384,
         "prompt_cache_options": {"mode": "implicit", "ttl": "30m"},
     }
 
@@ -756,10 +758,11 @@ def test_a_flat_error_frame_ends_in_one_error_event_leading_with_its_code(
     assert is_retryable_error(events[-1].error_message)
 
 
-def test_response_incomplete_is_ignored_as_the_pre_spec_adapter_did(
-    matrix: CapabilityMatrix,
-) -> None:
-    incomplete = {
+def _incomplete(
+    reason: str | None, input_tokens: int = 9, output_tokens: int = 256
+) -> dict[str, Any]:
+    details = {"reason": reason} if reason is not None else None
+    return {
         "type": "response.incomplete",
         "sequence_number": 3,
         "response": {
@@ -767,16 +770,109 @@ def test_response_incomplete_is_ignored_as_the_pre_spec_adapter_did(
             "object": "response",
             "status": "incomplete",
             "output": [],
-            "incomplete_details": {"reason": "max_output_tokens"},
-            "usage": {"input_tokens": 9, "output_tokens": 256},
+            "incomplete_details": details,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+                "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 1},
+                "output_tokens_details": {"reasoning_tokens": 0},
+            },
         },
     }
-    adapter = _adapter(_replying(_sse([_text("cut"), incomplete])))
+
+
+def _function_call_done(status: str, arguments: str) -> dict[str, Any]:
+    return {
+        "type": "response.output_item.done",
+        "sequence_number": 2,
+        "output_index": 0,
+        "item": {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "get_account",
+            "arguments": arguments,
+            "status": status,
+        },
+    }
+
+
+def test_the_body_caps_output_at_the_shared_turn_cap(matrix: CapabilityMatrix) -> None:
+    seen: list[httpx2.Request] = []
+    adapter = _adapter(_replying(_sse([_completed()]), seen))
+
+    _run(adapter, _resolve(matrix, "tool"))
+
+    assert _body(seen[0])["max_output_tokens"] == TURN_OUTPUT_TOKEN_CAP
+
+
+def test_an_output_cap_incomplete_is_a_truncated_usage_with_the_real_counts(
+    matrix: CapabilityMatrix,
+) -> None:
+    adapter = _adapter(_replying(_sse([_text("cut"), _incomplete("max_output_tokens")])))
 
     events = _run(adapter, _resolve(matrix, "tool"))
 
     assert [e.type for e in events] == ["text_delta", "usage", "completed"]
-    assert (events[1].input_tokens, events[1].output_tokens) == (0, 0)
+    usage, completed = events[1], events[2]
+    assert (usage.input_tokens, usage.output_tokens) == (9, 256)
+    assert (usage.cache_read_tokens, usage.cache_write_tokens) == (4, 1)
+    assert usage.output_truncated is True
+    assert usage.provisional is False
+    assert (completed.input_tokens, completed.output_tokens) == (9, 256)
+    assert completed.awaiting_tools is False
+
+
+def test_a_truncated_partial_function_call_is_dropped_not_parsed_or_awaited(
+    matrix: CapabilityMatrix,
+) -> None:
+    partial = _function_call_done("incomplete", '{"account_id": "acc-trunc')
+    adapter = _adapter(_replying(_sse([partial, _incomplete("max_output_tokens")])))
+
+    events = _run(adapter, _resolve(matrix, "tool"))
+
+    assert [e.type for e in events] == ["usage", "completed"]
+    assert events[0].output_truncated is True
+    assert events[1].awaiting_tools is False
+
+
+def test_a_truncated_round_never_awaits_tools_even_after_a_complete_call(
+    matrix: CapabilityMatrix,
+) -> None:
+    complete = _function_call_done("completed", '{"account_id": "acc-1"}')
+    adapter = _adapter(_replying(_sse([complete, _incomplete("max_output_tokens")])))
+
+    events = _run(adapter, _resolve(matrix, "tool"))
+
+    assert events[-1].type == "completed"
+    assert events[-1].awaiting_tools is False
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [("content_filter", "incomplete: content_filter"), (None, "incomplete: unknown")],
+    ids=["content_filter", "no-reason"],
+)
+def test_any_other_incomplete_reason_is_one_non_retryable_error_never_a_zero_completed(
+    matrix: CapabilityMatrix, reason: str | None, expected: str
+) -> None:
+    adapter = _adapter(_replying(_sse([_text("cut"), _incomplete(reason)])))
+
+    events = _run(adapter, _resolve(matrix, "tool"))
+
+    assert [e.type for e in events] == ["text_delta", "error"]
+    assert events[-1].error_message == expected
+    assert not is_retryable_error(expected)
+
+
+def test_a_completed_response_is_never_marked_truncated(matrix: CapabilityMatrix) -> None:
+    adapter = _adapter(_replying(_sse([_text("ok"), _completed()])))
+
+    events = _run(adapter, _resolve(matrix, "tool"))
+
+    assert events[1].type == "usage"
+    assert events[1].output_truncated is False
 
 
 def test_an_in_band_rate_limit_failure_is_not_retryable_as_before(

@@ -12,6 +12,12 @@ golden tasks in that unit's tenant, publishes the ``demo`` tenant delta to
 ``<output_dir>/verification-inventory/eval_sweep.json``, and tears every unit tenant down in a
 ``finally``. This module never imports ``anthropic`` or ``openai``; live adapters are built
 lazily through :mod:`eval.live`.
+
+A task whose turn fails mid-stream in transport is recorded as a failed task and the sweep goes
+on. Each finished (arm, repeat) unit's task snapshots are written under
+``<output_dir>/partial/units/<run_id>/`` as the sweep runs and removed when it completes; a sweep
+that ends early (cost cap, error, signal) leaves them with ``partial/partial-run.json`` and writes
+no matrix. The CLI's exit codes are :data:`EXIT_CODES`, printed by ``--help``.
 """
 
 from __future__ import annotations
@@ -20,14 +26,18 @@ import argparse
 import asyncio
 import contextlib
 import csv as csv_module
+import dataclasses
 import importlib
 import json
 import math
 import os
 import re
+import shutil
+import signal
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+import traceback
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +46,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 import boto3
 import yaml
 
+from agents.prompt_bundle import prompt_bundle_sha256
 from agents.registry import RegisteredTool
 from agents.turn_driver import TurnRecords, session_turn_tuning
 from crm.config import resolve_aws_config
@@ -52,6 +63,7 @@ from crm.envelope import (
     decode_identity,
     identity_event,
 )
+from crm.errors import CrmError
 from crm.store.provisioning import create_all_tables
 from crm.store.store import Store
 from eval.actor import actor_principal_type
@@ -66,9 +78,11 @@ from eval.matrix import (
 from eval.pricing import is_cost_provisional, load_price_table_status
 from eval.reprice import with_archived_pricing
 from eval.scoring import (
+    AssertionResult,
     TurnOutcome,
 )
 from eval.sweep_units import (
+    ARM_MODEL_TIER,
     DEFAULT_ARM_EFFORT,
     ArmRunResult,
     ArmSpec,
@@ -77,6 +91,7 @@ from eval.sweep_units import (
     TaskUnitResult,
     arm_tuning,
     assemble_arm,
+    dirty_tree_for_revision,
     run_task_unit,
     task_actor,
 )
@@ -171,6 +186,66 @@ DEFAULT_ARM_SPECS: Final[tuple[ArmSpec, ...]] = (
 )
 
 
+#: The error code of a task whose turn failed mid-stream in transport; the task is a failure.
+MID_STREAM_TRANSPORT_ERROR_CODE: Final[str] = "mid_stream_transport"
+
+#: Directory under ``output_dir`` holding a sweep's per-unit raw files and early-end manifest.
+PARTIAL_DIRNAME: Final[str] = "partial"
+#: The early-end manifest's file name, under :data:`PARTIAL_DIRNAME`.
+PARTIAL_MANIFEST_NAME: Final[str] = "partial-run.json"
+_PARTIAL_UNITS_DIRNAME: Final[str] = "units"
+
+#: Set to ``1`` to print the traceback of an uncaught sweep error after its one-line summary.
+VERBOSE_ERRORS_ENV_VAR: Final[str] = "CRM_EVAL_VERBOSE_ERRORS"
+
+EXIT_OK: Final[int] = 0
+EXIT_FAILED: Final[int] = 1
+EXIT_USAGE: Final[int] = 2
+EXIT_COST_CAP: Final[int] = 4
+EXIT_RUN_ID_EXISTS: Final[int] = 5
+EXIT_ABORTED_PARTIAL: Final[int] = 6
+EXIT_SIGHUP: Final[int] = 128 + signal.SIGHUP
+EXIT_SIGINT: Final[int] = 128 + signal.SIGINT
+EXIT_SIGTERM: Final[int] = 128 + signal.SIGTERM
+
+#: The CLI's exit codes, as ``(code, meaning)`` rows; rendered into ``--help``.
+EXIT_CODES: Final[tuple[tuple[int, str], ...]] = (
+    (EXIT_OK, "the sweep completed and every requested check passed"),
+    (
+        EXIT_FAILED,
+        "teardown failed, --assert-artifacts or the live demo-delta check failed, a stub sweep "
+        "targeted results/, or an error ended the sweep before a partial manifest was written",
+    ),
+    (EXIT_USAGE, "unusable invocation (flags, substrate pairing, cost cap, run id format)"),
+    (EXIT_COST_CAP, "the cost cap stopped the sweep; partial results written, no matrix"),
+    (EXIT_RUN_ID_EXISTS, "--run-id names a run already recorded in the catalog; nothing ran"),
+    (EXIT_ABORTED_PARTIAL, "an unrecoverable error ended the sweep; partial results written"),
+    (EXIT_SIGHUP, "SIGHUP; tenants torn down, partial results written"),
+    (EXIT_SIGINT, "SIGINT; tenants torn down, partial results written"),
+    (EXIT_SIGTERM, "SIGTERM; tenants torn down, partial results written"),
+)
+
+
+class SweepSignalled(SystemExit):  # noqa: N818
+    """Raised by the CLI's SIGTERM/SIGHUP handler, so the sweep's teardown ``finally`` runs.
+
+    Attributes:
+        signal_name: ``"SIGTERM"`` or ``"SIGHUP"``.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(128 + signum)
+        self.signal_name = signal.Signals(signum).name
+
+
+class GoldenTaskFileError(ValueError):
+    """Raised when ``golden_tasks.yaml`` is unusable: no ``tasks`` list, a bad task, a repeated id."""
+
+
+class DuplicateArmModelError(ValueError):
+    """Raised when two arms resolve to the same arm-tier model id, whose figures would collide."""
+
+
 @dataclass(frozen=True, slots=True)
 class SweepResult:
     """The full outcome of one :func:`run_sweep` invocation.
@@ -215,7 +290,6 @@ def _git_revision() -> str:
     Never raises: a ``git`` binary absent from ``PATH`` or a non-git checkout yields the
     placeholder. ``git`` is invoked by the absolute path ``shutil.which`` resolves.
     """
-    import shutil
     import subprocess
 
     git = shutil.which("git")
@@ -240,27 +314,32 @@ def _git_revision() -> str:
 def _load_golden_tasks(path: Path) -> list[dict[str, object]]:
     """Load and parse ``golden_tasks.yaml`` into a list of plain task mappings.
 
-    Validates that a top-level ``tasks`` list is present and that every task's ``actor`` declares
-    a principal type :func:`eval.actor.actor_principal_type` accepts, so a bad actor is refused
-    before anything is seeded.
+    Validates that a top-level ``tasks`` list is present, that no two tasks share an ``id``, and
+    that every task's ``actor`` declares a principal type :func:`eval.actor.actor_principal_type`
+    accepts, so a bad task file is refused before anything is seeded.
 
     Raises:
-        ValueError: The file has no ``tasks`` list, a task is not a mapping, or a task's actor is
-            absent or declares no usable principal type.
+        GoldenTaskFileError: The file has no ``tasks`` list, a task is not a mapping, two tasks share an
+            ``id``, or a task's actor is absent or declares no usable principal type.
     """
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or "tasks" not in data:
-        raise ValueError(f"{path} did not parse to a mapping with a top-level 'tasks' key")
+        raise GoldenTaskFileError(f"{path} did not parse to a mapping with a top-level 'tasks' key")
     tasks = data["tasks"]
     if not isinstance(tasks, list):
-        raise ValueError(f"{path}'s 'tasks' key must be a list")
+        raise GoldenTaskFileError(f"{path}'s 'tasks' key must be a list")
+    seen_ids: set[object] = set()
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
-            raise ValueError(f"{path}: task {index} is not a mapping")
+            raise GoldenTaskFileError(f"{path}: task {index} is not a mapping")
+        task_id = task.get("id")
+        if task_id in seen_ids:
+            raise GoldenTaskFileError(f"{path}: task id {task_id!r} appears more than once")
+        seen_ids.add(task_id)
         try:
             actor_principal_type(task_actor(task))
         except ValueError as exc:
-            raise ValueError(f"{path}: task {task.get('id')!r}: {exc}") from exc
+            raise GoldenTaskFileError(f"{path}: task {task_id!r}: {exc}") from exc
     return tasks
 
 
@@ -580,31 +659,31 @@ def _raw_records_writer(raw_records_dir: Path) -> RawRecordsWriter:
 
 
 class SweepCostCapExceeded(RuntimeError):  # noqa: N818
-    """Raised before an (arm, repeat) unit when the sweep's projected spend would exceed its cap.
+    """Raised before a task when the sweep's projected spend would exceed its cap.
 
     Attributes:
-        spent_usd: Priced cost of the units completed so far.
-        largest_unit_usd: Priced cost of the most expensive completed unit.
+        spent_usd: Priced cost of the tasks completed so far.
+        largest_task_usd: Priced cost of the most expensive completed task.
         max_cost_usd: The cap.
-        completed_units: How many (arm, repeat) units completed.
+        completed_tasks: How many tasks completed.
     """
 
     def __init__(
         self,
         *,
         spent_usd: float,
-        largest_unit_usd: float,
+        largest_task_usd: float,
         max_cost_usd: float,
-        completed_units: int,
+        completed_tasks: int,
     ) -> None:
         self.spent_usd = spent_usd
-        self.largest_unit_usd = largest_unit_usd
+        self.largest_task_usd = largest_task_usd
         self.max_cost_usd = max_cost_usd
-        self.completed_units = completed_units
+        self.completed_tasks = completed_tasks
         super().__init__(
-            f"sweep stopped before unit {completed_units + 1}: spent ${spent_usd:.4f} over "
-            f"{completed_units} completed unit(s); spent plus the largest unit "
-            f"(${largest_unit_usd:.4f}) would exceed --max-cost-usd ${max_cost_usd:.4f}"
+            f"sweep stopped before task {completed_tasks + 1}: spent ${spent_usd:.4f} over "
+            f"{completed_tasks} completed task(s); spent plus the largest task "
+            f"(${largest_task_usd:.4f}) would exceed --max-cost-usd ${max_cost_usd:.4f}"
         )
 
 
@@ -619,16 +698,17 @@ def _unit_priced_cost(task_units: Sequence[TaskUnitResult]) -> float:
 
 @dataclass
 class SweepCostGuard:
-    """Tracks a sweep's priced spend per (arm, repeat) unit against ``max_cost_usd``.
+    """Tracks a sweep's priced spend per task against ``max_cost_usd``.
 
-    Call :meth:`before_unit` before each unit starts and :meth:`record_unit` after it completes.
-    Priced cost is per-call pricing of reported usage, an estimate of the bill.
+    Call :meth:`before_task` before each task starts and :meth:`record_task` after it completes.
+    The first task of a sweep always starts. Priced cost is per-call pricing of reported usage, an
+    estimate of the bill.
     """
 
     max_cost_usd: float
     spent_usd: float = 0.0
-    largest_unit_usd: float = 0.0
-    completed_units: int = 0
+    largest_task_usd: float = 0.0
+    completed_tasks: int = 0
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.max_cost_usd) or self.max_cost_usd <= 0:
@@ -636,22 +716,147 @@ class SweepCostGuard:
                 f"max_cost_usd must be a positive finite number, got {self.max_cost_usd}"
             )
 
-    def before_unit(self) -> None:
-        """Raise :class:`SweepCostCapExceeded` when spent plus the largest unit exceeds the cap."""
-        if self.spent_usd + self.largest_unit_usd > self.max_cost_usd:
+    def before_task(self) -> None:
+        """Raise :class:`SweepCostCapExceeded` when spent plus the largest task exceeds the cap."""
+        if self.spent_usd + self.largest_task_usd > self.max_cost_usd:
             raise SweepCostCapExceeded(
                 spent_usd=self.spent_usd,
-                largest_unit_usd=self.largest_unit_usd,
+                largest_task_usd=self.largest_task_usd,
                 max_cost_usd=self.max_cost_usd,
-                completed_units=self.completed_units,
+                completed_tasks=self.completed_tasks,
             )
 
-    def record_unit(self, task_units: Sequence[TaskUnitResult]) -> None:
-        """Add one completed unit's priced cost."""
-        cost = _unit_priced_cost(task_units)
+    def record_task(self, task_unit: TaskUnitResult) -> None:
+        """Add one completed task's priced cost."""
+        cost = _unit_priced_cost([task_unit])
         self.spent_usd += cost
-        self.largest_unit_usd = max(self.largest_unit_usd, cost)
-        self.completed_units += 1
+        self.largest_task_usd = max(self.largest_task_usd, cost)
+        self.completed_tasks += 1
+
+
+def _failed_task_unit(unit: TaskUnitResult, *, error_code: str, detail: str) -> TaskUnitResult:
+    """Return ``unit`` recorded as failed: a leading failed assertion and zero correctness.
+
+    A ``None`` correctness (an unscored task) stays ``None``, so the task stays unscored.
+    """
+    failure = AssertionResult(name=error_code, passed=False, detail=detail)
+    score = unit.task_score
+    return dataclasses.replace(
+        unit,
+        task_score=dataclasses.replace(
+            score,
+            correctness=None if score.correctness is None else 0.0,
+            assertion_results=(failure, *score.assertion_results),
+        ),
+    )
+
+
+def _task_unit_snapshot(unit: TaskUnitResult, *, error_code: str | None) -> dict[str, object]:
+    """A JSON-safe snapshot of one task unit for the per-unit raw files and partial results."""
+    return {
+        "task_id": unit.task_id,
+        "repeat_index": unit.repeat_index,
+        "error_code": error_code,
+        "task_score": unit.task_score.to_report_fields(),
+        "stream_calls": unit.turn.stream_calls,
+        "usage_lower_bound": unit.turn.usage_lower_bound,
+        "invocation_attributions": [
+            with_archived_pricing(dataclasses.asdict(record)) for record in unit.turn.invocations
+        ],
+        "tool_call_attributions": [dataclasses.asdict(record) for record in unit.turn.tool_calls],
+    }
+
+
+@dataclass
+class _SweepProgress:
+    """What a sweep has completed so far, persisted per (arm, repeat) unit as each one finishes.
+
+    With ``units_dir``, each completed unit's task snapshots are written to
+    ``<units_dir>/arm-<a>-repeat-<r>.json``. :meth:`manifest` describes an early end.
+    """
+
+    run_id: str
+    units_dir: Path | None
+    completed_units: list[dict[str, object]] = field(default_factory=list)
+    failed_tasks: list[dict[str, object]] = field(default_factory=list)
+    in_flight: dict[str, object] | None = None
+    in_flight_tasks: list[dict[str, object]] = field(default_factory=list)
+
+    def start_unit(self, *, arm_index: int, repeat_index: int, tenant: str) -> None:
+        """Mark the (arm, repeat) unit about to run."""
+        self.in_flight = {"arm_index": arm_index, "repeat_index": repeat_index, "tenant": tenant}
+        self.in_flight_tasks = []
+
+    def record_task(self, unit: TaskUnitResult, *, error_code: str | None) -> None:
+        """Record one completed task of the in-flight unit."""
+        if self.in_flight is None:
+            raise RuntimeError("record_task called with no unit in flight")
+        self.in_flight_tasks.append(_task_unit_snapshot(unit, error_code=error_code))
+        if error_code is not None:
+            self.failed_tasks.append(
+                {
+                    "arm_index": self.in_flight["arm_index"],
+                    "repeat_index": self.in_flight["repeat_index"],
+                    "task_id": unit.task_id,
+                    "error_code": error_code,
+                }
+            )
+
+    def finish_unit(self) -> None:
+        """Persist the in-flight unit's task snapshots and mark it completed."""
+        if self.in_flight is None:
+            raise RuntimeError("finish_unit called with no unit in flight")
+        entry: dict[str, object] = {
+            **self.in_flight,
+            "task_ids": [task["task_id"] for task in self.in_flight_tasks],
+        }
+        if self.units_dir is not None:
+            path = self._write(self.in_flight, self.in_flight_tasks, suffix="")
+            entry["raw"] = path.name
+        self.completed_units.append(entry)
+        self.in_flight = None
+        self.in_flight_tasks = []
+
+    def manifest(self, *, reason: str, teardown: str) -> dict[str, object]:
+        """The ``partial-run.json`` document for an early end, writing the in-flight unit's tasks."""
+        in_flight: dict[str, object] | None = None
+        if self.in_flight is not None:
+            in_flight = {
+                **self.in_flight,
+                "completed_task_ids": [task["task_id"] for task in self.in_flight_tasks],
+            }
+            if self.units_dir is not None and self.in_flight_tasks:
+                in_flight["raw"] = self._write(
+                    self.in_flight, self.in_flight_tasks, suffix=".in-flight"
+                ).name
+        return {
+            "run_id": self.run_id,
+            "reason": reason,
+            "teardown": teardown,
+            "completed_units": list(self.completed_units),
+            "in_flight_unit": in_flight,
+            "failed_tasks": list(self.failed_tasks),
+        }
+
+    def _write(
+        self, unit: Mapping[str, object], tasks: list[dict[str, object]], *, suffix: str
+    ) -> Path:
+        if self.units_dir is None:
+            raise RuntimeError("no units directory to write into")
+        self.units_dir.mkdir(parents=True, exist_ok=True)
+        path = (
+            self.units_dir / f"arm-{unit['arm_index']}-repeat-{unit['repeat_index']}{suffix}.json"
+        )
+        document = {"run_id": self.run_id, **unit, "tasks": tasks}
+        path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return path
+
+
+class _NotProbedHere:
+    """The type of :data:`_NOT_PROBED_HERE`: ``dirty_tree`` was not passed to :func:`_run_arm`."""
+
+
+_NOT_PROBED_HERE: Final[_NotProbedHere] = _NotProbedHere()
 
 
 def _run_arm(
@@ -674,6 +879,8 @@ def _run_arm(
     tenant: str | None = None,
     unit_tenants: Sequence[str] | None = None,
     cost_guard: SweepCostGuard | None = None,
+    progress: _SweepProgress | None = None,
+    dirty_tree: bool | None | _NotProbedHere = _NOT_PROBED_HERE,
 ) -> ArmRunResult:
     """Run every golden task once per repeat for one arm and assemble its scored, metered result.
 
@@ -683,8 +890,16 @@ def _run_arm(
     task is one :func:`eval.sweep_units.run_task_unit` over an in-process
     :func:`_observe_provider_turn`; :func:`eval.sweep_units.assemble_arm` folds them.
 
-    With ``cost_guard``, :meth:`SweepCostGuard.before_unit` runs before each repeat's tasks and
-    :meth:`SweepCostGuard.record_unit` after them.
+    A turn that raises :class:`eval.live.MidStreamTransportError` is recorded as a failed task
+    (:data:`MID_STREAM_TRANSPORT_ERROR_CODE`, zero correctness) and the arm continues; the turn's
+    usage is a lower bound.
+
+    ``dirty_tree`` is the sweep-start tracked-tree reading for provenance; when not given, it is
+    read here with :func:`eval.sweep_units.dirty_tree_for_revision`.
+
+    With ``cost_guard``, :meth:`SweepCostGuard.before_task` runs before each task and
+    :meth:`SweepCostGuard.record_task` after it. With ``progress``, every task and every finished
+    (arm, repeat) unit is recorded there.
 
     Raises ``ValueError`` when neither ``tenant`` nor ``unit_tenants`` is given, and
     :class:`SweepCostCapExceeded` from ``cost_guard``.
@@ -692,6 +907,8 @@ def _run_arm(
     Raises ``AssertionError`` when the arm's ``stream`` call count differs from the calls its turn
     drivers made, or is below ``included_invocation_count``.
     """
+    from eval.live import MidStreamTransportError
+
     tuning = arm_tuning(arm_spec)
     counting_provider = _StreamCallCounter(provider)
     measured_latency = mode == "live"
@@ -720,24 +937,61 @@ def _run_arm(
         unit_tasks = [(tenant, tasks) for _rep_index in range(repeats)]
     else:
         raise ValueError("_run_arm needs a tenant or unit_tenants")
+
+    def _run_task(
+        task: Mapping[str, object], unit_tenant: str, repeat_index: int
+    ) -> TaskUnitResult:
+        calls_before = counting_provider.call_count
+        failure: MidStreamTransportError | None = None
+
+        def _failure_tolerant_runner(task: Mapping[str, object], tenant: str) -> ObservedTurn:
+            nonlocal failure
+            try:
+                return _turn_runner(task, tenant)
+            except MidStreamTransportError as exc:
+                failure = exc
+                return ObservedTurn(
+                    outcome=TurnOutcome(tenant=tenant),
+                    stream_calls=counting_provider.call_count - calls_before,
+                    usage_lower_bound=True,
+                    # assemble_arm requires every unit of an arm to carry this process's bundle.
+                    prompt_bundle_sha256=prompt_bundle_sha256(),
+                )
+
+        unit = run_task_unit(
+            store=store,
+            task=task,
+            tenant=unit_tenant,
+            family=arm_spec.family,
+            turn_runner=_failure_tolerant_runner,
+            repeat_index=repeat_index,
+        )
+        error_code: str | None = None
+        if failure is not None:
+            error_code = MID_STREAM_TRANSPORT_ERROR_CODE
+            unit = _failed_task_unit(unit, error_code=error_code, detail=str(failure))
+            print(
+                f"task {unit.task_id} (arm {arm_index}, repeat {repeat_index}) recorded as failed: "
+                f"{error_code}: {failure.error_message}",
+                file=sys.stderr,
+            )
+        if progress is not None:
+            progress.record_task(unit, error_code=error_code)
+        return unit
+
     units: list[TaskUnitResult] = []
     for repeat_index, (unit_tenant, localized) in enumerate(unit_tasks):
-        if cost_guard is not None:
-            cost_guard.before_unit()
-        repeat_units = [
-            run_task_unit(
-                store=store,
-                task=task,
-                tenant=unit_tenant,
-                family=arm_spec.family,
-                turn_runner=_turn_runner,
-                repeat_index=repeat_index,
-            )
-            for task in localized
-        ]
-        units.extend(repeat_units)
-        if cost_guard is not None:
-            cost_guard.record_unit(repeat_units)
+        if progress is not None:
+            progress.start_unit(arm_index=arm_index, repeat_index=repeat_index, tenant=unit_tenant)
+        for task in localized:
+            if cost_guard is not None:
+                cost_guard.before_task()
+            unit = _run_task(task, unit_tenant, repeat_index)
+            units.append(unit)
+            if cost_guard is not None:
+                cost_guard.record_task(unit)
+        if progress is not None:
+            progress.finish_unit()
     return assemble_arm(
         units,
         matrix=matrix,
@@ -745,6 +999,11 @@ def _run_arm(
         mode=mode,
         dataset_seed=dataset_seed,
         git_revision=git_revision,
+        dirty_tree=(
+            dirty_tree_for_revision(git_revision)
+            if isinstance(dirty_tree, _NotProbedHere)
+            else dirty_tree
+        ),
         runtime_identifier=runtime_identifier,
         price_table_version=price_table_version,
         cost_withheld=cost_withheld,
@@ -916,6 +1175,122 @@ def _assert_live_mode_is_paired_with_the_live_substrate(
         )
 
 
+@dataclass
+class _SignalDeferral:
+    """While ``active``, the CLI's signal handler records signals in ``pending`` instead of raising."""
+
+    active: bool = False
+    pending: list[int] = field(default_factory=list)
+
+
+_SIGNAL_DEFERRAL: Final[_SignalDeferral] = _SignalDeferral()
+
+
+@contextlib.contextmanager
+def _deferring_signals() -> Iterator[list[int]]:
+    """Hold the CLI's signals for the duration of the block; yield the list they land in.
+
+    Outside :func:`main` no handler is installed, so the list stays empty.
+    """
+    _SIGNAL_DEFERRAL.active = True
+    _SIGNAL_DEFERRAL.pending.clear()
+    try:
+        yield _SIGNAL_DEFERRAL.pending
+    finally:
+        _SIGNAL_DEFERRAL.active = False
+
+
+def _signal_exception(signum: int) -> BaseException:
+    """The exception a held signal is re-raised as once teardown is done."""
+    if signum == signal.SIGINT:
+        return KeyboardInterrupt()
+    return SweepSignalled(signum)
+
+
+def _failed_fr93_checks(exc: Exception) -> tuple[CheckResult, ...]:
+    """Both delta checks at ``fail``, for a delta read that raised instead of answering."""
+    from eval.verification import CheckResult as _CheckResult
+
+    detail = f"the delta read raised {type(exc).__name__}: {exc}"
+    return tuple(
+        _CheckResult(resource=_FR93_RESOURCE_CLASS, check=name, status="fail", detail=detail)
+        for name in _FR93_REQUIRED_CHECKS
+    )
+
+
+def _refuse_arms_sharing_a_model(arm_specs: Sequence[ArmSpec], matrix: CapabilityMatrix) -> None:
+    """Raise :class:`DuplicateArmModelError` when two arms resolve to one arm-tier model id."""
+    seen: dict[str, int] = {}
+    for index, spec in enumerate(arm_specs):
+        model_id = matrix.model_for(spec.family, ARM_MODEL_TIER).model_id
+        if model_id in seen:
+            raise DuplicateArmModelError(
+                f"arms {seen[model_id]} and {index} both resolve to {model_id!r}; their figures "
+                "would be keyed by one model id, so the sweep is refused"
+            )
+        seen[model_id] = index
+
+
+def _early_end_reason(exc: BaseException) -> str:
+    """The ``partial-run.json`` ``reason`` for the exception that ended a sweep early."""
+    if isinstance(exc, SweepCostCapExceeded):
+        return "cost_cap"
+    if isinstance(exc, SweepSignalled):
+        return f"signal:{exc.signal_name}"
+    if isinstance(exc, KeyboardInterrupt):
+        return "signal:SIGINT"
+    return f"error:{type(exc).__name__}"
+
+
+def partial_manifest_path(output_dir: Path) -> Path:
+    """Where an early-ended sweep's manifest is written under ``output_dir``."""
+    return output_dir / PARTIAL_DIRNAME / PARTIAL_MANIFEST_NAME
+
+
+def _write_partial_manifest(
+    progress: _SweepProgress, *, output_dir: Path, reason: str, teardown: str
+) -> Path | None:
+    """Write ``partial/partial-run.json`` and the in-flight unit's tasks; never raise.
+
+    Returns the manifest path, or ``None`` when it could not be written (reported on stderr), so a
+    failed write never replaces the exception that ended the sweep.
+    """
+    path = partial_manifest_path(output_dir)
+    try:
+        document = progress.manifest(reason=reason, teardown=teardown)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - must never replace the exception that ended the sweep
+        print(f"could not write the partial-results manifest {path}: {exc!r}", file=sys.stderr)
+        return None
+    print(f"sweep ended early ({reason}); partial results: {path}", file=sys.stderr)
+    return path
+
+
+def _discard_unit_files(progress: _SweepProgress, *, output_dir: Path | None) -> None:
+    """Remove a completed sweep's own per-unit files, and the partial directories left empty."""
+    if output_dir is None or progress.units_dir is None or not progress.units_dir.exists():
+        return
+    try:
+        shutil.rmtree(progress.units_dir)
+    except OSError as exc:
+        print(f"could not remove the per-unit files {progress.units_dir}: {exc}", file=sys.stderr)
+        return
+    for directory in (progress.units_dir.parent, progress.units_dir.parent.parent):
+        with contextlib.suppress(OSError):
+            directory.rmdir()
+
+
+def run_id_is_recorded(store: Store, run_id: str) -> bool:
+    """Whether ``run_id`` already has an ``eval_runs`` row, as a CLI sweep or a state-machine job."""
+    from eval.runs import job_row_id
+
+    return any(
+        store.get_item("eval_runs", {"run_id": key}, consistent=True) is not None
+        for key in (run_id, job_row_id(run_id))
+    )
+
+
 def run_sweep(
     *,
     store: Store,
@@ -961,7 +1336,7 @@ def run_sweep(
             :func:`in_process_dispatch_factory` (the ``local`` substrate).
         repeats: How many times each arm runs the golden tasks (>= 1), each in its own unit tenant.
         max_cost_usd: Cap on the sweep's priced spend, checked by a :class:`SweepCostGuard`
-            before each (arm, repeat) unit, or ``None`` for no cap.
+            before each task, or ``None`` for no cap.
 
     Returns:
         The full :class:`SweepResult`. Its ``demo``-tenant delta checks are also published to
@@ -973,9 +1348,15 @@ def run_sweep(
             live-AWS one.
         eval.live.LiveInvocationError: When a live turn failed for a reason the exclusion taxonomy
             cannot categorise.
+        DuplicateArmModelError: When two arms resolve to one arm-tier model id; before seeding.
+        GoldenTaskFileError: When the golden task file is unusable, including a repeated task id.
         eval.tenancy.TenantTeardownError: When scoped teardown of any unit tenant fails.
-        SweepCostCapExceeded: When the next unit would breach ``max_cost_usd``; every unit
-            tenant is torn down and no artifact is written.
+        SweepCostCapExceeded: When the next task would breach ``max_cost_usd``; every unit
+            tenant is torn down and no matrix is written.
+
+    Any exception from the sweep body (the cost cap, an error, a ``KeyboardInterrupt`` or
+    :class:`SweepSignalled`) propagates after teardown; with ``output_dir`` it first writes
+    :func:`partial_manifest_path` and the in-flight unit's completed tasks.
         eval.matrix.StubMatrixOverwriteRefused: When an all-stub sweep's ``output_dir`` is the
             tracked ``results/`` directory; the sweep has run and been torn down, nothing is
             written.
@@ -991,12 +1372,22 @@ def run_sweep(
     # Built before anything is seeded.
     providers_by_arm = tuple(_build_provider(mode, family=spec.family) for spec in arm_specs)
     matrix = capability_matrix if capability_matrix is not None else load_capability_matrix()
+    _refuse_arms_sharing_a_model(arm_specs, matrix)
     # Tenant-relative; each unit localizes them to its own tenant in `_run_arm`.
     tasks = _load_golden_tasks(golden_tasks_path)
+    progress = _SweepProgress(
+        run_id=resolved_run_id,
+        units_dir=(
+            output_dir / PARTIAL_DIRNAME / _PARTIAL_UNITS_DIRNAME / resolved_run_id
+            if output_dir is not None
+            else None
+        ),
+    )
 
     price_status = load_price_table_status()
     cost_withheld = is_cost_provisional()
     git_revision = _git_revision()
+    dirty_tree = dirty_tree_for_revision(git_revision)
 
     started_at = datetime.now(UTC)
     demo_before = _read_demo_baseline(store)
@@ -1040,6 +1431,7 @@ def run_sweep(
                     mode=mode,
                     dataset_seed=dataset_seed,
                     git_revision=git_revision,
+                    dirty_tree=dirty_tree,
                     runtime_identifier=runtime_identifier,
                     price_table_version=price_status.price_table_version,
                     cost_withheld=cost_withheld,
@@ -1047,51 +1439,95 @@ def run_sweep(
                     arm_index=arm_index,
                     raw_records_writer=raw_records_writer,
                     cost_guard=cost_guard,
+                    progress=progress,
                 )
             )
     except BaseException as exc:  # noqa: BLE001 - re-raised verbatim below, never swallowed
         body_exc = exc
         raise
     finally:
-        # Before teardown, which deletes the rows `writes_only_under_smoke_tenant` reads.
-        fr93_checks = _fr93_delta_checks(
-            store, tenant=tenant, before=demo_before, unit_tenants=unit_tenants
-        )
-        try:
-            teardown_unit_tenants(store, tenants=unit_tenants)
-        except TenantTeardownError as exc:
-            teardown_error = exc
-            if body_exc is not None:
-                # The body's exception propagates; the teardown failure is logged.
-                print(
-                    f"tenant teardown also failed while handling {body_exc!r}: {exc}",
-                    file=sys.stderr,
+        teardown_status = "failed"
+        teardown_other: Exception | None = None
+        with _deferring_signals() as held_signals:
+            # Before teardown, which deletes the rows `writes_only_under_smoke_tenant` reads.
+            try:
+                fr93_checks = _fr93_delta_checks(
+                    store, tenant=tenant, before=demo_before, unit_tenants=unit_tenants
                 )
-        else:
-            # A failed teardown leaves the catalog row ``running``, where
-            # ``scripts/reap_eval_tenants.py`` finds it.
-            record_run_torn_down(
-                store,
-                run_id=resolved_run_id,
-                tenant=tenant,
-                started_at=started_at,
-                unit_tenants=unit_tenants,
-            )
-
-    _assert_no_undisclosed_zero_invocation_render(arm_runs)
-
-    matrix_result = build_matrix_result([arm_run.arm_result for arm_run in arm_runs])
+            except Exception as exc:  # noqa: BLE001 - recorded as failing checks; teardown still runs
+                fr93_checks = _failed_fr93_checks(exc)
+                print(f"the demo-delta read failed before teardown: {exc!r}", file=sys.stderr)
+            try:
+                teardown_unit_tenants(store, tenants=unit_tenants)
+                teardown_status = "ok"
+                # A failed teardown leaves the catalog row ``running``, where
+                # ``scripts/reap_eval_tenants.py`` finds it.
+                record_run_torn_down(
+                    store,
+                    run_id=resolved_run_id,
+                    tenant=tenant,
+                    started_at=started_at,
+                    unit_tenants=unit_tenants,
+                )
+            except TenantTeardownError as exc:
+                teardown_error = exc
+                if body_exc is not None:
+                    print(
+                        f"tenant teardown also failed while handling {body_exc!r}: {exc}",
+                        file=sys.stderr,
+                    )
+            except Exception as exc:  # noqa: BLE001 - re-raised below unless the body already raised
+                teardown_other = exc
+                print(f"tenant teardown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            early_end = body_exc
+            if early_end is None and held_signals:
+                early_end = _signal_exception(held_signals[0])
+            if early_end is not None and output_dir is not None:
+                _write_partial_manifest(
+                    progress,
+                    output_dir=output_dir,
+                    reason=_early_end_reason(early_end),
+                    teardown=teardown_status,
+                )
+        if body_exc is not None:
+            if teardown_other is not None:
+                body_exc.add_note(
+                    f"teardown also failed: {type(teardown_other).__name__}: {teardown_other}"
+                )
+        elif held_signals:
+            raise _signal_exception(held_signals[0])
+        elif teardown_other is not None:
+            raise teardown_other
 
     artifact_paths: dict[str, Path] = {}
     raw_archive_paths: list[Path] = []
     fr93_inventory_path: Path | None = None
-    if output_dir is not None:
-        artifact_paths = write_matrix_artifacts(matrix_result, output_dir)
-        if archive_raw:
-            raw_dir = output_dir / "raw"
-            for arm_run in arm_runs:
-                raw_archive_paths.append(archive_raw_run(arm_run.arm_result, raw_dir))
-        fr93_inventory_path = _write_fr93_inventory(fr93_checks, output_dir=output_dir)
+    try:
+        _assert_no_undisclosed_zero_invocation_render(arm_runs)
+        matrix_result = build_matrix_result(
+            [arm_run.arm_result for arm_run in arm_runs],
+            errored_item_count=len(progress.failed_tasks),
+        )
+        if output_dir is not None:
+            artifact_paths = write_matrix_artifacts(matrix_result, output_dir)
+            if archive_raw:
+                raw_dir = output_dir / "raw"
+                for arm_run in arm_runs:
+                    raw_archive_paths.append(archive_raw_run(arm_run.arm_result, raw_dir))
+            fr93_inventory_path = _write_fr93_inventory(fr93_checks, output_dir=output_dir)
+    except StubMatrixOverwriteRefused:
+        _discard_unit_files(progress, output_dir=output_dir)
+        raise
+    except BaseException as exc:
+        if output_dir is not None:
+            _write_partial_manifest(
+                progress,
+                output_dir=output_dir,
+                reason=_early_end_reason(exc),
+                teardown=teardown_status,
+            )
+        raise
+    _discard_unit_files(progress, output_dir=output_dir)
 
     result = SweepResult(
         run_id=resolved_run_id,
@@ -1718,6 +2154,12 @@ def _build_default_store(
     return Store(table_prefix=table_prefix, client=client)
 
 
+def _exit_code_epilog() -> str:
+    """The ``--help`` exit-code table, rendered from :data:`EXIT_CODES`."""
+    rows = "\n".join(f"  {code:>3}  {meaning}" for code, meaning in EXIT_CODES)
+    return f"exit codes:\n{rows}"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Construct the CLI argument parser. Stub is the default; ``--live`` opts in explicitly."""
     parser = argparse.ArgumentParser(
@@ -1726,7 +2168,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "costs nothing, and requires no AWS credentials: it targets a local DynamoDB engine "
             "(see --endpoint-url) with a fixed placeholder key pair, never your ambient AWS "
             "profile. Live mode requires --live."
-        )
+        ),
+        epilog=_exit_code_epilog(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--live",
@@ -1822,10 +2266,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Required with --live. Cap on the sweep's priced spend in USD, checked before each "
-            "(arm, repeat) unit: when the spend of completed units plus the largest completed "
-            "unit exceeds it, no further unit starts, every tenant is torn down, no matrix is "
-            "written and the exit code is 4. Priced cost estimates the bill; the Bedrock bill is "
-            "the authority."
+            "task: when the spend of completed tasks plus the largest completed task exceeds it, "
+            "no further task starts, every tenant is torn down, the completed results are written "
+            f"under <output-dir>/{PARTIAL_DIRNAME}/, no matrix is written and the exit code is "
+            f"{EXIT_COST_CAP}. The first task always runs. Priced cost estimates the bill; the "
+            "Bedrock bill is the authority."
+        ),
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help=(
+            "Run id to use instead of a freshly allocated one. Refused with exit code "
+            f"{EXIT_RUN_ID_EXISTS}, before anything is seeded or invoked, when the catalog "
+            "already records that run id."
         ),
     )
     parser.add_argument(
@@ -1844,17 +2298,16 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point: ``python -m eval.harness``. Stub by default; ``--live`` opts in.
 
     ``--live`` selects live models and ``--substrate`` selects live AWS; ``--live`` requires
-    ``--substrate live-aws``.
+    ``--substrate live-aws``. SIGTERM and SIGHUP raise :class:`SweepSignalled` while the sweep
+    runs, so its teardown ``finally`` runs exactly as for SIGINT. An uncaught error prints one line
+    naming its taxonomy code; the traceback follows only when :data:`VERBOSE_ERRORS_ENV_VAR` is
+    ``1``.
 
     Args:
         argv: Command-line arguments, excluding the program name. Defaults to :data:`sys.argv`.
 
     Returns:
-        Process exit code: ``0`` on success, ``1`` if teardown failed after a completed sweep or if
-        ``--assert-artifacts`` found an artifact absent or malformed, or if a stub sweep was
-        pointed at the tracked ``results/`` directory; ``2`` for an unusable invocation, including
-        ``--live`` without a positive, finite ``--max-cost-usd``; ``4`` when the cost cap stopped
-        the sweep.
+        A process exit code from :data:`EXIT_CODES`.
     """
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -1866,11 +2319,8 @@ def main(argv: list[str] | None = None) -> int:
         substrate = _resolve_substrate(args.substrate)
     except ValueError as exc:
         print(f"{exc}", file=sys.stderr)
-        return 2
-    table_prefix = _resolve_table_prefix(args.table_prefix)
-    live_aws = substrate == "live-aws"
-
-    if mode == "live" and not live_aws:
+        return EXIT_USAGE
+    if mode == "live" and substrate != "live-aws":
         print(
             "--live selects live models and requires the live-AWS substrate: pass "
             f"--substrate {_SUBSTRATE_LIVE_AWS} or set {_SUBSTRATE_ENV_VAR}={_SUBSTRATE_LIVE_AWS}. "
@@ -1878,13 +2328,13 @@ def main(argv: list[str] | None = None) -> int:
             "misrepresent what was measured.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
     if mode == "live" and args.max_cost_usd is None:
         print(
             "--live requires --max-cost-usd: refusing a live sweep with no spend cap.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
     if args.max_cost_usd is not None and not (
         math.isfinite(args.max_cost_usd) and args.max_cost_usd > 0
     ):
@@ -1892,11 +2342,111 @@ def main(argv: list[str] | None = None) -> int:
             f"--max-cost-usd must be a positive finite number, got {args.max_cost_usd}",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
 
+    if args.run_id is not None:
+        try:
+            tenant_for_run(args.run_id)
+        except ValueError as exc:
+            print(f"--run-id {args.run_id!r} is unusable: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+    run_id = args.run_id if args.run_id is not None else allocate_run_id()
+
+    attempt_started = time.time()
+    previous_handlers = _install_signal_handlers()
+    try:
+        return _run_cli_sweep(args, mode=mode, substrate=substrate, run_id=run_id)
+    except KeyboardInterrupt:
+        print("eval sweep interrupted (SIGINT) after its teardown ran", file=sys.stderr)
+        return EXIT_SIGINT
+    except SweepSignalled as exc:
+        print(f"eval sweep stopped by {exc.signal_name} after its teardown ran", file=sys.stderr)
+        return int(exc.code) if isinstance(exc.code, int) else EXIT_FAILED
+    except Exception as exc:  # noqa: BLE001 - reported as one taxonomy line, never a traceback
+        manifest = partial_manifest_path(args.output_dir)
+        partial_written = _manifest_names_run(manifest, run_id, written_since=attempt_started)
+        print(
+            f"eval sweep failed: {_error_code(exc)}: {type(exc).__name__}: {exc}"
+            + (f"; partial results: {manifest}" if partial_written else ""),
+            file=sys.stderr,
+        )
+        if os.environ.get(VERBOSE_ERRORS_ENV_VAR) == "1":
+            traceback.print_exc(file=sys.stderr)
+        return EXIT_ABORTED_PARTIAL if partial_written else EXIT_FAILED
+    finally:
+        _restore_signal_handlers(previous_handlers)
+
+
+def _install_signal_handlers() -> dict[int, Any]:
+    """Make SIGTERM and SIGHUP raise :class:`SweepSignalled` and SIGINT ``KeyboardInterrupt``.
+
+    Returns the handlers replaced. A signal arriving while the sweep tears down is held and
+    re-raised once teardown is done. SIGTERM and SIGHUP are one-shot: the first ignores both
+    before raising, so a repeat cannot interrupt the teardown the first one started.
+    """
+
+    def _raise(signum: int, _frame: object) -> None:
+        if _SIGNAL_DEFERRAL.active:
+            _SIGNAL_DEFERRAL.pending.append(signum)
+            return
+        if signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        for ignored in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(ignored, signal.SIG_IGN)
+        raise SweepSignalled(signum)
+
+    previous: dict[int, Any] = {}
+    for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        previous[signum] = signal.signal(signum, _raise)
+    return previous
+
+
+def _restore_signal_handlers(previous: Mapping[int, Any]) -> None:
+    for signum, handler in previous.items():
+        signal.signal(signum, handler)
+
+
+def _error_code(exc: BaseException) -> str:
+    """The taxonomy code reported for an uncaught sweep error."""
+    from eval.live import LiveInvocationError
+
+    if isinstance(exc, CrmError):
+        return exc.code
+    if isinstance(exc, LiveInvocationError):
+        return "live_invocation_failed"
+    if isinstance(exc, DuplicateArmModelError | GoldenTaskFileError | LiveSubstratePairingError):
+        return "invalid_configuration"
+    return "internal_error"
+
+
+def _manifest_names_run(path: Path, run_id: str, *, written_since: float) -> bool:
+    """Whether ``path`` is a partial-results manifest for ``run_id`` written at or after
+    ``written_since`` (epoch seconds), so an earlier attempt's manifest never counts."""
+    try:
+        if path.stat().st_mtime < written_since:
+            return False
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except OSError, ValueError:
+        return False
+    return isinstance(document, dict) and document.get("run_id") == run_id
+
+
+def _run_cli_sweep(
+    args: argparse.Namespace, *, mode: EvalMode, substrate: Substrate, run_id: str
+) -> int:
+    """Build the store, run the sweep under ``run_id`` and report it; :func:`main`'s body."""
+    table_prefix = _resolve_table_prefix(args.table_prefix)
+    live_aws = substrate == "live-aws"
     store = _build_default_store(
         table_prefix=table_prefix, endpoint_url=args.endpoint_url, substrate=substrate
     )
+    if args.run_id is not None and run_id_is_recorded(store, run_id):
+        print(
+            f"--run-id {run_id!r} is already recorded in the eval_runs catalog; refusing to "
+            "reuse it. Nothing was seeded or invoked.",
+            file=sys.stderr,
+        )
+        return EXIT_RUN_ID_EXISTS
     dispatch_factory: DispatchFactory = (
         live_lambda_dispatch_factory if live_aws else in_process_dispatch_factory
     )
@@ -1910,19 +2460,20 @@ def main(argv: list[str] | None = None) -> int:
             runtime_identifier=runtime_identifier,
             output_dir=args.output_dir,
             archive_raw=args.archive_raw or args.assert_artifacts,
+            run_id=run_id,
             dispatch_factory=dispatch_factory,
             repeats=args.repeats,
             max_cost_usd=args.max_cost_usd,
         )
     except SweepCostCapExceeded as exc:
         print(f"{exc}; no matrix artifact written", file=sys.stderr)
-        return 4
+        return EXIT_COST_CAP
     except TenantTeardownError as exc:
         print(f"eval sweep completed but tenant teardown failed: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_FAILED
     except StubMatrixOverwriteRefused as exc:
         print(f"{exc}", file=sys.stderr)
-        return 1
+        return EXIT_FAILED
 
     print(
         f"run_id={result.run_id} tenant={result.tenant} mode={result.mode} "
@@ -1945,7 +2496,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{check.status}: {check.detail}",
                 file=sys.stderr,
             )
-        return 1
+        return EXIT_FAILED
 
     if args.assert_artifacts:
         expected_task_count = len(_load_golden_tasks(_DEFAULT_GOLDEN_TASKS_PATH)) * args.repeats
@@ -1958,53 +2509,37 @@ def main(argv: list[str] | None = None) -> int:
             )
         except ArtifactAssertionError as exc:
             print(f"{exc}", file=sys.stderr)
-            return 1
+            return EXIT_FAILED
         print(
             f"asserted 5 artifacts for {len(result.arm_runs)} arm(s) x "
             f"{expected_task_count} task(s): matrix.json, matrix.md, matrix.csv, raw/, "
             f"{FR93_INVENTORY_RELATIVE_PATH}"
         )
-    return 0
-
-
-def run_sweep_for_ui(
-    *,
-    store: Store,
-    live: bool = False,
-    output_dir: Path | None = None,
-    archive_raw: bool = False,
-) -> SweepResult:
-    """UI-triggered entry point over :func:`run_sweep`, the same code path as :func:`main`.
-
-    Args:
-        store: The persistence layer to seed, score against, and tear down.
-        live: Whether to request live mode. Defaults to ``False`` (stub). ``True`` raises
-            :class:`LiveSubstratePairingError`, because this entry point dispatches in-process.
-        output_dir: Directory to write artifacts into, or ``None`` to skip writing.
-        archive_raw: Whether to also archive raw per-arm JSON.
-
-    Returns:
-        The full :class:`SweepResult`, identical in shape to what :func:`main` produces for the
-        same arguments.
-    """
-    mode: EvalMode = "live" if live else "stub"
-    return run_sweep(store=store, mode=mode, output_dir=output_dir, archive_raw=archive_raw)
+    return EXIT_OK
 
 
 __all__ = [
     "DEFAULT_ARM_SPECS",
     "DEFAULT_DATASET_SEED",
+    "EXIT_CODES",
+    "GoldenTaskFileError",
+    "MID_STREAM_TRANSPORT_ERROR_CODE",
+    "PARTIAL_DIRNAME",
+    "PARTIAL_MANIFEST_NAME",
+    "VERBOSE_ERRORS_ENV_VAR",
     "FR93_INVENTORY_RELATIVE_PATH",
     "ArmRunResult",
     "ArmSpec",
     "ArtifactAssertionError",
     "DispatchFactory",
+    "DuplicateArmModelError",
     "EvalMode",
     "LiveSubstratePairingError",
     "Substrate",
     "SweepCostCapExceeded",
     "SweepCostGuard",
     "SweepResult",
+    "SweepSignalled",
     "TurnDispatch",
     "UndisclosedZeroInvocationRenderError",
     "assert_artifacts",
@@ -2012,8 +2547,9 @@ __all__ = [
     "in_process_dispatch_factory",
     "live_lambda_dispatch_factory",
     "main",
+    "partial_manifest_path",
+    "run_id_is_recorded",
     "run_sweep",
-    "run_sweep_for_ui",
 ]
 
 

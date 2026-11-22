@@ -69,8 +69,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: "high",
         },
       },
-      "openai.gpt-6-astra": {
-        model_id: "openai.gpt-6-astra",
+      "openai.gpt-6.2-astra": {
+        model_id: "openai.gpt-6.2-astra",
         family: "openai",
         tier: "supervisor",
         effort: {
@@ -80,8 +80,8 @@ function rawMatrix() {
           capped_at_when_thinking_disabled: null,
         },
       },
-      "openai.gpt-6.1-sol": {
-        model_id: "openai.gpt-6.1-sol",
+      "openai.gpt-6.2-sol": {
+        model_id: "openai.gpt-6.2-sol",
         family: "openai",
         tier: "subagent",
         effort: {
@@ -110,8 +110,8 @@ function rawMatrix() {
         tool: { model_id: "anthropic.claude-haiku-5-5", tuning: { effort: "low" } },
       },
       openai: {
-        supervisor: { model_id: "openai.gpt-6-astra", tuning: { effort: "low" } },
-        subagent: { model_id: "openai.gpt-6.1-sol", tuning: { effort: "medium" } },
+        supervisor: { model_id: "openai.gpt-6.2-astra", tuning: { effort: "low" } },
+        subagent: { model_id: "openai.gpt-6.2-sol", tuning: { effort: "medium" } },
         tool: { model_id: "openai.gpt-6-luna", tuning: { effort: "low" } },
       },
     },
@@ -260,12 +260,12 @@ describe("PanelTuning loads the matrix and the saved settings", () => {
     server.saved = {
       schema: 3,
       source: "settings.tuning",
-      tiers: { ...DEFAULT_TIERS, subagent: { family: "openai", model: "openai.gpt-6.1-sol", effort: "low" } },
+      tiers: { ...DEFAULT_TIERS, subagent: { family: "openai", model: "openai.gpt-6.2-sol", effort: "low" } },
     };
     await renderTuning();
     const subagent = within(tierGroup("Subagent"));
     expect(subagent.getByLabelText("Provider family")).toHaveValue("openai");
-    expect(subagent.getByLabelText("Model")).toHaveValue("openai.gpt-6.1-sol");
+    expect(subagent.getByLabelText("Model")).toHaveValue("openai.gpt-6.2-sol");
     expect(subagent.getByLabelText("Effort")).toHaveValue("low");
     expect(server.calls.filter((call) => call.action === "get")).toHaveLength(1);
     // The chat composer reads the same store, so the next turn carries what was saved.
@@ -400,7 +400,7 @@ describe("PanelTuning saves to the user's account", () => {
     server.rejectPut = {
       status: 400,
       code: "validation_failed",
-      message: "openai.gpt-6.1-sol does not accept effort='max'.",
+      message: "openai.gpt-6.2-sol does not accept effort='max'.",
       source: "tuning.tiers.subagent.effort",
     };
     const { user } = await renderTuning();
@@ -408,7 +408,7 @@ describe("PanelTuning saves to the user's account", () => {
 
     const subagent = within(tierGroup("Subagent"));
     await waitFor(() => expect(subagent.getByLabelText("Effort")).toHaveAttribute("aria-invalid", "true"));
-    expect(subagent.getByRole("alert")).toHaveTextContent("openai.gpt-6.1-sol does not accept effort='max'.");
+    expect(subagent.getByRole("alert")).toHaveTextContent("openai.gpt-6.2-sol does not accept effort='max'.");
     expect(getSessionTuning().tiers.subagent).toEqual(DEFAULT_TIERS.subagent);
   });
 

@@ -465,7 +465,7 @@ def test_the_tier_profiles_are_the_capability_matrix_profiles(matrix: Capability
     assert profiles == {
         "global.anthropic.claude-sonnet-5-5",
         "global.anthropic.claude-haiku-5-5",
-        "global.openai.gpt-6.1-sol",
+        "global.openai.gpt-6.2-sol",
         "global.openai.gpt-6.1-terra",
         "global.openai.gpt-6-luna",
     }

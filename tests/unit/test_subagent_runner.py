@@ -1072,3 +1072,80 @@ def test_an_unbounded_leaf_is_not_flagged_truncated() -> None:
 
     assert result.tool_calls[0].truncated is False
     assert result.outcome.data is not None and "truncated" not in result.outcome.data
+
+
+# --- provisional usage and output truncation ---------------------------------------
+
+
+def _provisional(input_tokens: int = 70) -> ProviderEvent:
+    return ProviderEvent(
+        type="usage",
+        input_tokens=input_tokens,
+        output_tokens=0,
+        cache_read_tokens=9,
+        provisional=True,
+    )
+
+
+def _long_budget() -> TurnBudget:
+    return TurnBudget.from_spec(TurnBudgetSpec(max_tool_calls=25, max_wall_clock_seconds=60.0))
+
+
+def _subagent_records(result: SubagentRunResult) -> list[InvocationAttribution]:
+    return [i for i in result.invocations if i.tier == SUBAGENT_TIER]
+
+
+@pytest.mark.parametrize("truncated", [True, False])
+def test_a_final_usage_supersedes_the_provisional_and_carries_its_truncation(
+    truncated: bool,
+) -> None:
+    spec, _tool_name = _spec_and_tool()
+    budget = _long_budget()
+    result = _run_bounded(
+        provider=_ScriptedEventsProvider(
+            events=[
+                _provisional(),
+                ProviderEvent(
+                    type="usage", input_tokens=70, output_tokens=16, output_truncated=truncated
+                ),
+            ]
+        ),
+        actor=_FakeActor(output=_ok(items=[]), role=spec.role),
+        budget=budget,
+        spec=spec,
+    )
+    [record] = _subagent_records(result)
+    assert record.tokens == TokenCounts(input_tokens=70, output_tokens=16)
+    assert record.output_truncated is truncated
+    assert budget.calls_without_usage == 0
+
+
+def test_a_round_cut_at_the_deadline_after_provisional_usage_records_it_as_a_lower_bound() -> None:
+    spec, _tool_name = _spec_and_tool()
+    budget = _short_budget()
+    result = _run_bounded(
+        provider=_ScriptedEventsProvider(events=[_provisional()], stall=True),
+        actor=_FakeActor(output=_ok(items=[]), role=spec.role),
+        budget=budget,
+        spec=spec,
+    )
+    assert budget.is_deadline_expired()
+    [record] = _subagent_records(result)
+    assert record.tokens == TokenCounts(input_tokens=70, output_tokens=0)
+    assert record.cache.read_tokens == 9
+    assert record.output_truncated is False
+    assert budget.calls_without_usage == 1
+
+
+def test_a_round_ending_on_an_error_after_provisional_usage_records_it_and_notes_it() -> None:
+    spec, _tool_name = _spec_and_tool()
+    budget = _long_budget()
+    result = _run_bounded(
+        provider=_ScriptedEventsProvider(events=[_provisional(), _error_event()]),
+        actor=_FakeActor(output=_ok(items=[]), role=spec.role),
+        budget=budget,
+        spec=spec,
+    )
+    [record] = _subagent_records(result)
+    assert record.tokens == TokenCounts(input_tokens=70, output_tokens=0)
+    assert budget.calls_without_usage == 1

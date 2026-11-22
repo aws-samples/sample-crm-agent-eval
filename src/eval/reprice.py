@@ -119,6 +119,9 @@ def attribution_from_entry(entry: Mapping[str, object]) -> InvocationAttribution
         tokens = cast(Mapping[str, object], entry["tokens"])
         cache = cast(Mapping[str, object], entry["cache"])
         latency = entry.get("latency_ms")
+        output_truncated = entry["output_truncated"]
+        if not isinstance(output_truncated, bool):
+            raise TypeError(f"output_truncated is not a boolean: {output_truncated!r}")
         return InvocationAttribution(
             tier=cast(Tier, entry["tier"]),
             role=str(entry["role"]),
@@ -132,6 +135,7 @@ def attribution_from_entry(entry: Mapping[str, object]) -> InvocationAttribution
                 write_tokens=int(cast(int, cache["write_tokens"])),
             ),
             latency_ms=None if latency is None else float(cast(float, latency)),
+            output_truncated=output_truncated,
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise RepriceRefused(

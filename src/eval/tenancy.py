@@ -13,7 +13,7 @@ the reaper finds it.
 - :func:`teardown_tenant` wraps :meth:`crm.store.store.Store.delete_tenant` and raises
   :class:`TenantTeardownError` on failure.
 - :func:`seed_unit_tenants` and :func:`teardown_unit_tenants` seed and tear down a run's unit
-  tenants; teardown attempts every tenant before raising the first failure.
+  tenants; teardown attempts every tenant, then reports every failure.
 - :func:`find_orphaned_runs` and :func:`reap_tenant` back ``scripts/reap_eval_tenants.py``.
 
 Every function that seeds, records against, or tears down a tenant refuses both
@@ -533,19 +533,60 @@ def _teardown_each(store: Store, tenants: Sequence[str]) -> tuple[dict[str, int]
     return totals, failures
 
 
-def teardown_unit_tenants(store: Store, *, tenants: Sequence[str]) -> None:
-    """Tear down every tenant in ``tenants`` with :func:`teardown_tenant`, then raise the first failure.
+class UnitTenantTeardownError(TenantTeardownError):
+    """Raised when scoped teardown of more than one unit tenant failed; the message lists each.
 
-    A failure on one tenant does not stop the others from being attempted.
+    Attributes:
+        failures: Every :class:`TenantTeardownError`, in the order the tenants were attempted.
+        tenant: The first failing tenant.
+        deleted: Always ``None``; each failure carries its own counts.
+    """
+
+    def __init__(self, failures: Sequence[TenantTeardownError]) -> None:
+        if len(failures) < 2:
+            raise ValueError("UnitTenantTeardownError aggregates at least two failures")
+        Exception.__init__(
+            self,
+            f"teardown of {len(failures)} unit tenants failed: "
+            + "; ".join(str(failure) for failure in failures),
+        )
+        self.failures: tuple[TenantTeardownError, ...] = tuple(failures)
+        self.tenant = failures[0].tenant
+        self.deleted = None
+        self.__cause__ = failures[0]
+
+
+def teardown_unit_tenants(store: Store, *, tenants: Sequence[str]) -> None:
+    """Tear down every tenant in ``tenants`` with :func:`teardown_tenant`, then report every failure.
+
+    A failure on one tenant does not stop the others from being attempted. A single failure is
+    raised unchanged. Several deletion failures raise one :class:`UnitTenantTeardownError` listing
+    them all. When any failure is a canary breach or a protected-tenant refusal, the first canary
+    breach (else the first refusal) is raised with a note naming every other failure, so neither
+    is ever reported as a plain deletion failure.
 
     Raises:
-        ValueError: A tenant is protected (raised for that tenant; the rest are still attempted).
-        TenantTeardownError: A deletion failed.
         CanaryTenantNotEmptyError: Deletion succeeded but the ``canary`` bystander holds a row.
+        ValueError: A tenant is protected.
+        TenantTeardownError: One deletion failed.
+        UnitTenantTeardownError: Several deletions failed.
     """
     _, failures = _teardown_each(store, tenants)
-    if failures:
+    if not failures:
+        return
+    if len(failures) == 1:
         raise failures[0]
+    deletion_failures = [f for f in failures if isinstance(f, TenantTeardownError)]
+    if len(deletion_failures) == len(failures):
+        raise UnitTenantTeardownError(deletion_failures)
+    primary = next(
+        (f for f in failures if isinstance(f, CanaryTenantNotEmptyError)),
+        next(f for f in failures if not isinstance(f, TenantTeardownError)),
+    )
+    for other in failures:
+        if other is not primary:
+            primary.add_note(f"unit tenant teardown also failed: {type(other).__name__}: {other}")
+    raise primary
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,6 +732,7 @@ __all__ = [
     "FixtureSeeder",
     "OrphanedRun",
     "TenantTeardownError",
+    "UnitTenantTeardownError",
     "allocate_run_id",
     "assert_canary_empty",
     "find_canary_records",
